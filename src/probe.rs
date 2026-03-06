@@ -12,6 +12,7 @@ pub struct MediaInfo {
     pub width: u32,
     pub height: u32,
     pub bitrate_kbps: u32,
+    pub duration_secs: f64,
     pub has_audio: bool,
     pub has_subtitles: bool,
 }
@@ -42,6 +43,7 @@ struct FfprobeTags {
 #[derive(Deserialize)]
 struct FfprobeFormat {
     bit_rate: Option<String>,
+    duration: Option<String>,
 }
 
 pub fn probe_file(path: &Path) -> Result<MediaInfo> {
@@ -100,6 +102,13 @@ pub fn probe_file(path: &Path) -> Result<MediaInfo> {
         })
         .unwrap_or(0);
 
+    let duration_secs = probe
+        .format
+        .as_ref()
+        .and_then(|f| f.duration.as_ref())
+        .and_then(|d| d.parse::<f64>().ok())
+        .unwrap_or(0.0);
+
     let has_audio = probe
         .streams
         .iter()
@@ -115,6 +124,7 @@ pub fn probe_file(path: &Path) -> Result<MediaInfo> {
         width,
         height,
         bitrate_kbps,
+        duration_secs,
         has_audio,
         has_subtitles,
     })
@@ -149,7 +159,7 @@ mod tests {
     fn make_target() -> TargetConfig {
         TargetConfig {
             codec: "hevc".to_string(),
-            quality: 22,
+            quality: 28,
             preset: "slow".to_string(),
             max_width: 3840,
             max_height: 2160,
@@ -167,6 +177,7 @@ mod tests {
             width: 1280,
             height: 720,
             bitrate_kbps: 800,
+            duration_secs: 420.0,
             has_audio: true,
             has_subtitles: false,
         };
@@ -180,6 +191,7 @@ mod tests {
             width: 1280,
             height: 720,
             bitrate_kbps: 800,
+            duration_secs: 420.0,
             has_audio: true,
             has_subtitles: false,
         };
@@ -193,6 +205,7 @@ mod tests {
             width: 7680,
             height: 4320,
             bitrate_kbps: 800,
+            duration_secs: 420.0,
             has_audio: true,
             has_subtitles: false,
         };
@@ -208,6 +221,7 @@ mod tests {
             width: 1280,
             height: 720,
             bitrate_kbps: 800,
+            duration_secs: 420.0,
             has_audio: true,
             has_subtitles: false,
         };
@@ -223,6 +237,7 @@ mod tests {
             width: 1280,
             height: 720,
             bitrate_kbps: 800,
+            duration_secs: 420.0,
             has_audio: true,
             has_subtitles: false,
         };

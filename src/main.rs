@@ -77,7 +77,7 @@ fn process_file(
         Some(transcode::output_path(file, out_dir, &cfg.target.container)?)
     };
 
-    match transcode::transcode(file, output_path.as_deref(), &cfg.target, gpu) {
+    match transcode::transcode(file, output_path.as_deref(), &cfg.target, gpu, info.bitrate_kbps, info.duration_secs) {
         Ok(out) => {
             println!("  -> {:?}", out);
             *transcoded += 1;

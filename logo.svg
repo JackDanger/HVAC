@@ -48,7 +48,7 @@
 
   <!-- Subtitle -->
   <text x="200" y="82" text-anchor="middle" font-family="monospace, Courier" font-size="13" fill="#aaa">
-    media transcoding that doesn't suck
+    media transcoding that I could figure out
   </text>
 
   <!-- Scanning line animation -->
