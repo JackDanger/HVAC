@@ -1,7 +1,9 @@
 use anyhow::{bail, Context, Result};
+use indicatif::ProgressBar;
+use std::io::BufRead;
 use std::os::unix::fs::{chown, MetadataExt};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use crate::config::TargetConfig;
 use crate::gpu::{GpuInfo, GpuKind};
@@ -28,6 +30,7 @@ pub fn output_path(source: &Path, output_dir: Option<&Path>, container: &str) ->
 /// Transcode a file using ffmpeg with GPU acceleration.
 /// If `output` is None, transcode in-place (to a temp file, then replace original).
 /// `source_bitrate_kbps` is used to cap the output so we never produce a larger file.
+/// If `progress` is provided, ffmpeg progress is parsed and the bar is updated in real time.
 pub fn transcode(
     source: &Path,
     output: Option<&Path>,
@@ -35,6 +38,7 @@ pub fn transcode(
     gpu: &GpuInfo,
     source_bitrate_kbps: u32,
     source_duration_secs: f64,
+    progress: Option<&ProgressBar>,
 ) -> Result<PathBuf> {
     let final_output = match output {
         Some(p) => p.to_path_buf(),
@@ -114,18 +118,69 @@ pub fn transcode(
     cmd.args(["-map", "0:a?"]);  // all audio streams
     cmd.args(["-map", "0:s?"]);  // all subtitle streams
 
+    // Progress reporting
+    if progress.is_some() {
+        cmd.args(["-progress", "pipe:1", "-nostats"]);
+    }
+
     // Output
     cmd.arg(&final_output);
 
     log::info!("Running: {:?}", cmd);
 
-    let status = cmd
-        .status()
-        .context("Failed to execute ffmpeg")?;
+    if let Some(bar) = progress {
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
 
-    if !status.success() {
-        let _ = std::fs::remove_file(&final_output);
-        bail!("ffmpeg exited with status: {}", status);
+        let mut child = cmd.spawn().context("Failed to execute ffmpeg")?;
+        let stdout = child.stdout.take().unwrap();
+        let stderr = child.stderr.take().unwrap();
+
+        // Drain stderr in background to avoid deadlock
+        let stderr_handle = std::thread::spawn(move || {
+            let mut buf = String::new();
+            std::io::Read::read_to_string(&mut std::io::BufReader::new(stderr), &mut buf).ok();
+            buf
+        });
+
+        // Parse ffmpeg progress from stdout
+        let reader = std::io::BufReader::new(stdout);
+        let duration_us = (source_duration_secs * 1_000_000.0) as i64;
+
+        for line in reader.lines().map_while(Result::ok) {
+            if let Some(time_str) = line.strip_prefix("out_time_us=") {
+                if let Ok(us) = time_str.parse::<i64>() {
+                    if duration_us > 0 && us > 0 {
+                        let pos = ((us as f64 / duration_us as f64) * 1000.0)
+                            .clamp(0.0, 1000.0) as u64;
+                        bar.set_position(pos);
+                    }
+                }
+            } else if let Some(speed_str) = line.strip_prefix("speed=") {
+                let speed = speed_str.trim().trim_end_matches('x');
+                if speed != "N/A" && !speed.is_empty() {
+                    bar.set_prefix(format!("{speed}x"));
+                }
+            }
+        }
+
+        let status = child.wait().context("Failed to wait for ffmpeg")?;
+        let stderr_output = stderr_handle.join().unwrap_or_default();
+
+        if !status.success() {
+            let _ = std::fs::remove_file(&final_output);
+            let last_line = stderr_output.lines().last().unwrap_or("unknown error");
+            bail!("ffmpeg exited with status {}: {}", status, last_line);
+        }
+    } else {
+        let status = cmd
+            .status()
+            .context("Failed to execute ffmpeg")?;
+
+        if !status.success() {
+            let _ = std::fs::remove_file(&final_output);
+            bail!("ffmpeg exited with status: {}", status);
+        }
     }
 
     // Validate the output before considering it done
