@@ -9,8 +9,11 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
+
+const MAX_RETRIES: u32 = 3;
+const RETRY_DELAY_SECS: u64 = 10;
 
 #[derive(Parser, Debug)]
 #[command(name = "tdorr", about = "Media transcoder that I could figure out")]
@@ -37,6 +40,10 @@ struct Cli {
     /// Output directory for transcoded files (overrides config)
     #[arg(short, long)]
     output_dir: Option<PathBuf>,
+
+    /// Replace originals with transcoded copies after all encodes complete
+    #[arg(long, default_value_t = false)]
+    replace: bool,
 }
 
 /// File ready to transcode, with pre-probed metadata.
@@ -44,6 +51,8 @@ struct WorkItem {
     path: PathBuf,
     bitrate_kbps: u32,
     duration_secs: f64,
+    pix_fmt: String,
+    source_size: u64,
 }
 
 fn truncate_name(name: &str, max_len: usize) -> String {
@@ -52,6 +61,16 @@ fn truncate_name(name: &str, max_len: usize) -> String {
     } else {
         let truncated: String = name.chars().take(max_len - 1).collect();
         format!("{truncated}…")
+    }
+}
+
+fn format_size(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 * 1024 {
+        format!("{:.1}GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+    } else if bytes >= 1024 * 1024 {
+        format!("{:.0}MB", bytes as f64 / (1024.0 * 1024.0))
+    } else {
+        format!("{:.0}KB", bytes as f64 / 1024.0)
     }
 }
 
@@ -129,6 +148,7 @@ fn main() -> Result<()> {
     eprintln!("Scanning {} files...", expanded.len());
     let mut to_transcode: Vec<WorkItem> = Vec::new();
     let mut skipped = 0u32;
+    let mut resumed = 0u32;
 
     for file in &expanded {
         match probe::probe_file(file) {
@@ -136,10 +156,29 @@ fn main() -> Result<()> {
                 if probe::meets_target(&info, &cfg.target) {
                     skipped += 1;
                 } else {
+                    let source_size = std::fs::metadata(file).map(|m| m.len()).unwrap_or(0);
+
+                    // Resume: check if output already exists and is valid
+                    if !cli.overwrite {
+                        let out_dir = cli.output_dir.as_deref().or(cfg.output_dir.as_deref());
+                        if let Ok(out_path) =
+                            transcode::output_path(file, out_dir, &cfg.target.container)
+                        {
+                            if transcode::output_already_valid(&out_path, file, info.duration_secs)
+                            {
+                                log::info!("Resuming: {:?} already transcoded, skipping", file);
+                                resumed += 1;
+                                continue;
+                            }
+                        }
+                    }
+
                     to_transcode.push(WorkItem {
                         path: file.clone(),
                         bitrate_kbps: info.bitrate_kbps,
                         duration_secs: info.duration_secs,
+                        pix_fmt: info.pix_fmt,
+                        source_size,
                     });
                 }
             }
@@ -151,30 +190,54 @@ fn main() -> Result<()> {
     }
 
     if to_transcode.is_empty() {
-        eprintln!(
-            "All {} files already meet target. Nothing to do.",
-            expanded.len()
-        );
+        let msg = if resumed > 0 {
+            format!(
+                "Nothing to do: {} already HEVC, {} already transcoded",
+                skipped, resumed
+            )
+        } else {
+            format!(
+                "All {} files already meet target. Nothing to do.",
+                expanded.len()
+            )
+        };
+        eprintln!("{msg}");
         let _ = std::fs::remove_dir_all(&tmp_dir);
         return Ok(());
     }
 
-    let max_sessions = gpu::max_encode_sessions(&gpu);
-    let jobs = cli.jobs.unwrap_or(max_sessions).max(1);
+    // Account for other running NVENC sessions
+    let available = gpu::available_sessions(&gpu);
+    let jobs = cli.jobs.unwrap_or(available).max(1);
 
     eprintln!(
-        "{} to transcode, {} already HEVC, {} jobs",
+        "{} to transcode, {} already HEVC{}, {} jobs",
         to_transcode.len(),
         skipped,
+        if resumed > 0 {
+            format!(", {} resumed", resumed)
+        } else {
+            String::new()
+        },
         jobs,
     );
 
     if cli.dry_run {
         for item in &to_transcode {
             let name = item.path.file_name().unwrap_or_default().to_string_lossy();
-            eprintln!("  {name} ({} kbps)", item.bitrate_kbps);
+            eprintln!(
+                "  {name} ({}, {} kbps, {})",
+                item.pix_fmt,
+                item.bitrate_kbps,
+                format_size(item.source_size)
+            );
         }
-        eprintln!("\nDry run: {} would be transcoded", to_transcode.len());
+        let total_size: u64 = to_transcode.iter().map(|i| i.source_size).sum();
+        eprintln!(
+            "\nDry run: {} would be transcoded ({})",
+            to_transcode.len(),
+            format_size(total_size)
+        );
         let _ = std::fs::remove_dir_all(&tmp_dir);
         return Ok(());
     }
@@ -210,6 +273,9 @@ fn main() -> Result<()> {
 
     let transcoded = Arc::new(AtomicU32::new(0));
     let error_count = Arc::new(AtomicU32::new(errors));
+    let bytes_saved = Arc::new(AtomicU64::new(0));
+    let bytes_input = Arc::new(AtomicU64::new(0));
+    let bytes_output = Arc::new(AtomicU64::new(0));
     let to_transcode = Arc::new(to_transcode);
     let next_idx = Arc::new(AtomicU32::new(0));
     let cfg = Arc::new(cfg);
@@ -223,6 +289,9 @@ fn main() -> Result<()> {
             let next_idx = Arc::clone(&next_idx);
             let transcoded = Arc::clone(&transcoded);
             let error_count = Arc::clone(&error_count);
+            let bytes_saved = Arc::clone(&bytes_saved);
+            let bytes_input = Arc::clone(&bytes_input);
+            let bytes_output = Arc::clone(&bytes_output);
             let cfg = Arc::clone(&cfg);
             let gpu = Arc::clone(&gpu);
             let bar = worker_bar.clone();
@@ -263,22 +332,61 @@ fn main() -> Result<()> {
                     }
                 };
 
-                match transcode::transcode(
-                    &item.path,
-                    output_path.as_deref(),
-                    &cfg.target,
-                    &gpu,
-                    item.bitrate_kbps,
-                    item.duration_secs,
-                    Some(&bar),
-                ) {
-                    Ok(_) => {
-                        transcoded.fetch_add(1, Ordering::Relaxed);
+                // Retry loop for transient NVENC errors
+                let mut last_err = None;
+                for attempt in 0..=MAX_RETRIES {
+                    if attempt > 0 {
+                        bar.set_prefix(format!("retry {attempt}/{MAX_RETRIES}"));
+                        bar.set_position(0);
+                        std::thread::sleep(std::time::Duration::from_secs(
+                            RETRY_DELAY_SECS * attempt as u64,
+                        ));
                     }
-                    Err(e) => {
-                        log::error!("Failed to transcode {:?}: {}", item.path, e);
-                        error_count.fetch_add(1, Ordering::Relaxed);
+
+                    match transcode::transcode(
+                        &item.path,
+                        output_path.as_deref(),
+                        &cfg.target,
+                        &gpu,
+                        item.bitrate_kbps,
+                        item.duration_secs,
+                        &item.pix_fmt,
+                        Some(&bar),
+                    ) {
+                        Ok(out_path) => {
+                            let out_size = transcode::output_size(&out_path);
+                            bytes_input.fetch_add(item.source_size, Ordering::Relaxed);
+                            bytes_output.fetch_add(out_size, Ordering::Relaxed);
+                            if item.source_size > out_size {
+                                bytes_saved
+                                    .fetch_add(item.source_size - out_size, Ordering::Relaxed);
+                            }
+                            transcoded.fetch_add(1, Ordering::Relaxed);
+                            last_err = None;
+                            break;
+                        }
+                        Err(e) => {
+                            let err_str = e.to_string();
+                            if attempt < MAX_RETRIES && transcode::is_session_limit_error(&err_str)
+                            {
+                                log::warn!(
+                                    "NVENC session limit hit for {:?}, retry {}/{}",
+                                    item.path,
+                                    attempt + 1,
+                                    MAX_RETRIES
+                                );
+                                last_err = Some(e);
+                                continue;
+                            }
+                            last_err = Some(e);
+                            break;
+                        }
                     }
+                }
+
+                if let Some(e) = last_err {
+                    log::error!("Failed to transcode {:?}: {}", item.path, e);
+                    error_count.fetch_add(1, Ordering::Relaxed);
                 }
 
                 main_bar.inc(1);
@@ -288,16 +396,62 @@ fn main() -> Result<()> {
 
     main_bar.finish_and_clear();
 
+    // --- Phase 4: Replace originals if --replace ---
+    let mut replaced = 0u32;
+    let mut replace_saved: u64 = 0;
+
+    if cli.replace && !overwrite {
+        eprintln!("Replacing originals with transcoded copies...");
+        for item in to_transcode.iter() {
+            let out_dir = cli.output_dir.as_deref().or(cfg.output_dir.as_deref());
+            if let Ok(out_path) = transcode::output_path(&item.path, out_dir, &cfg.target.container)
+            {
+                if out_path.exists() {
+                    match transcode::replace_original(&item.path, &out_path, item.duration_secs) {
+                        Ok(saved) => {
+                            replaced += 1;
+                            replace_saved += saved;
+                        }
+                        Err(e) => {
+                            log::error!("Failed to replace {:?}: {}", item.path, e);
+                        }
+                    }
+                }
+            }
+        }
+        if replaced > 0 {
+            eprintln!(
+                "Replaced {} originals (saved {})",
+                replaced,
+                format_size(replace_saved)
+            );
+        }
+    }
+
     // Clean up temp extraction dir
     let _ = std::fs::remove_dir_all(&tmp_dir);
 
     let final_transcoded = transcoded.load(Ordering::Relaxed);
     let final_errors = error_count.load(Ordering::Relaxed);
+    let total_saved = bytes_saved.load(Ordering::Relaxed);
+    let total_input = bytes_input.load(Ordering::Relaxed);
+    let total_output = bytes_output.load(Ordering::Relaxed);
 
     eprintln!(
         "\nDone: {} transcoded, {} skipped, {} errors",
         final_transcoded, skipped, final_errors
     );
+
+    if total_input > 0 {
+        let pct = (total_saved as f64 / total_input as f64) * 100.0;
+        eprintln!(
+            "Size: {} -> {} (saved {}, {:.0}% reduction)",
+            format_size(total_input),
+            format_size(total_output),
+            format_size(total_saved),
+            pct
+        );
+    }
 
     Ok(())
 }

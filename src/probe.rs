@@ -13,6 +13,7 @@ pub struct MediaInfo {
     pub height: u32,
     pub bitrate_kbps: u32,
     pub duration_secs: f64,
+    pub pix_fmt: String,
     pub has_audio: bool,
     pub has_subtitles: bool,
 }
@@ -30,6 +31,7 @@ struct FfprobeStream {
     codec_type: Option<String>,
     width: Option<u32>,
     height: Option<u32>,
+    pix_fmt: Option<String>,
     #[serde(default)]
     tags: Option<FfprobeTags>,
 }
@@ -85,6 +87,11 @@ pub fn probe_file(path: &Path) -> Result<MediaInfo> {
     let width = video_stream.width.unwrap_or(0);
     let height = video_stream.height.unwrap_or(0);
 
+    let pix_fmt = video_stream
+        .pix_fmt
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+
     // Try to get bitrate from stream tags first, then from format
     let bitrate_kbps = video_stream
         .tags
@@ -125,6 +132,7 @@ pub fn probe_file(path: &Path) -> Result<MediaInfo> {
         height,
         bitrate_kbps,
         duration_secs,
+        pix_fmt,
         has_audio,
         has_subtitles,
     })
@@ -152,6 +160,17 @@ pub fn meets_target(info: &MediaInfo, target: &TargetConfig) -> bool {
     true
 }
 
+/// Returns true if the pixel format is 10-bit (or higher).
+pub fn is_10bit(pix_fmt: &str) -> bool {
+    pix_fmt.contains("10le")
+        || pix_fmt.contains("10be")
+        || pix_fmt.contains("12le")
+        || pix_fmt.contains("12be")
+        || pix_fmt == "p010"
+        || pix_fmt == "p010le"
+        || pix_fmt == "p010be"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,77 +189,63 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_meets_target_hevc_within_bounds() {
-        let info = MediaInfo {
-            codec: "hevc".to_string(),
-            width: 1280,
-            height: 720,
-            bitrate_kbps: 800,
+    fn make_info(codec: &str, width: u32, height: u32, bitrate_kbps: u32) -> MediaInfo {
+        MediaInfo {
+            codec: codec.to_string(),
+            width,
+            height,
+            bitrate_kbps,
             duration_secs: 420.0,
+            pix_fmt: "yuv420p".to_string(),
             has_audio: true,
             has_subtitles: false,
-        };
-        assert!(meets_target(&info, &make_target()));
+        }
+    }
+
+    #[test]
+    fn test_meets_target_hevc_within_bounds() {
+        assert!(meets_target(
+            &make_info("hevc", 1280, 720, 800),
+            &make_target()
+        ));
     }
 
     #[test]
     fn test_fails_target_not_hevc() {
-        let info = MediaInfo {
-            codec: "h264".to_string(),
-            width: 1280,
-            height: 720,
-            bitrate_kbps: 800,
-            duration_secs: 420.0,
-            has_audio: true,
-            has_subtitles: false,
-        };
-        assert!(!meets_target(&info, &make_target()));
+        assert!(!meets_target(
+            &make_info("h264", 1280, 720, 800),
+            &make_target()
+        ));
     }
 
     #[test]
     fn test_fails_target_too_large() {
-        let info = MediaInfo {
-            codec: "hevc".to_string(),
-            width: 7680,
-            height: 4320,
-            bitrate_kbps: 800,
-            duration_secs: 420.0,
-            has_audio: true,
-            has_subtitles: false,
-        };
-        assert!(!meets_target(&info, &make_target()));
+        assert!(!meets_target(
+            &make_info("hevc", 7680, 4320, 800),
+            &make_target()
+        ));
     }
 
     #[test]
     fn test_fails_target_bitrate_too_high() {
         let mut target = make_target();
         target.max_bitrate_kbps = 500;
-        let info = MediaInfo {
-            codec: "hevc".to_string(),
-            width: 1280,
-            height: 720,
-            bitrate_kbps: 800,
-            duration_secs: 420.0,
-            has_audio: true,
-            has_subtitles: false,
-        };
-        assert!(!meets_target(&info, &target));
+        assert!(!meets_target(&make_info("hevc", 1280, 720, 800), &target));
     }
 
     #[test]
     fn test_meets_target_bitrate_within_limit() {
         let mut target = make_target();
         target.max_bitrate_kbps = 1000;
-        let info = MediaInfo {
-            codec: "hevc".to_string(),
-            width: 1280,
-            height: 720,
-            bitrate_kbps: 800,
-            duration_secs: 420.0,
-            has_audio: true,
-            has_subtitles: false,
-        };
-        assert!(meets_target(&info, &target));
+        assert!(meets_target(&make_info("hevc", 1280, 720, 800), &target));
+    }
+
+    #[test]
+    fn test_is_10bit() {
+        assert!(is_10bit("yuv420p10le"));
+        assert!(is_10bit("p010le"));
+        assert!(is_10bit("yuv444p10be"));
+        assert!(!is_10bit("yuv420p"));
+        assert!(!is_10bit("nv12"));
     }
 }

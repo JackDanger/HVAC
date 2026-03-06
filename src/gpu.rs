@@ -100,6 +100,70 @@ pub fn max_encode_sessions(gpu: &GpuInfo) -> usize {
     }
 }
 
+/// Count active NVENC encode sessions by looking for running ffmpeg hevc_nvenc processes.
+/// Returns the number of sessions used by OTHER processes (not our own).
+pub fn active_nvenc_sessions() -> usize {
+    let output = Command::new("ps").args(["ax", "-o", "pid,args"]).output();
+
+    let own_pid = std::process::id();
+
+    match output {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            stdout
+                .lines()
+                .filter(|line| {
+                    line.contains("hevc_nvenc") && !line.contains("grep") && {
+                        // Exclude our own child processes
+                        line.split_whitespace()
+                            .next()
+                            .and_then(|pid| pid.parse::<u32>().ok())
+                            .map(|pid| {
+                                // Check if this process's parent is us
+                                !is_child_of(pid, own_pid)
+                            })
+                            .unwrap_or(true)
+                    }
+                })
+                .count()
+        }
+        Err(_) => 0,
+    }
+}
+
+/// Check if `pid` is a child of `parent_pid` by reading /proc/pid/stat.
+fn is_child_of(pid: u32, parent_pid: u32) -> bool {
+    // On Linux, read /proc/pid/stat to find ppid
+    if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        // Format: pid (comm) state ppid ...
+        // Find the closing ) then parse ppid
+        if let Some(after_comm) = stat.rfind(')') {
+            let fields: Vec<&str> = stat[after_comm + 2..].split_whitespace().collect();
+            if let Some(ppid) = fields.get(1).and_then(|s| s.parse::<u32>().ok()) {
+                return ppid == parent_pid;
+            }
+        }
+    }
+    // On macOS, fall back to assuming not a child
+    false
+}
+
+/// Return available encode sessions (max minus active external sessions).
+pub fn available_sessions(gpu: &GpuInfo) -> usize {
+    let max = max_encode_sessions(gpu);
+    if gpu.kind != GpuKind::Nvidia {
+        return max;
+    }
+    let active = active_nvenc_sessions();
+    if active > 0 {
+        log::info!(
+            "Detected {} active NVENC sessions from other processes",
+            active
+        );
+    }
+    max.saturating_sub(active).max(1)
+}
+
 fn detect_nvidia() -> Result<String> {
     let output = Command::new("nvidia-smi")
         .arg("--query-gpu=name")
@@ -191,6 +255,13 @@ mod tests {
             kind: GpuKind::Nvidia,
         };
         assert_eq!(max_encode_sessions(&gpu), 4);
+    }
+
+    #[test]
+    fn test_active_nvenc_sessions_returns_number() {
+        // Just verify it doesn't panic
+        let count = active_nvenc_sessions();
+        assert!(count < 100, "unreasonable session count: {count}");
     }
 
     #[test]
