@@ -12,6 +12,7 @@ pub struct GpuInfo {
 pub enum GpuKind {
     Nvidia,
     Intel,
+    Apple,
 }
 
 /// Detect available GPU for h265 encoding.
@@ -43,15 +44,28 @@ pub fn detect_gpu() -> Result<GpuInfo> {
         log::warn!("Intel GPU found but hevc_vaapi not available in ffmpeg");
     }
 
+    // Check for Apple VideoToolbox (macOS)
+    if detect_apple_gpu() {
+        if has_ffmpeg_encoder("hevc_videotoolbox") {
+            return Ok(GpuInfo {
+                name: detect_apple_chip_name(),
+                encoder: "hevc_videotoolbox".to_string(),
+                kind: GpuKind::Apple,
+            });
+        }
+        log::warn!("Apple GPU found but hevc_videotoolbox not available in ffmpeg");
+    }
+
     bail!(
         "No GPU found for h265 encoding!\n\
-         tdorr requires either:\n\
+         tdorr requires one of:\n\
          - NVIDIA GPU with NVENC support (hevc_nvenc)\n\
          - Intel GPU with VAAPI support (hevc_vaapi)\n\
+         - Apple Silicon or Mac with VideoToolbox (hevc_videotoolbox)\n\
          \n\
          Check that:\n\
          1. A supported GPU is installed\n\
-         2. Drivers are loaded (nvidia-smi or vainfo)\n\
+         2. Drivers are loaded (nvidia-smi, vainfo, or macOS)\n\
          3. ffmpeg is built with the appropriate encoder"
     )
 }
@@ -78,6 +92,28 @@ fn detect_intel_gpu() -> bool {
     std::path::Path::new("/dev/dri/renderD128").exists()
 }
 
+fn detect_apple_gpu() -> bool {
+    cfg!(target_os = "macos")
+}
+
+fn detect_apple_chip_name() -> String {
+    let output = Command::new("sysctl")
+        .arg("-n")
+        .arg("machdep.cpu.brand_string")
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => {
+            let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !name.is_empty() {
+                return format!("Apple ({})", name);
+            }
+        }
+        _ => {}
+    }
+    "Apple GPU (VideoToolbox)".to_string()
+}
+
 fn has_ffmpeg_encoder(encoder: &str) -> bool {
     let output = Command::new("ffmpeg")
         .args(["-hide_banner", "-encoders"])
@@ -102,7 +138,8 @@ mod tests {
         // At minimum, libx265 should be available
         let has_any = has_ffmpeg_encoder("libx265")
             || has_ffmpeg_encoder("hevc_nvenc")
-            || has_ffmpeg_encoder("hevc_vaapi");
+            || has_ffmpeg_encoder("hevc_vaapi")
+            || has_ffmpeg_encoder("hevc_videotoolbox");
         assert!(has_any, "ffmpeg should have at least one h265 encoder");
     }
 

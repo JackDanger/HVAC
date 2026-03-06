@@ -89,6 +89,14 @@ pub fn transcode(
             }
             cmd.args(["-vf", "format=nv12,hwupload"]);
         }
+        GpuKind::Apple => {
+            cmd.args(["-c:v", "hevc_videotoolbox"]);
+            cmd.args(["-q:v", &target.quality.to_string()]);
+            if source_bitrate_kbps > 0 {
+                cmd.args(["-maxrate", &format!("{}k", source_bitrate_kbps)]);
+                cmd.args(["-bufsize", &format!("{}k", source_bitrate_kbps * 2)]);
+            }
+        }
     }
 
     // Audio
