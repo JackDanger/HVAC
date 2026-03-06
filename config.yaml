@@ -1,0 +1,37 @@
+# tdorr default configuration
+# Target encoding: super high quality, highly compressed h265
+
+target:
+  codec: hevc
+  # CQ mode (constant quality) - lower = better quality, higher = smaller files
+  # 20-24 is visually lossless for most content
+  quality: 22
+  preset: slow
+  # Max resolution - files at or below this are kept as-is
+  max_width: 3840
+  max_height: 2160
+  # Max bitrate in kbps - 0 means no limit (let CQ decide)
+  max_bitrate_kbps: 0
+  # Container format
+  container: mkv
+  # Audio: copy by default (no re-encode)
+  audio_codec: copy
+  # Subtitle handling: copy all subtitle streams
+  subtitle_codec: copy
+
+# File extensions to consider for transcoding
+media_extensions:
+  - mkv
+  - mp4
+  - avi
+  - ts
+  - m2ts
+  - wmv
+  - flv
+  - mov
+  - iso
+  - img
+
+# Output directory for transcoded files (relative to source or absolute)
+# If not set, files are placed next to originals with .transcoded suffix
+# output_dir: /mnt/media/transcoded

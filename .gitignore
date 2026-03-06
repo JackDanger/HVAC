@@ -1,0 +1,5 @@
+/target
+/tdorr
+*.swp
+*.swo
+.DS_Store
