@@ -3,11 +3,21 @@ use indicatif::ProgressBar;
 use std::io::BufRead;
 use std::os::unix::fs::{chown, MetadataExt};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 
 use crate::config::TargetConfig;
 use crate::gpu::{GpuInfo, GpuKind};
 use crate::probe;
+
+/// Guard that kills the ffmpeg child process on drop (prevents orphans).
+struct ChildGuard(Child);
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
 
 /// Determine the output path for a transcoded file.
 /// If `output_dir` is Some, place the file there preserving the filename.
@@ -27,10 +37,21 @@ pub fn output_path(source: &Path, output_dir: Option<&Path>, container: &str) ->
     }
 }
 
+/// Check if an existing output file is a valid, complete transcode of the source.
+/// Used for resume: if output already exists and passes validation, skip re-encoding.
+pub fn output_already_valid(output: &Path, source: &Path, source_duration_secs: f64) -> bool {
+    if !output.exists() {
+        return false;
+    }
+    validate_output(output, source, source_duration_secs).is_ok()
+}
+
 /// Transcode a file using ffmpeg with GPU acceleration.
 /// If `output` is None, transcode in-place (to a temp file, then replace original).
 /// `source_bitrate_kbps` is used to cap the output so we never produce a larger file.
+/// `source_pix_fmt` is used to handle 10-bit content that needs pixel format conversion.
 /// If `progress` is provided, ffmpeg progress is parsed and the bar is updated in real time.
+#[allow(clippy::too_many_arguments)]
 pub fn transcode(
     source: &Path,
     output: Option<&Path>,
@@ -38,6 +59,7 @@ pub fn transcode(
     gpu: &GpuInfo,
     source_bitrate_kbps: u32,
     source_duration_secs: f64,
+    source_pix_fmt: &str,
     progress: Option<&ProgressBar>,
 ) -> Result<PathBuf> {
     let final_output = match output {
@@ -53,11 +75,15 @@ pub fn transcode(
         }
     };
 
+    let source_size = std::fs::metadata(source).map(|m| m.len()).unwrap_or(0);
+
     let mut cmd = Command::new("ffmpeg");
     cmd.args(["-hide_banner", "-y"]);
 
     // Input
     cmd.args(["-i"]).arg(source);
+
+    let is_10bit = probe::is_10bit(source_pix_fmt);
 
     // Video encoding with GPU
     match gpu.kind {
@@ -74,12 +100,15 @@ pub fn transcode(
             cmd.args(["-rc", "vbr"]);
             cmd.args(["-cq", &target.quality.to_string()]);
             // Cap at source bitrate so we never produce a larger file.
-            // HEVC should always beat the source codec at the same bitrate.
             if source_bitrate_kbps > 0 {
                 cmd.args(["-maxrate", &format!("{}k", source_bitrate_kbps)]);
                 cmd.args(["-bufsize", &format!("{}k", source_bitrate_kbps * 2)]);
             }
             cmd.args(["-b:v", "0"]);
+            // Handle 10-bit: convert to p010le for NVENC 10-bit support
+            if is_10bit {
+                cmd.args(["-pix_fmt", "p010le"]);
+            }
         }
         GpuKind::Intel => {
             cmd.args(["-vaapi_device", "/dev/dri/renderD128"]);
@@ -89,7 +118,11 @@ pub fn transcode(
                 cmd.args(["-maxrate", &format!("{}k", source_bitrate_kbps)]);
                 cmd.args(["-bufsize", &format!("{}k", source_bitrate_kbps * 2)]);
             }
-            cmd.args(["-vf", "format=nv12,hwupload"]);
+            if is_10bit {
+                cmd.args(["-vf", "format=p010le,hwupload"]);
+            } else {
+                cmd.args(["-vf", "format=nv12,hwupload"]);
+            }
         }
         GpuKind::Apple => {
             cmd.args(["-c:v", "hevc_videotoolbox"]);
@@ -129,9 +162,9 @@ pub fn transcode(
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
 
-        let mut child = cmd.spawn().context("Failed to execute ffmpeg")?;
-        let stdout = child.stdout.take().unwrap();
-        let stderr = child.stderr.take().unwrap();
+        let mut guard = ChildGuard(cmd.spawn().context("Failed to execute ffmpeg")?);
+        let stdout = guard.0.stdout.take().unwrap();
+        let stderr = guard.0.stderr.take().unwrap();
 
         // Drain stderr in background to avoid deadlock
         let stderr_handle = std::thread::spawn(move || {
@@ -161,8 +194,11 @@ pub fn transcode(
             }
         }
 
-        let status = child.wait().context("Failed to wait for ffmpeg")?;
+        let status = guard.0.wait().context("Failed to wait for ffmpeg")?;
         let stderr_output = stderr_handle.join().unwrap_or_default();
+
+        // Disarm the guard — process has already exited
+        std::mem::forget(guard);
 
         if !status.success() {
             let _ = std::fs::remove_file(&final_output);
@@ -187,6 +223,21 @@ pub fn transcode(
     // Copy permissions (user, group, mode) from source to output
     copy_permissions(source, &final_output)?;
 
+    // Report size savings
+    let output_size = std::fs::metadata(&final_output)
+        .map(|m| m.len())
+        .unwrap_or(0);
+    if source_size > 0 && output_size > 0 {
+        let saved = source_size as i64 - output_size as i64;
+        let pct = (saved as f64 / source_size as f64) * 100.0;
+        log::info!(
+            "Size: {} -> {} ({:+.1}%)",
+            format_size(source_size),
+            format_size(output_size),
+            -pct,
+        );
+    }
+
     // If in-place mode, replace original only after validation passes
     if output.is_none() {
         std::fs::rename(&final_output, source)
@@ -195,6 +246,19 @@ pub fn transcode(
     }
 
     Ok(final_output)
+}
+
+/// Return the size of the output file, or 0 if it doesn't exist.
+pub fn output_size(path: &Path) -> u64 {
+    std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+}
+
+fn format_size(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 * 1024 {
+        format!("{:.1}GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+    } else {
+        format!("{:.0}MB", bytes as f64 / (1024.0 * 1024.0))
+    }
 }
 
 /// Copy file permissions (owner, group, mode) from source to destination.
@@ -268,6 +332,40 @@ fn validate_output(output: &Path, source: &Path, source_duration_secs: f64) -> R
     Ok(())
 }
 
+/// Check if an ffmpeg error looks like an NVENC session limit issue.
+pub fn is_session_limit_error(error_msg: &str) -> bool {
+    error_msg.contains("out of memory")
+        || error_msg.contains("InitializeEncoder failed")
+        || error_msg.contains("Cannot init NVENC")
+        || error_msg.contains("exit status: 69")
+}
+
+/// Replace an original file with its transcoded copy.
+/// Validates the transcoded file first, then atomically replaces.
+pub fn replace_original(
+    original: &Path,
+    transcoded: &Path,
+    source_duration_secs: f64,
+) -> Result<u64> {
+    if !transcoded.exists() {
+        bail!("Transcoded file does not exist: {:?}", transcoded);
+    }
+
+    // Validate again before replacing
+    validate_output(transcoded, original, source_duration_secs)?;
+
+    let original_size = std::fs::metadata(original).map(|m| m.len()).unwrap_or(0);
+    let transcoded_size = std::fs::metadata(transcoded).map(|m| m.len()).unwrap_or(0);
+
+    // Copy permissions before replacing
+    copy_permissions(original, transcoded)?;
+
+    std::fs::rename(transcoded, original)
+        .with_context(|| format!("Failed to replace {:?} with transcoded version", original))?;
+
+    Ok(original_size.saturating_sub(transcoded_size))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,5 +396,21 @@ mod tests {
             result,
             PathBuf::from("/mnt/media/show/episode.transcoded.mkv")
         );
+    }
+
+    #[test]
+    fn test_is_session_limit_error() {
+        assert!(is_session_limit_error(
+            "ffmpeg exited with status exit status: 69"
+        ));
+        assert!(is_session_limit_error("Cannot init NVENC encoder"));
+        assert!(!is_session_limit_error("some other error"));
+    }
+
+    #[test]
+    fn test_format_size() {
+        assert_eq!(format_size(1024 * 1024), "1MB");
+        assert_eq!(format_size(500 * 1024 * 1024), "500MB");
+        assert_eq!(format_size(2 * 1024 * 1024 * 1024), "2.0GB");
     }
 }
