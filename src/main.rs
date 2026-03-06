@@ -7,6 +7,7 @@ mod transcode;
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
@@ -38,73 +39,19 @@ struct Cli {
     output_dir: Option<PathBuf>,
 }
 
-struct Counters {
-    skipped: AtomicU32,
-    transcoded: AtomicU32,
-    errors: AtomicU32,
+/// File ready to transcode, with pre-probed metadata.
+struct WorkItem {
+    path: PathBuf,
+    bitrate_kbps: u32,
+    duration_secs: f64,
 }
 
-fn process_file(
-    file: &std::path::Path,
-    overwrite: bool,
-    dry_run: bool,
-    output_dir: Option<&std::path::Path>,
-    cfg: &config::Config,
-    gpu: &gpu::GpuInfo,
-    counters: &Counters,
-) {
-    let info = match probe::probe_file(file) {
-        Ok(info) => info,
-        Err(e) => {
-            log::error!("Failed to probe {:?}: {}", file, e);
-            counters.errors.fetch_add(1, Ordering::Relaxed);
-            return;
-        }
-    };
-
-    if probe::meets_target(&info, &cfg.target) {
-        log::info!("Skipping {:?} - already meets target", file);
-        counters.skipped.fetch_add(1, Ordering::Relaxed);
-        return;
-    }
-
-    println!(
-        "Transcoding: {:?} ({}, {}x{}, {} kbps)",
-        file.file_name().unwrap_or_default(),
-        info.codec,
-        info.width,
-        info.height,
-        info.bitrate_kbps,
-    );
-
-    if dry_run {
-        counters.transcoded.fetch_add(1, Ordering::Relaxed);
-        return;
-    }
-
-    let output_path = if overwrite {
-        None
+fn truncate_name(name: &str, max_len: usize) -> String {
+    if name.chars().count() <= max_len {
+        name.to_string()
     } else {
-        let out_dir = output_dir.or(cfg.output_dir.as_deref());
-        match transcode::output_path(file, out_dir, &cfg.target.container) {
-            Ok(p) => Some(p),
-            Err(e) => {
-                log::error!("Failed to compute output path for {:?}: {}", file, e);
-                counters.errors.fetch_add(1, Ordering::Relaxed);
-                return;
-            }
-        }
-    };
-
-    match transcode::transcode(file, output_path.as_deref(), &cfg.target, gpu, info.bitrate_kbps, info.duration_secs) {
-        Ok(out) => {
-            println!("  -> {:?}", out);
-            counters.transcoded.fetch_add(1, Ordering::Relaxed);
-        }
-        Err(e) => {
-            log::error!("Failed to transcode {:?}: {}", file, e);
-            counters.errors.fetch_add(1, Ordering::Relaxed);
-        }
+        let truncated: String = name.chars().take(max_len - 1).collect();
+        format!("{truncated}…")
     }
 }
 
@@ -117,33 +64,23 @@ fn main() -> Result<()> {
 
     log::info!("tdorr starting with config: {:?}", cli.config);
 
-    // Detect GPU - fail fast if none available
     let gpu = gpu::detect_gpu()?;
-    println!("GPU detected: {} (encoder: {})", gpu.name, gpu.encoder);
+    eprintln!("GPU: {} ({})", gpu.name, gpu.encoder);
 
-    // Check if isomage is needed and available
     let has_isomage = iso::isomage_available();
 
-    // Scan for media files (including .iso/.img)
     let files = scanner::scan(&cli.path, &cfg.media_extensions)?;
-    println!("Found {} media files in {:?}", files.len(), cli.path);
 
     if files.is_empty() {
-        println!("No media files found. Nothing to do.");
+        eprintln!("No media files found. Nothing to do.");
         return Ok(());
     }
 
-    let counters = Arc::new(Counters {
-        skipped: AtomicU32::new(0),
-        transcoded: AtomicU32::new(0),
-        errors: AtomicU32::new(0),
-    });
-
-    // Temp dir for extracted disc image contents (lives for duration of run)
+    // --- Phase 1: Expand disc images into flat work list ---
     let tmp_dir = std::env::temp_dir().join("tdorr_iso_extract");
+    let mut expanded: Vec<PathBuf> = Vec::new();
+    let mut errors = 0u32;
 
-    // Collect all files to process (expanding disc images)
-    let mut work: Vec<PathBuf> = Vec::new();
     for file in &files {
         if iso::is_disc_image(file) {
             if !has_isomage {
@@ -151,101 +88,225 @@ fn main() -> Result<()> {
                     "Skipping {:?}: isomage is required for .iso/.img files but not found in PATH",
                     file
                 );
-                counters.errors.fetch_add(1, Ordering::Relaxed);
+                errors += 1;
                 continue;
             }
 
-            println!("Disc image: {:?}", file.file_name().unwrap_or_default());
+            eprintln!("Disc image: {:?}", file.file_name().unwrap_or_default());
 
             let inner_files = match iso::list_media_files(file, &cfg.media_extensions) {
                 Ok(f) => f,
                 Err(e) => {
                     log::error!("Failed to list contents of {:?}: {}", file, e);
-                    counters.errors.fetch_add(1, Ordering::Relaxed);
+                    errors += 1;
                     continue;
                 }
             };
 
             if inner_files.is_empty() {
-                println!("  No media files found inside disc image");
-                counters.skipped.fetch_add(1, Ordering::Relaxed);
+                eprintln!("  No media files found inside disc image");
                 continue;
             }
 
-            println!("  Found {} media files inside", inner_files.len());
+            eprintln!("  Found {} media files inside", inner_files.len());
 
             for inner_path in &inner_files {
                 match iso::extract_file(file, inner_path, &tmp_dir) {
-                    Ok(p) => work.push(p),
+                    Ok(p) => expanded.push(p),
                     Err(e) => {
                         log::error!("Failed to extract {:?} from {:?}: {}", inner_path, file, e);
-                        counters.errors.fetch_add(1, Ordering::Relaxed);
+                        errors += 1;
                     }
                 }
             }
             continue;
         }
 
-        work.push(file.clone());
+        expanded.push(file.clone());
+    }
+
+    // --- Phase 2: Probe all files to partition skip vs. transcode ---
+    eprintln!("Scanning {} files...", expanded.len());
+    let mut to_transcode: Vec<WorkItem> = Vec::new();
+    let mut skipped = 0u32;
+
+    for file in &expanded {
+        match probe::probe_file(file) {
+            Ok(info) => {
+                if probe::meets_target(&info, &cfg.target) {
+                    skipped += 1;
+                } else {
+                    to_transcode.push(WorkItem {
+                        path: file.clone(),
+                        bitrate_kbps: info.bitrate_kbps,
+                        duration_secs: info.duration_secs,
+                    });
+                }
+            }
+            Err(e) => {
+                log::error!("Failed to probe {:?}: {}", file, e);
+                errors += 1;
+            }
+        }
+    }
+
+    if to_transcode.is_empty() {
+        eprintln!(
+            "All {} files already meet target. Nothing to do.",
+            expanded.len()
+        );
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        return Ok(());
     }
 
     let max_sessions = gpu::max_encode_sessions(&gpu);
     let jobs = cli.jobs.unwrap_or(max_sessions).max(1);
-    if jobs > 1 {
-        println!("Running {} parallel encode jobs (GPU supports up to {})", jobs, max_sessions);
+
+    eprintln!(
+        "{} to transcode, {} already HEVC, {} jobs",
+        to_transcode.len(),
+        skipped,
+        jobs,
+    );
+
+    if cli.dry_run {
+        for item in &to_transcode {
+            let name = item
+                .path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy();
+            eprintln!("  {name} ({} kbps)", item.bitrate_kbps);
+        }
+        eprintln!("\nDry run: {} would be transcoded", to_transcode.len());
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        return Ok(());
     }
 
-    // Process files with thread pool
+    // --- Phase 3: Transcode with multi-progress bars ---
+    let mp = MultiProgress::new();
+
+    let worker_style = ProgressStyle::with_template(
+        "  {msg:<42} {bar:20.green/dark_gray} {percent:>3}%  {prefix}",
+    )
+    .unwrap()
+    .progress_chars("━╸─");
+
+    let main_style = ProgressStyle::with_template(
+        "  {bar:40.cyan/blue} {pos}/{len} transcoded  [{elapsed_precise}]",
+    )
+    .unwrap()
+    .progress_chars("━╸─");
+
+    // Main bar at the bottom
+    let main_bar = mp.add(ProgressBar::new(to_transcode.len() as u64));
+    main_bar.set_style(main_style);
+
+    // Worker bars inserted above main bar
+    let worker_bars: Vec<ProgressBar> = (0..jobs)
+        .map(|_| {
+            let bar = mp.insert_before(&main_bar, ProgressBar::new(1000));
+            bar.set_style(worker_style.clone());
+            bar.set_message("");
+            bar
+        })
+        .collect();
+
+    let transcoded = Arc::new(AtomicU32::new(0));
+    let error_count = Arc::new(AtomicU32::new(errors));
+    let to_transcode = Arc::new(to_transcode);
+    let next_idx = Arc::new(AtomicU32::new(0));
     let cfg = Arc::new(cfg);
     let gpu = Arc::new(gpu);
-    let pool_size = jobs;
-    let work = Arc::new(work);
-    let next_idx = Arc::new(AtomicU32::new(0));
     let overwrite = cli.overwrite;
-    let dry_run = cli.dry_run;
-    let output_dir: Option<PathBuf> = cli.output_dir.clone();
+    let output_dir = cli.output_dir.clone();
 
     std::thread::scope(|s| {
-        for _ in 0..pool_size {
-            let work = Arc::clone(&work);
+        for worker_id in 0..jobs {
+            let to_transcode = Arc::clone(&to_transcode);
             let next_idx = Arc::clone(&next_idx);
-            let counters = Arc::clone(&counters);
+            let transcoded = Arc::clone(&transcoded);
+            let error_count = Arc::clone(&error_count);
             let cfg = Arc::clone(&cfg);
             let gpu = Arc::clone(&gpu);
+            let bar = worker_bars[worker_id].clone();
+            let main_bar = main_bar.clone();
             let output_dir = output_dir.clone();
+
             s.spawn(move || {
                 loop {
                     let idx = next_idx.fetch_add(1, Ordering::Relaxed) as usize;
-                    if idx >= work.len() {
+                    if idx >= to_transcode.len() {
+                        bar.finish_and_clear();
                         break;
                     }
-                    process_file(
-                        &work[idx],
-                        overwrite,
-                        dry_run,
-                        output_dir.as_deref(),
-                        &cfg,
+
+                    let item = &to_transcode[idx];
+                    let name = item
+                        .path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
+
+                    bar.set_message(truncate_name(&name, 42));
+                    bar.set_position(0);
+                    bar.set_prefix("");
+
+                    let output_path = if overwrite {
+                        None
+                    } else {
+                        let out_dir = output_dir.as_deref().or(cfg.output_dir.as_deref());
+                        match transcode::output_path(
+                            &item.path,
+                            out_dir,
+                            &cfg.target.container,
+                        ) {
+                            Ok(p) => Some(p),
+                            Err(e) => {
+                                log::error!("Failed to compute output path: {}", e);
+                                error_count.fetch_add(1, Ordering::Relaxed);
+                                main_bar.inc(1);
+                                continue;
+                            }
+                        }
+                    };
+
+                    match transcode::transcode(
+                        &item.path,
+                        output_path.as_deref(),
+                        &cfg.target,
                         &gpu,
-                        &counters,
-                    );
+                        item.bitrate_kbps,
+                        item.duration_secs,
+                        Some(&bar),
+                    ) {
+                        Ok(_) => {
+                            transcoded.fetch_add(1, Ordering::Relaxed);
+                        }
+                        Err(e) => {
+                            log::error!("Failed to transcode {:?}: {}", item.path, e);
+                            error_count.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+
+                    main_bar.inc(1);
                 }
             });
         }
     });
 
+    main_bar.finish_and_clear();
+
     // Clean up temp extraction dir
     let _ = std::fs::remove_dir_all(&tmp_dir);
 
-    let skipped = counters.skipped.load(Ordering::Relaxed);
-    let transcoded = counters.transcoded.load(Ordering::Relaxed);
-    let errors = counters.errors.load(Ordering::Relaxed);
+    let final_transcoded = transcoded.load(Ordering::Relaxed);
+    let final_errors = error_count.load(Ordering::Relaxed);
 
-    println!(
-        "\nDone: {} transcoded, {} skipped, {} errors (of {} total)",
-        transcoded,
-        skipped,
-        errors,
-        files.len()
+    eprintln!(
+        "\nDone: {} transcoded, {} skipped, {} errors",
+        final_transcoded, skipped, final_errors
     );
 
     Ok(())
