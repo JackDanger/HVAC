@@ -1,4 +1,5 @@
 use anyhow::{bail, Context, Result};
+use std::os::unix::fs::{chown, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -107,8 +108,11 @@ pub fn transcode(
         cmd.args(["-c:s", "copy"]);
     }
 
-    // Map all streams
-    cmd.args(["-map", "0"]);
+    // Map video, audio, and subtitle streams — skip attached pics (cover art)
+    // which can be too small for GPU encoders and cause failures
+    cmd.args(["-map", "0:v:0"]); // first video stream only
+    cmd.args(["-map", "0:a?"]);  // all audio streams
+    cmd.args(["-map", "0:s?"]);  // all subtitle streams
 
     // Output
     cmd.arg(&final_output);
@@ -130,6 +134,9 @@ pub fn transcode(
         bail!("Output validation failed: {}", e);
     }
 
+    // Copy permissions (user, group, mode) from source to output
+    copy_permissions(source, &final_output)?;
+
     // If in-place mode, replace original only after validation passes
     if output.is_none() {
         std::fs::rename(&final_output, source)
@@ -138,6 +145,24 @@ pub fn transcode(
     }
 
     Ok(final_output)
+}
+
+/// Copy file permissions (owner, group, mode) from source to destination.
+fn copy_permissions(source: &Path, dest: &Path) -> Result<()> {
+    let src_meta = std::fs::metadata(source).context("Failed to read source metadata")?;
+
+    // Copy mode (chmod)
+    std::fs::set_permissions(dest, src_meta.permissions())
+        .context("Failed to set file permissions")?;
+
+    // Copy owner and group (chown) - may fail if not running as root
+    let uid = src_meta.uid();
+    let gid = src_meta.gid();
+    if let Err(e) = chown(dest, Some(uid), Some(gid)) {
+        log::warn!("Could not set owner/group on {:?}: {} (requires root)", dest, e);
+    }
+
+    Ok(())
 }
 
 /// Validate transcoded output to prevent corruption.
