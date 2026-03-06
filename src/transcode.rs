@@ -47,10 +47,7 @@ pub fn transcode(
             let parent = source.parent().context("source has no parent")?;
             parent.join(format!(
                 ".tdorr_tmp_{}.{}",
-                source
-                    .file_stem()
-                    .unwrap_or_default()
-                    .to_string_lossy(),
+                source.file_stem().unwrap_or_default().to_string_lossy(),
                 target.container
             ))
         }
@@ -115,8 +112,8 @@ pub fn transcode(
     // Map video, audio, and subtitle streams — skip attached pics (cover art)
     // which can be too small for GPU encoders and cause failures
     cmd.args(["-map", "0:v:0"]); // first video stream only
-    cmd.args(["-map", "0:a?"]);  // all audio streams
-    cmd.args(["-map", "0:s?"]);  // all subtitle streams
+    cmd.args(["-map", "0:a?"]); // all audio streams
+    cmd.args(["-map", "0:s?"]); // all subtitle streams
 
     // Progress reporting
     if progress.is_some() {
@@ -151,8 +148,8 @@ pub fn transcode(
             if let Some(time_str) = line.strip_prefix("out_time_us=") {
                 if let Ok(us) = time_str.parse::<i64>() {
                     if duration_us > 0 && us > 0 {
-                        let pos = ((us as f64 / duration_us as f64) * 1000.0)
-                            .clamp(0.0, 1000.0) as u64;
+                        let pos =
+                            ((us as f64 / duration_us as f64) * 1000.0).clamp(0.0, 1000.0) as u64;
                         bar.set_position(pos);
                     }
                 }
@@ -173,9 +170,7 @@ pub fn transcode(
             bail!("ffmpeg exited with status {}: {}", status, last_line);
         }
     } else {
-        let status = cmd
-            .status()
-            .context("Failed to execute ffmpeg")?;
+        let status = cmd.status().context("Failed to execute ffmpeg")?;
 
         if !status.success() {
             let _ = std::fs::remove_file(&final_output);
@@ -214,7 +209,11 @@ fn copy_permissions(source: &Path, dest: &Path) -> Result<()> {
     let uid = src_meta.uid();
     let gid = src_meta.gid();
     if let Err(e) = chown(dest, Some(uid), Some(gid)) {
-        log::warn!("Could not set owner/group on {:?}: {} (requires root)", dest, e);
+        log::warn!(
+            "Could not set owner/group on {:?}: {} (requires root)",
+            dest,
+            e
+        );
     }
 
     Ok(())

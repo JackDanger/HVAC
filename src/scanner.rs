@@ -29,11 +29,7 @@ pub fn scan(root: &Path, extensions: &[String]) -> Result<Vec<PathBuf>> {
 
     files.sort();
 
-    log::info!(
-        "Scanned {:?}: found {} media files",
-        root,
-        files.len()
-    );
+    log::info!("Scanned {:?}: found {} media files", root, files.len());
 
     Ok(files)
 }
