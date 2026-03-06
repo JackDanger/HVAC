@@ -33,7 +33,7 @@ pub struct TargetConfig {
 }
 
 fn default_quality() -> u32 {
-    22
+    28
 }
 fn default_preset() -> String {
     "slow".to_string()
@@ -98,7 +98,7 @@ media_extensions:
   - mkv
 "#;
         let config: Config = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.target.quality, 22);
+        assert_eq!(config.target.quality, 28);
         assert_eq!(config.target.preset, "slow");
         assert_eq!(config.target.max_width, 3840);
         assert_eq!(config.target.container, "mkv");

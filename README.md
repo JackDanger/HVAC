@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>GPU-accelerated media transcoding that doesn't suck.</strong>
+  <strong>GPU-accelerated media transcoding that I could figure out.</strong>
 </p>
 
 <p align="center">
@@ -63,11 +63,11 @@ For `.iso`/`.img` support, also install [isomage](https://github.com/JackDanger/
 ### What happens
 
 ```
-$ ./tdorr --config config.yaml /mnt/media/dumb-tv
+$ ./tdorr --config config.yaml /mnt/media/movies
 GPU detected: NVIDIA GeForce RTX 2060 (encoder: hevc_nvenc)
-Found 8 media files in "/mnt/media/dumb-tv"
-Transcoding: "Show - S01E01 - Episode Title WEBDL-720p.mkv" (h264, 1280x720, 825 kbps)
-  -> "/mnt/media/dumb-tv/Show/Season 1/Show - S01E01 - Episode Title WEBDL-720p.transcoded.mkv"
+Found 8 media files in "/mnt/media/movies"
+Transcoding: "Some Dumb Marvel Nonsense/TropeGuy versus GI-Robocop.mkv" (h264, 1280x720, 825 kbps)
+  -> "/mnt/media/movies/Some Dumb Marvel Nonsense/TropeGuy versus GI-Robocop.mkv"
 ...
 
 Done: 8 transcoded, 0 skipped, 0 errors (of 8 total)
@@ -83,12 +83,12 @@ Done: 0 transcoded, 8 skipped, 0 errors (of 8 total)
 
 ## Config
 
-Default `config.yaml`:
+Ships with a default-okay `config.yaml`, which you can edit:
 
 ```yaml
 target:
   codec: hevc
-  quality: 22          # CQ value (lower = better quality, bigger file)
+  quality: 28          # CQ value (lower = better quality, bigger file)
   preset: slow         # NVENC: p7, VAAPI: mapped automatically
   max_width: 3840      # 4K max
   max_height: 2160

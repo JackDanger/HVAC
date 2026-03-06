@@ -4,8 +4,8 @@
 target:
   codec: hevc
   # CQ mode (constant quality) - lower = better quality, higher = smaller files
-  # 20-24 is visually lossless for most content
-  quality: 22
+  # NVENC CQ 28 ≈ x265 CRF 22 perceptually. Great quality, real space savings.
+  quality: 28
   preset: slow
   # Max resolution - files at or below this are kept as-is
   max_width: 3840
