@@ -24,16 +24,41 @@ I spent an entire evening trying to get [Tdarr](https://github.com/HaveAGitGat/T
 
 ## Features
 
-- **GPU-accelerated h265 encoding** &mdash; NVIDIA NVENC and Intel VAAPI
+- **GPU-accelerated h265 encoding** &mdash; NVIDIA NVENC, Intel VAAPI, and Apple VideoToolbox
 - **Smart detection** &mdash; skips files already in h265 at or below your target resolution/bitrate
 - **Safe by default** &mdash; creates `.transcoded.mkv` copies; never touches originals unless you pass `--overwrite`
 - **Disc image support** &mdash; extracts and transcodes media from `.iso` and `.img` files via [isomage](https://github.com/JackDanger/isomage)
 - **YAML config** &mdash; sensible defaults, fully overridable
+- **Output validation** &mdash; verifies transcoded files via ffprobe before finalizing (duration, codec, file size checks)
 - **Fast** &mdash; 14x realtime on an RTX 2060 for 720p content
 
 ## Install
 
-Requires Rust and `ffmpeg` with GPU encoder support (`hevc_nvenc` or `hevc_vaapi`).
+### Homebrew (macOS)
+
+```bash
+brew install JackDanger/tap/tdorr
+```
+
+### Cargo (any platform)
+
+```bash
+cargo install tdorr
+```
+
+### AUR (Arch Linux)
+
+```bash
+yay -S tdorr
+```
+
+### Pre-built binaries
+
+Download from [GitHub Releases](https://github.com/JackDanger/tdorr/releases) for:
+- Linux x86_64 / aarch64
+- macOS x86_64 (Intel) / aarch64 (Apple Silicon)
+
+### From source
 
 ```bash
 git clone https://github.com/JackDanger/tdorr.git
@@ -42,7 +67,10 @@ make build
 # ./tdorr is now symlinked to the release binary
 ```
 
-For `.iso`/`.img` support, also install [isomage](https://github.com/JackDanger/isomage).
+### Requirements
+
+- `ffmpeg` with a GPU encoder (`hevc_nvenc`, `hevc_vaapi`, or `hevc_videotoolbox`)
+- For `.iso`/`.img` support: [isomage](https://github.com/JackDanger/isomage)
 
 ## Usage
 
@@ -111,10 +139,11 @@ media_extensions:
 
 tdorr requires a GPU for encoding and will exit with a clear error if none is found:
 
-| GPU | Encoder | How it's detected |
-|-----|---------|-------------------|
-| NVIDIA (Kepler+) | `hevc_nvenc` | `nvidia-smi` + ffmpeg encoder check |
-| Intel (Broadwell+) | `hevc_vaapi` | `/dev/dri/renderD128` + ffmpeg encoder check |
+| GPU | Encoder | Platform | How it's detected |
+|-----|---------|----------|-------------------|
+| NVIDIA (Kepler+) | `hevc_nvenc` | Linux | `nvidia-smi` + ffmpeg encoder check |
+| Intel (Broadwell+) | `hevc_vaapi` | Linux | `/dev/dri/renderD128` + ffmpeg encoder check |
+| Apple Silicon / Intel Mac | `hevc_videotoolbox` | macOS | OS detection + ffmpeg encoder check |
 
 No GPU? No encoding. This is intentional &mdash; CPU h265 encoding is painfully slow and not what tdorr is for.
 
