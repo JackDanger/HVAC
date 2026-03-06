@@ -8,9 +8,11 @@ mod transcode;
 use anyhow::{Context, Result};
 use clap::Parser;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 
 #[derive(Parser, Debug)]
-#[command(name = "tdorr", about = "Media transcoder - Tdarr that doesn't suck")]
+#[command(name = "tdorr", about = "Media transcoder that I could figure out")]
 struct Cli {
     /// Path to YAML config file
     #[arg(short, long, default_value = "config.yaml")]
@@ -27,33 +29,43 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     dry_run: bool,
 
+    /// Number of parallel encode jobs (auto-detected from GPU if not set)
+    #[arg(short, long)]
+    jobs: Option<usize>,
+
     /// Output directory for transcoded files (overrides config)
     #[arg(short, long)]
     output_dir: Option<PathBuf>,
 }
 
+struct Counters {
+    skipped: AtomicU32,
+    transcoded: AtomicU32,
+    errors: AtomicU32,
+}
+
 fn process_file(
     file: &std::path::Path,
-    cli: &Cli,
+    overwrite: bool,
+    dry_run: bool,
+    output_dir: Option<&std::path::Path>,
     cfg: &config::Config,
     gpu: &gpu::GpuInfo,
-    skipped: &mut u32,
-    transcoded: &mut u32,
-    errors: &mut u32,
-) -> Result<()> {
+    counters: &Counters,
+) {
     let info = match probe::probe_file(file) {
         Ok(info) => info,
         Err(e) => {
             log::error!("Failed to probe {:?}: {}", file, e);
-            *errors += 1;
-            return Ok(());
+            counters.errors.fetch_add(1, Ordering::Relaxed);
+            return;
         }
     };
 
     if probe::meets_target(&info, &cfg.target) {
         log::info!("Skipping {:?} - already meets target", file);
-        *skipped += 1;
-        return Ok(());
+        counters.skipped.fetch_add(1, Ordering::Relaxed);
+        return;
     }
 
     println!(
@@ -65,30 +77,35 @@ fn process_file(
         info.bitrate_kbps,
     );
 
-    if cli.dry_run {
-        *transcoded += 1;
-        return Ok(());
+    if dry_run {
+        counters.transcoded.fetch_add(1, Ordering::Relaxed);
+        return;
     }
 
-    let output_path = if cli.overwrite {
+    let output_path = if overwrite {
         None
     } else {
-        let out_dir = cli.output_dir.as_deref().or(cfg.output_dir.as_deref());
-        Some(transcode::output_path(file, out_dir, &cfg.target.container)?)
+        let out_dir = output_dir.or(cfg.output_dir.as_deref());
+        match transcode::output_path(file, out_dir, &cfg.target.container) {
+            Ok(p) => Some(p),
+            Err(e) => {
+                log::error!("Failed to compute output path for {:?}: {}", file, e);
+                counters.errors.fetch_add(1, Ordering::Relaxed);
+                return;
+            }
+        }
     };
 
     match transcode::transcode(file, output_path.as_deref(), &cfg.target, gpu, info.bitrate_kbps, info.duration_secs) {
         Ok(out) => {
             println!("  -> {:?}", out);
-            *transcoded += 1;
+            counters.transcoded.fetch_add(1, Ordering::Relaxed);
         }
         Err(e) => {
             log::error!("Failed to transcode {:?}: {}", file, e);
-            *errors += 1;
+            counters.errors.fetch_add(1, Ordering::Relaxed);
         }
     }
-
-    Ok(())
 }
 
 fn main() -> Result<()> {
@@ -116,13 +133,17 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let mut skipped = 0;
-    let mut transcoded = 0;
-    let mut errors = 0;
+    let counters = Arc::new(Counters {
+        skipped: AtomicU32::new(0),
+        transcoded: AtomicU32::new(0),
+        errors: AtomicU32::new(0),
+    });
 
     // Temp dir for extracted disc image contents (lives for duration of run)
     let tmp_dir = std::env::temp_dir().join("tdorr_iso_extract");
 
+    // Collect all files to process (expanding disc images)
+    let mut work: Vec<PathBuf> = Vec::new();
     for file in &files {
         if iso::is_disc_image(file) {
             if !has_isomage {
@@ -130,7 +151,7 @@ fn main() -> Result<()> {
                     "Skipping {:?}: isomage is required for .iso/.img files but not found in PATH",
                     file
                 );
-                errors += 1;
+                counters.errors.fetch_add(1, Ordering::Relaxed);
                 continue;
             }
 
@@ -140,51 +161,84 @@ fn main() -> Result<()> {
                 Ok(f) => f,
                 Err(e) => {
                     log::error!("Failed to list contents of {:?}: {}", file, e);
-                    errors += 1;
+                    counters.errors.fetch_add(1, Ordering::Relaxed);
                     continue;
                 }
             };
 
             if inner_files.is_empty() {
                 println!("  No media files found inside disc image");
-                skipped += 1;
+                counters.skipped.fetch_add(1, Ordering::Relaxed);
                 continue;
             }
 
             println!("  Found {} media files inside", inner_files.len());
 
             for inner_path in &inner_files {
-                let extracted = match iso::extract_file(file, inner_path, &tmp_dir) {
-                    Ok(p) => p,
+                match iso::extract_file(file, inner_path, &tmp_dir) {
+                    Ok(p) => work.push(p),
                     Err(e) => {
                         log::error!("Failed to extract {:?} from {:?}: {}", inner_path, file, e);
-                        errors += 1;
-                        continue;
-                    }
-                };
-
-                match process_file(
-                    &extracted, &cli, &cfg, &gpu,
-                    &mut skipped, &mut transcoded, &mut errors,
-                ) {
-                    Ok(()) => {}
-                    Err(e) => {
-                        log::error!("Error processing {:?}: {}", inner_path, e);
-                        errors += 1;
+                        counters.errors.fetch_add(1, Ordering::Relaxed);
                     }
                 }
             }
             continue;
         }
 
-        process_file(
-            file, &cli, &cfg, &gpu,
-            &mut skipped, &mut transcoded, &mut errors,
-        )?;
+        work.push(file.clone());
     }
+
+    let max_sessions = gpu::max_encode_sessions(&gpu);
+    let jobs = cli.jobs.unwrap_or(max_sessions).max(1);
+    if jobs > 1 {
+        println!("Running {} parallel encode jobs (GPU supports up to {})", jobs, max_sessions);
+    }
+
+    // Process files with thread pool
+    let cfg = Arc::new(cfg);
+    let gpu = Arc::new(gpu);
+    let pool_size = jobs;
+    let work = Arc::new(work);
+    let next_idx = Arc::new(AtomicU32::new(0));
+    let overwrite = cli.overwrite;
+    let dry_run = cli.dry_run;
+    let output_dir: Option<PathBuf> = cli.output_dir.clone();
+
+    std::thread::scope(|s| {
+        for _ in 0..pool_size {
+            let work = Arc::clone(&work);
+            let next_idx = Arc::clone(&next_idx);
+            let counters = Arc::clone(&counters);
+            let cfg = Arc::clone(&cfg);
+            let gpu = Arc::clone(&gpu);
+            let output_dir = output_dir.clone();
+            s.spawn(move || {
+                loop {
+                    let idx = next_idx.fetch_add(1, Ordering::Relaxed) as usize;
+                    if idx >= work.len() {
+                        break;
+                    }
+                    process_file(
+                        &work[idx],
+                        overwrite,
+                        dry_run,
+                        output_dir.as_deref(),
+                        &cfg,
+                        &gpu,
+                        &counters,
+                    );
+                }
+            });
+        }
+    });
 
     // Clean up temp extraction dir
     let _ = std::fs::remove_dir_all(&tmp_dir);
+
+    let skipped = counters.skipped.load(Ordering::Relaxed);
+    let transcoded = counters.transcoded.load(Ordering::Relaxed);
+    let errors = counters.errors.load(Ordering::Relaxed);
 
     println!(
         "\nDone: {} transcoded, {} skipped, {} errors (of {} total)",

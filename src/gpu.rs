@@ -70,6 +70,36 @@ pub fn detect_gpu() -> Result<GpuInfo> {
     )
 }
 
+/// Return the maximum number of simultaneous encode sessions this GPU supports.
+/// Used as the default for --jobs.
+pub fn max_encode_sessions(gpu: &GpuInfo) -> usize {
+    match gpu.kind {
+        GpuKind::Nvidia => {
+            // Professional GPUs (Quadro, Tesla, A-series) have no session limit.
+            // Consumer GeForce GPUs are limited to 3 sessions (driver 550.40+).
+            let name_lower = gpu.name.to_lowercase();
+            if name_lower.contains("quadro")
+                || name_lower.contains("tesla")
+                || name_lower.starts_with("a10")
+                || name_lower.starts_with("a30")
+                || name_lower.starts_with("a40")
+                || name_lower.starts_with("a100")
+                || name_lower.starts_with("l4")
+                || name_lower.starts_with("l40")
+                || name_lower.starts_with("h100")
+            {
+                4 // Professional: no hard limit, default to 4
+            } else {
+                3 // Consumer GeForce: 3 simultaneous NVENC sessions
+            }
+        }
+        // VAAPI and VideoToolbox don't have hard session limits,
+        // but diminishing returns past a few concurrent encodes
+        GpuKind::Intel => 2,
+        GpuKind::Apple => 2,
+    }
+}
+
 fn detect_nvidia() -> Result<String> {
     let output = Command::new("nvidia-smi")
         .arg("--query-gpu=name")
@@ -141,6 +171,26 @@ mod tests {
             || has_ffmpeg_encoder("hevc_vaapi")
             || has_ffmpeg_encoder("hevc_videotoolbox");
         assert!(has_any, "ffmpeg should have at least one h265 encoder");
+    }
+
+    #[test]
+    fn test_max_encode_sessions_consumer_nvidia() {
+        let gpu = GpuInfo {
+            name: "NVIDIA GeForce RTX 2060".to_string(),
+            encoder: "hevc_nvenc".to_string(),
+            kind: GpuKind::Nvidia,
+        };
+        assert_eq!(max_encode_sessions(&gpu), 3);
+    }
+
+    #[test]
+    fn test_max_encode_sessions_professional_nvidia() {
+        let gpu = GpuInfo {
+            name: "A100-SXM4-80GB".to_string(),
+            encoder: "hevc_nvenc".to_string(),
+            kind: GpuKind::Nvidia,
+        };
+        assert_eq!(max_encode_sessions(&gpu), 4);
     }
 
     #[test]
