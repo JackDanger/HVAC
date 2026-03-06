@@ -171,11 +171,7 @@ fn main() -> Result<()> {
 
     if cli.dry_run {
         for item in &to_transcode {
-            let name = item
-                .path
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy();
+            let name = item.path.file_name().unwrap_or_default().to_string_lossy();
             eprintln!("  {name} ({} kbps)", item.bitrate_kbps);
         }
         eprintln!("\nDry run: {} would be transcoded", to_transcode.len());
@@ -222,76 +218,70 @@ fn main() -> Result<()> {
     let output_dir = cli.output_dir.clone();
 
     std::thread::scope(|s| {
-        for worker_id in 0..jobs {
+        for worker_bar in worker_bars.iter().take(jobs) {
             let to_transcode = Arc::clone(&to_transcode);
             let next_idx = Arc::clone(&next_idx);
             let transcoded = Arc::clone(&transcoded);
             let error_count = Arc::clone(&error_count);
             let cfg = Arc::clone(&cfg);
             let gpu = Arc::clone(&gpu);
-            let bar = worker_bars[worker_id].clone();
+            let bar = worker_bar.clone();
             let main_bar = main_bar.clone();
             let output_dir = output_dir.clone();
 
-            s.spawn(move || {
-                loop {
-                    let idx = next_idx.fetch_add(1, Ordering::Relaxed) as usize;
-                    if idx >= to_transcode.len() {
-                        bar.finish_and_clear();
-                        break;
-                    }
-
-                    let item = &to_transcode[idx];
-                    let name = item
-                        .path
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .to_string();
-
-                    bar.set_message(truncate_name(&name, 42));
-                    bar.set_position(0);
-                    bar.set_prefix("");
-
-                    let output_path = if overwrite {
-                        None
-                    } else {
-                        let out_dir = output_dir.as_deref().or(cfg.output_dir.as_deref());
-                        match transcode::output_path(
-                            &item.path,
-                            out_dir,
-                            &cfg.target.container,
-                        ) {
-                            Ok(p) => Some(p),
-                            Err(e) => {
-                                log::error!("Failed to compute output path: {}", e);
-                                error_count.fetch_add(1, Ordering::Relaxed);
-                                main_bar.inc(1);
-                                continue;
-                            }
-                        }
-                    };
-
-                    match transcode::transcode(
-                        &item.path,
-                        output_path.as_deref(),
-                        &cfg.target,
-                        &gpu,
-                        item.bitrate_kbps,
-                        item.duration_secs,
-                        Some(&bar),
-                    ) {
-                        Ok(_) => {
-                            transcoded.fetch_add(1, Ordering::Relaxed);
-                        }
-                        Err(e) => {
-                            log::error!("Failed to transcode {:?}: {}", item.path, e);
-                            error_count.fetch_add(1, Ordering::Relaxed);
-                        }
-                    }
-
-                    main_bar.inc(1);
+            s.spawn(move || loop {
+                let idx = next_idx.fetch_add(1, Ordering::Relaxed) as usize;
+                if idx >= to_transcode.len() {
+                    bar.finish_and_clear();
+                    break;
                 }
+
+                let item = &to_transcode[idx];
+                let name = item
+                    .path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
+
+                bar.set_message(truncate_name(&name, 42));
+                bar.set_position(0);
+                bar.set_prefix("");
+
+                let output_path = if overwrite {
+                    None
+                } else {
+                    let out_dir = output_dir.as_deref().or(cfg.output_dir.as_deref());
+                    match transcode::output_path(&item.path, out_dir, &cfg.target.container) {
+                        Ok(p) => Some(p),
+                        Err(e) => {
+                            log::error!("Failed to compute output path: {}", e);
+                            error_count.fetch_add(1, Ordering::Relaxed);
+                            main_bar.inc(1);
+                            continue;
+                        }
+                    }
+                };
+
+                match transcode::transcode(
+                    &item.path,
+                    output_path.as_deref(),
+                    &cfg.target,
+                    &gpu,
+                    item.bitrate_kbps,
+                    item.duration_secs,
+                    Some(&bar),
+                ) {
+                    Ok(_) => {
+                        transcoded.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(e) => {
+                        log::error!("Failed to transcode {:?}: {}", item.path, e);
+                        error_count.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+
+                main_bar.inc(1);
             });
         }
     });
