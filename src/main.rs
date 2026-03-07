@@ -501,8 +501,10 @@ fn main() -> Result<()> {
                             .unwrap()
                             .push(format!("  \u{21bb} {short_name} retry {attempt}/{MAX_RETRIES}"));
                         my_slot.progress.store(0, Ordering::Relaxed);
+                        my_slot.speed.store(0, Ordering::Relaxed);
+                        // Stagger retries by worker_id to avoid thundering herd
                         std::thread::sleep(std::time::Duration::from_secs(
-                            RETRY_DELAY_SECS * attempt as u64,
+                            RETRY_DELAY_SECS * attempt as u64 + worker_id as u64 * 3,
                         ));
                     }
 
