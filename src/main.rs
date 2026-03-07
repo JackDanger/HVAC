@@ -16,8 +16,7 @@ use std::time::Instant;
 
 use util::format_size;
 
-const MAX_RETRIES: u32 = 3;
-const RETRY_DELAY_SECS: u64 = 10;
+const MAX_SESSION_RETRIES: u32 = 5;
 
 static CANCELLED: AtomicBool = AtomicBool::new(false);
 
@@ -54,7 +53,6 @@ struct Cli {
     /// Replace originals with transcoded copies after all encodes complete
     #[arg(long, default_value_t = false)]
     replace: bool,
-
 }
 
 /// File ready to transcode, with pre-probed metadata.
@@ -70,7 +68,8 @@ struct WorkItem {
 struct WorkerSlot {
     info: Mutex<Option<(String, String)>>,
     progress: AtomicU64,
-    speed: AtomicU64, // encoding speed * 100 (e.g. 1.23x = 123)
+    speed: AtomicU64,
+    queued: AtomicBool,
 }
 
 fn truncate_name(name: &str, max_len: usize) -> String {
@@ -95,6 +94,40 @@ fn progress_bar_str(fraction: f64, width: usize) -> String {
     }
 }
 
+/// Try to acquire an encoding slot. Returns true if acquired.
+/// Uses compare_exchange to atomically check active < max and increment.
+fn try_acquire(active_encoders: &AtomicU32, max_encoders: &AtomicU32) -> bool {
+    loop {
+        let active = active_encoders.load(Ordering::SeqCst);
+        let max = max_encoders.load(Ordering::SeqCst);
+        if active >= max {
+            return false;
+        }
+        if active_encoders
+            .compare_exchange_weak(active, active + 1, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            return true;
+        }
+    }
+}
+
+/// Lower max_encoders to at most new_max.
+fn lower_max(max_encoders: &AtomicU32, new_max: u32) {
+    loop {
+        let current = max_encoders.load(Ordering::SeqCst);
+        if current <= new_max {
+            break;
+        }
+        if max_encoders
+            .compare_exchange_weak(current, new_max, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            break;
+        }
+    }
+}
+
 fn main() -> Result<()> {
     env_logger::init();
     let cli = Cli::parse();
@@ -102,7 +135,6 @@ fn main() -> Result<()> {
     // Register CTRL-C handler: first press cancels gracefully, second force-exits
     ctrlc::set_handler(move || {
         if CANCELLED.load(Ordering::Relaxed) {
-            // Restore cursor before force-quit
             eprint!("\x1b[?25h");
             cleanup_tmp_dirs();
             std::process::exit(130);
@@ -294,11 +326,18 @@ fn main() -> Result<()> {
                 info: Mutex::new(None),
                 progress: AtomicU64::new(0),
                 speed: AtomicU64::new(0),
+                queued: AtomicBool::new(false),
             })
         })
         .collect();
     let completed_lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let completed_units = Arc::new(AtomicU64::new(0));
+
+    // Encoding limiter: discovers actual NVENC session capacity at runtime
+    let active_encoders = Arc::new(AtomicU32::new(0));
+    let max_encoders = Arc::new(AtomicU32::new(jobs as u32));
+    // How many workers are still alive (decremented on retirement)
+    let worker_count = Arc::new(AtomicU32::new(jobs as u32));
 
     let transcoded = Arc::new(AtomicU32::new(0));
     let error_count = Arc::new(AtomicU32::new(errors));
@@ -313,7 +352,7 @@ fn main() -> Result<()> {
     let output_dir = cli.output_dir.clone();
 
     std::thread::scope(|s| {
-        // Render thread: redraws active worker lines + progress bar in place
+        // Render thread
         {
             let render_slots: Vec<Arc<WorkerSlot>> =
                 worker_slots.iter().map(Arc::clone).collect();
@@ -321,25 +360,23 @@ fn main() -> Result<()> {
             let render_completed_units = Arc::clone(&completed_units);
             let render_transcoded = Arc::clone(&transcoded);
             let render_errors = Arc::clone(&error_count);
+            let render_max = Arc::clone(&max_encoders);
 
             s.spawn(move || {
                 let start = Instant::now();
                 let mut prev_viewport = 0usize;
 
-                // Hide cursor during rendering
                 eprint!("\x1b[?25l");
 
                 loop {
                     {
                         let mut stderr = std::io::stderr().lock();
 
-                        // Move to top of previous viewport and clear to end of screen
                         if prev_viewport > 0 {
                             write!(stderr, "\x1b[{}A", prev_viewport).ok();
                         }
                         write!(stderr, "\x1b[J").ok();
 
-                        // Drain completed lines (permanent, scroll above viewport)
                         {
                             let mut lines = render_completed.lock().unwrap();
                             for line in lines.drain(..) {
@@ -347,29 +384,42 @@ fn main() -> Result<()> {
                             }
                         }
 
-                        // Draw active worker lines with percentage
                         let mut viewport = 0;
-                        for slot in &render_slots {
+                        let max = render_max.load(Ordering::Relaxed);
+
+                        for (slot_idx, slot) in render_slots.iter().enumerate() {
                             let info = slot.info.lock().unwrap();
                             if let Some((ref name, ref size)) = *info {
-                                let pct = slot.progress.load(Ordering::Relaxed) / 10;
-                                let spd = slot.speed.load(Ordering::Relaxed);
-                                let speed_str = if spd > 0 {
-                                    format!(" {}.{}x", spd / 100, (spd % 100) / 10)
+                                if slot.queued.load(Ordering::Relaxed) {
+                                    writeln!(
+                                        stderr,
+                                        "  \u{23f3} queued {}/{} {} ({})",
+                                        slot_idx + 1,
+                                        max,
+                                        name,
+                                        size
+                                    )
+                                    .ok();
                                 } else {
-                                    String::new()
-                                };
-                                writeln!(
-                                    stderr,
-                                    "  \u{25b6} {:>2}%{} {} ({})",
-                                    pct, speed_str, name, size
-                                )
-                                .ok();
+                                    let pct = slot.progress.load(Ordering::Relaxed) / 10;
+                                    let spd = slot.speed.load(Ordering::Relaxed);
+                                    let speed_str = if spd > 0 {
+                                        format!(" {}.{}x", spd / 100, (spd % 100) / 10)
+                                    } else {
+                                        String::new()
+                                    };
+                                    writeln!(
+                                        stderr,
+                                        "  \u{25b6} {:>2}%{} {} ({})",
+                                        pct, speed_str, name, size
+                                    )
+                                    .ok();
+                                }
                                 viewport += 1;
                             }
                         }
 
-                        // Progress bar line
+                        // Progress bar
                         let done_units = render_completed_units.load(Ordering::Relaxed);
                         let active_sum: u64 = render_slots
                             .iter()
@@ -410,10 +460,8 @@ fn main() -> Result<()> {
                     if (completed + errs) as u64 >= file_count || cancelled {
                         let mut stderr = std::io::stderr().lock();
                         if !cancelled && prev_viewport > 0 {
-                            // Clear viewport so summary prints cleanly
                             write!(stderr, "\x1b[{}A\x1b[J", prev_viewport).ok();
                         }
-                        // Restore cursor
                         write!(stderr, "\x1b[?25h").ok();
                         stderr.flush().ok();
                         break;
@@ -439,8 +487,11 @@ fn main() -> Result<()> {
             let completed_units = Arc::clone(&completed_units);
             let completed_lines = Arc::clone(&completed_lines);
             let my_slot = Arc::clone(&worker_slots[worker_id]);
+            let active_encoders = Arc::clone(&active_encoders);
+            let max_encoders = Arc::clone(&max_encoders);
+            let worker_count = Arc::clone(&worker_count);
 
-            s.spawn(move || loop {
+            s.spawn(move || 'outer: loop {
                 if CANCELLED.load(Ordering::Relaxed) {
                     break;
                 }
@@ -460,7 +511,7 @@ fn main() -> Result<()> {
                 let short_name = truncate_name(&name, 60);
                 let size_str = format_size(item.source_size);
 
-                // Activate slot (render thread will pick it up)
+                // Activate slot
                 {
                     let mut info = my_slot.info.lock().unwrap();
                     *info = Some((short_name.clone(), size_str));
@@ -481,32 +532,29 @@ fn main() -> Result<()> {
                                 .push(format!("  \u{2717} {short_name}: {e}"));
                             error_count.fetch_add(1, Ordering::Relaxed);
                             *my_slot.info.lock().unwrap() = None;
-                            my_slot.progress.store(0, Ordering::Relaxed);
                             completed_units.fetch_add(1000, Ordering::Relaxed);
                             continue;
                         }
                     }
                 };
 
-                // Retry loop for transient NVENC errors
-                let mut last_err = None;
-                for attempt in 0..=MAX_RETRIES {
+                // Acquire encoding slot + encode with session-limit retry
+                let mut session_retries = 0u32;
+
+                let last_err: Option<anyhow::Error> = loop {
                     if CANCELLED.load(Ordering::Relaxed) {
-                        last_err = Some(anyhow::anyhow!("cancelled"));
-                        break;
+                        break Some(anyhow::anyhow!("cancelled"));
                     }
-                    if attempt > 0 {
-                        completed_lines
-                            .lock()
-                            .unwrap()
-                            .push(format!("  \u{21bb} {short_name} retry {attempt}/{MAX_RETRIES}"));
+
+                    // Wait for an encoding slot
+                    if !try_acquire(&active_encoders, &max_encoders) {
+                        my_slot.queued.store(true, Ordering::Relaxed);
                         my_slot.progress.store(0, Ordering::Relaxed);
                         my_slot.speed.store(0, Ordering::Relaxed);
-                        // Stagger retries by worker_id to avoid thundering herd
-                        std::thread::sleep(std::time::Duration::from_secs(
-                            RETRY_DELAY_SECS * attempt as u64 + worker_id as u64 * 3,
-                        ));
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        continue;
                     }
+                    my_slot.queued.store(false, Ordering::Relaxed);
 
                     match transcode::transcode(
                         &item.path,
@@ -520,6 +568,8 @@ fn main() -> Result<()> {
                         Some(&my_slot.speed),
                     ) {
                         Ok(out_path) => {
+                            active_encoders.fetch_sub(1, Ordering::SeqCst);
+
                             let out_size = transcode::output_size(&out_path);
                             bytes_input.fetch_add(item.source_size, Ordering::Relaxed);
                             bytes_output.fetch_add(out_size, Ordering::Relaxed);
@@ -542,23 +592,29 @@ fn main() -> Result<()> {
                                 format_size(out_size),
                                 saved_pct
                             ));
-                            // stdout: completed output path for pipeline use
                             println!("{}", out_path.display());
-                            last_err = None;
-                            break;
+                            break None;
                         }
                         Err(e) => {
+                            active_encoders.fetch_sub(1, Ordering::SeqCst);
                             let err_str = e.to_string();
-                            if attempt < MAX_RETRIES && transcode::is_session_limit_error(&err_str)
+
+                            if transcode::is_session_limit_error(&err_str)
+                                && session_retries < MAX_SESSION_RETRIES
                             {
-                                last_err = Some(e);
+                                session_retries += 1;
+                                // Lower the discovered max to current active count
+                                let active = active_encoders.load(Ordering::SeqCst);
+                                lower_max(&max_encoders, active);
+                                // Loop back to acquire (will wait if at capacity)
+                                my_slot.progress.store(0, Ordering::Relaxed);
+                                my_slot.speed.store(0, Ordering::Relaxed);
                                 continue;
                             }
-                            last_err = Some(e);
-                            break;
+                            break Some(e);
                         }
                     }
-                }
+                };
 
                 if let Some(e) = last_err {
                     completed_lines
@@ -572,7 +628,22 @@ fn main() -> Result<()> {
                 *my_slot.info.lock().unwrap() = None;
                 my_slot.progress.store(0, Ordering::Relaxed);
                 my_slot.speed.store(0, Ordering::Relaxed);
+                my_slot.queued.store(false, Ordering::Relaxed);
                 completed_units.fetch_add(1000, Ordering::Relaxed);
+
+                // Retire excess workers: if we discovered a lower capacity,
+                // workers beyond that count exit after finishing their file.
+                let max = max_encoders.load(Ordering::SeqCst);
+                if max < jobs as u32 {
+                    let wc = worker_count.load(Ordering::SeqCst);
+                    if wc > max
+                        && worker_count
+                            .compare_exchange(wc, wc - 1, Ordering::SeqCst, Ordering::SeqCst)
+                            .is_ok()
+                    {
+                        break 'outer;
+                    }
+                }
             });
         }
     });
@@ -661,7 +732,6 @@ fn main() -> Result<()> {
         );
     }
 
-    // Exit non-zero if any files failed
     if final_errors > 0 {
         std::process::exit(1);
     }
