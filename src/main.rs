@@ -55,9 +55,6 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     replace: bool,
 
-    /// Use libx265 software encoding with CUDA decode (no NVENC session limit)
-    #[arg(long, default_value_t = false)]
-    cuda: bool,
 }
 
 /// File ready to transcode, with pre-probed metadata.
@@ -117,11 +114,7 @@ fn main() -> Result<()> {
         .with_context(|| format!("Failed to load config from {:?}", cli.config))?;
 
     let gpu = gpu::detect_gpu()?;
-    if cli.cuda {
-        eprintln!("GPU: {} (libx265 + CUDA decode)", gpu.name);
-    } else {
-        eprintln!("GPU: {} ({})", gpu.name, gpu.encoder);
-    }
+    eprintln!("GPU: {} ({})", gpu.name, gpu.encoder);
 
     let has_isomage = iso::isomage_available();
 
@@ -242,16 +235,11 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Job count: --cuda bypasses NVENC session limits (CPU-bound, default 2)
-    let jobs = if cli.cuda {
-        cli.jobs.unwrap_or(2).max(1)
-    } else {
-        let available = gpu::available_sessions(&gpu);
-        cli.jobs.unwrap_or(available).max(1)
-    };
+    let available = gpu::available_sessions(&gpu);
+    let jobs = cli.jobs.unwrap_or(available).max(1);
 
     eprintln!(
-        "{} to transcode, {} already HEVC{}, {} jobs{}",
+        "{} to transcode, {} already HEVC{}, {} jobs",
         to_transcode.len(),
         skipped,
         if resumed > 0 {
@@ -260,7 +248,6 @@ fn main() -> Result<()> {
             String::new()
         },
         jobs,
-        if cli.cuda { " (libx265)" } else { "" },
     );
 
     if cli.dry_run {
@@ -321,7 +308,6 @@ fn main() -> Result<()> {
     let cfg = Arc::new(cfg);
     let gpu = Arc::new(gpu);
     let overwrite = cli.overwrite;
-    let use_libx265 = cli.cuda;
     let output_dir = cli.output_dir.clone();
 
     std::thread::scope(|s| {
@@ -523,7 +509,6 @@ fn main() -> Result<()> {
                         &item.pix_fmt,
                         Some(&my_slot.progress),
                         Some(&my_slot.speed),
-                        use_libx265,
                     ) {
                         Ok(out_path) => {
                             let out_size = transcode::output_size(&out_path);
