@@ -134,8 +134,10 @@ fn main() -> Result<()> {
 
     // Register CTRL-C handler: first press cancels gracefully, second force-exits
     ctrlc::set_handler(move || {
+        // Restore terminal: show cursor, reset attributes, clear to end of screen
+        eprint!("\x1b[?25h\x1b[0m");
         if CANCELLED.load(Ordering::Relaxed) {
-            eprint!("\x1b[?25h");
+            eprintln!();
             cleanup_tmp_dirs();
             std::process::exit(130);
         }
@@ -270,9 +272,10 @@ fn main() -> Result<()> {
     }
 
     let jobs_specified = cli.jobs.is_some();
+    // Auto mode: spawn extra threads to probe beyond the theoretical limit
     let jobs = cli
         .jobs
-        .unwrap_or_else(|| gpu::max_encode_sessions(&gpu))
+        .unwrap_or_else(|| gpu::max_encode_sessions(&gpu) + 3)
         .max(1);
     let auto_ramp = !jobs_specified;
 
@@ -363,7 +366,7 @@ fn main() -> Result<()> {
     let output_dir = cli.output_dir.clone();
 
     std::thread::scope(|s| {
-        // Render thread
+        // Render thread (also controls auto-ramp)
         {
             let render_slots: Vec<Arc<WorkerSlot>> =
                 worker_slots.iter().map(Arc::clone).collect();
@@ -372,10 +375,15 @@ fn main() -> Result<()> {
             let render_transcoded = Arc::clone(&transcoded);
             let render_errors = Arc::clone(&error_count);
             let render_max = Arc::clone(&max_encoders);
+            let render_ramping = Arc::clone(&ramping);
 
             s.spawn(move || {
                 let start = Instant::now();
                 let mut prev_viewport = 0usize;
+
+                // Auto-ramp state
+                let mut ramp_baseline_speed = 0u64;
+                let mut last_ramp_time = start;
 
                 eprint!("\x1b[?25l");
 
@@ -466,6 +474,50 @@ fn main() -> Result<()> {
                         prev_viewport = viewport;
                     }
 
+                    // --- Auto-ramp: add workers while total throughput improves ---
+                    if render_ramping.load(Ordering::SeqCst)
+                        && last_ramp_time.elapsed().as_secs() >= 5
+                    {
+                        let current_max = render_max.load(Ordering::SeqCst);
+
+                        // Collect speeds from active (non-queued) workers
+                        let speeds: Vec<u64> = render_slots
+                            .iter()
+                            .filter(|s| {
+                                s.info.lock().unwrap().is_some()
+                                    && !s.queued.load(Ordering::Relaxed)
+                            })
+                            .map(|s| s.speed.load(Ordering::Relaxed))
+                            .collect();
+                        let reporting = speeds.iter().filter(|&&s| s > 0).count() as u32;
+                        let total_speed: u64 = speeds.iter().sum();
+
+                        // Wait until all current slots are encoding and reporting speed
+                        if reporting >= current_max && total_speed > 0 {
+                            if ramp_baseline_speed == 0 {
+                                // First measurement: record baseline and ramp
+                                ramp_baseline_speed = total_speed;
+                                render_max.store(current_max + 1, Ordering::SeqCst);
+                                last_ramp_time = Instant::now();
+                            } else if total_speed > ramp_baseline_speed {
+                                // Total throughput improved: keep ramping
+                                ramp_baseline_speed = total_speed;
+                                render_max.store(current_max + 1, Ordering::SeqCst);
+                                last_ramp_time = Instant::now();
+                            } else {
+                                // Throughput stalled or dropped: stop ramping
+                                render_ramping.store(false, Ordering::SeqCst);
+                                if total_speed < ramp_baseline_speed * 85 / 100 {
+                                    // Significant drop: revert last ramp
+                                    lower_max(
+                                        &render_max,
+                                        current_max.saturating_sub(1).max(1),
+                                    );
+                                }
+                            }
+                        }
+                    }
+
                     let completed = render_transcoded.load(Ordering::Relaxed);
                     let errs = render_errors.load(Ordering::Relaxed);
                     let cancelled = CANCELLED.load(Ordering::Relaxed);
@@ -474,7 +526,7 @@ fn main() -> Result<()> {
                         if !cancelled && prev_viewport > 0 {
                             write!(stderr, "\x1b[{}A\x1b[J", prev_viewport).ok();
                         }
-                        write!(stderr, "\x1b[?25h").ok();
+                        write!(stderr, "\x1b[?25h\x1b[0m").ok();
                         stderr.flush().ok();
                         break;
                     }
@@ -557,7 +609,7 @@ fn main() -> Result<()> {
 
                 let last_err: Option<anyhow::Error> = loop {
                     if CANCELLED.load(Ordering::Relaxed) {
-                        break Some(anyhow::anyhow!("cancelled"));
+                        break None;
                     }
 
                     // Wait for an encoding slot
@@ -579,19 +631,6 @@ fn main() -> Result<()> {
                         *info = Some((short_name.clone(), size_str.clone()));
                         my_slot.progress.store(0, Ordering::Relaxed);
                         my_slot.speed.store(0, Ordering::Relaxed);
-
-                        // Ramp: allow one more concurrent encode
-                        if ramping.load(Ordering::SeqCst) {
-                            let current = max_encoders.load(Ordering::SeqCst);
-                            if current < jobs as u32 {
-                                let _ = max_encoders.compare_exchange(
-                                    current,
-                                    current + 1,
-                                    Ordering::SeqCst,
-                                    Ordering::SeqCst,
-                                );
-                            }
-                        }
                     }
 
                     match transcode::transcode(
@@ -690,8 +729,8 @@ fn main() -> Result<()> {
         }
     });
 
-    // Drain any completed lines the render thread didn't get to
-    {
+    // Drain any completed lines the render thread didn't get to (skip on cancel)
+    if !CANCELLED.load(Ordering::Relaxed) {
         let lines = completed_lines.lock().unwrap();
         for line in lines.iter() {
             eprintln!("{}", line);
