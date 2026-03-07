@@ -526,13 +526,16 @@ fn validate_output(output: &Path, source: &Path, source_duration_secs: f64) -> R
 }
 
 /// Check if an ffmpeg error looks like an NVENC session limit issue.
-/// Only matches NVENC-specific initialization errors, not generic exit codes.
+/// Matches NVENC-specific init errors and the "Nothing was written" pattern
+/// which is the most common manifestation of session exhaustion.
+/// Does NOT match generic exit codes (e.g. exit 69) which can be decoder failures.
 pub fn is_session_limit_error(error_msg: &str) -> bool {
     error_msg.contains("out of memory")
         || error_msg.contains("InitializeEncoder failed")
         || error_msg.contains("Cannot init NVENC")
         || error_msg.contains("OpenEncodeSessionEx failed")
         || error_msg.contains("No capable devices found")
+        || error_msg.contains("Nothing was written into output file")
 }
 
 /// Check if an ffmpeg error is a subtitle mapping/copy issue.
@@ -629,12 +632,13 @@ mod tests {
         assert!(is_session_limit_error("OpenEncodeSessionEx failed"));
         assert!(is_session_limit_error("InitializeEncoder failed: out of memory"));
         assert!(!is_session_limit_error("some other error"));
+        // "Nothing was written" is the common NVENC session exhaustion pattern
+        assert!(is_session_limit_error(
+            "Nothing was written into output file"
+        ));
         // Generic exit codes should NOT be classified as session limit
         assert!(!is_session_limit_error(
             "ffmpeg exited with status exit status: 69"
-        ));
-        assert!(!is_session_limit_error(
-            "Nothing was written into output file"
         ));
     }
 
