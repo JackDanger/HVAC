@@ -73,6 +73,7 @@ struct WorkItem {
 struct WorkerSlot {
     info: Mutex<Option<(String, String)>>,
     progress: AtomicU64,
+    speed: AtomicU64, // encoding speed * 100 (e.g. 1.23x = 123)
 }
 
 fn truncate_name(name: &str, max_len: usize) -> String {
@@ -303,6 +304,7 @@ fn main() -> Result<()> {
             Arc::new(WorkerSlot {
                 info: Mutex::new(None),
                 progress: AtomicU64::new(0),
+                speed: AtomicU64::new(0),
             })
         })
         .collect();
@@ -360,8 +362,18 @@ fn main() -> Result<()> {
                             let info = slot.info.lock().unwrap();
                             if let Some((ref name, ref size)) = *info {
                                 let pct = slot.progress.load(Ordering::Relaxed) / 10;
-                                writeln!(stderr, "  \u{25b6} {:>2}% {} ({})", pct, name, size)
-                                    .ok();
+                                let spd = slot.speed.load(Ordering::Relaxed);
+                                let speed_str = if spd > 0 {
+                                    format!(" {}.{}x", spd / 100, (spd % 100) / 10)
+                                } else {
+                                    String::new()
+                                };
+                                writeln!(
+                                    stderr,
+                                    "  \u{25b6} {:>2}%{} {} ({})",
+                                    pct, speed_str, name, size
+                                )
+                                .ok();
                                 viewport += 1;
                             }
                         }
@@ -462,6 +474,7 @@ fn main() -> Result<()> {
                     *info = Some((short_name.clone(), size_str));
                 }
                 my_slot.progress.store(0, Ordering::Relaxed);
+                my_slot.speed.store(0, Ordering::Relaxed);
 
                 let output_path = if overwrite {
                     None
@@ -510,6 +523,7 @@ fn main() -> Result<()> {
                         item.duration_secs,
                         &item.pix_fmt,
                         Some(&my_slot.progress),
+                        Some(&my_slot.speed),
                         use_libx265,
                     ) {
                         Ok(out_path) => {
@@ -564,6 +578,7 @@ fn main() -> Result<()> {
                 // Deactivate slot
                 *my_slot.info.lock().unwrap() = None;
                 my_slot.progress.store(0, Ordering::Relaxed);
+                my_slot.speed.store(0, Ordering::Relaxed);
                 completed_units.fetch_add(1000, Ordering::Relaxed);
             });
         }
