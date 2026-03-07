@@ -1,4 +1,5 @@
 use anyhow::Result;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
@@ -6,9 +7,12 @@ use crate::iso;
 
 /// Scan a directory tree for media files matching the given extensions.
 /// Also picks up .iso and .img disc images.
+/// Deduplicates by canonical path to avoid encoding the same file twice
+/// when symlinks create multiple paths to the same file.
 pub fn scan(root: &Path, extensions: &[String]) -> Result<Vec<PathBuf>> {
     let ext_lower: Vec<String> = extensions.iter().map(|e| e.to_lowercase()).collect();
 
+    let mut seen = HashSet::new();
     let mut files: Vec<PathBuf> = WalkDir::new(root)
         .follow_links(true)
         .into_iter()
@@ -23,6 +27,10 @@ pub fn scan(root: &Path, extensions: &[String]) -> Result<Vec<PathBuf>> {
                 .and_then(|e| e.to_str())
                 .map(|e| ext_lower.contains(&e.to_lowercase()))
                 .unwrap_or(false)
+        })
+        .filter(|entry| {
+            let canonical = entry.path().canonicalize().unwrap_or_else(|_| entry.path().to_path_buf());
+            seen.insert(canonical)
         })
         .map(|entry| entry.into_path())
         .collect();
@@ -80,5 +88,22 @@ mod tests {
         let exts = vec!["mkv".to_string()];
         let files = scan(dir.path(), &exts).unwrap();
         assert_eq!(files.len(), 1);
+    }
+
+    #[test]
+    fn test_scan_dedup_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let season1 = dir.path().join("Season 1");
+        fs::create_dir(&season1).unwrap();
+        fs::write(season1.join("ep01.mkv"), "fake").unwrap();
+
+        // Create a symlink that points to the same directory
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&season1, dir.path().join("Season 01")).unwrap();
+            let exts = vec!["mkv".to_string()];
+            let files = scan(dir.path(), &exts).unwrap();
+            assert_eq!(files.len(), 1, "symlinked duplicate should be deduplicated");
+        }
     }
 }
