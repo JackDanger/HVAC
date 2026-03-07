@@ -9,7 +9,7 @@ mod util;
 use anyhow::{Context, Result};
 use clap::Parser;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -62,6 +62,9 @@ struct WorkItem {
     duration_secs: f64,
     pix_fmt: String,
     source_size: u64,
+    /// For ISO entries: path to the ISO and path inside the ISO.
+    iso_path: Option<PathBuf>,
+    inner_path: Option<String>,
 }
 
 /// Per-worker display slot for the render thread.
@@ -152,8 +155,6 @@ fn main() -> Result<()> {
     let gpu = gpu::detect_gpu()?;
     eprintln!("GPU: {} ({})", gpu.name, gpu.encoder);
 
-    let has_isomage = iso::isomage_available();
-
     let files = scanner::scan(&cli.path, &cfg.media_extensions)?;
 
     if files.is_empty() {
@@ -162,21 +163,12 @@ fn main() -> Result<()> {
     }
 
     // --- Phase 1: Expand disc images into flat work list ---
-    let tmp_dir = std::env::temp_dir().join("tdorr_iso_extract");
-    let mut expanded: Vec<PathBuf> = Vec::new();
+    // Each entry is (path, optional iso_path, optional inner_path)
+    let mut expanded: Vec<(PathBuf, Option<PathBuf>, Option<String>)> = Vec::new();
     let mut errors = 0u32;
 
     for file in &files {
         if iso::is_disc_image(file) {
-            if !has_isomage {
-                eprintln!(
-                    "  skip: {:?} (isomage not found, required for .iso/.img)",
-                    file.file_name().unwrap_or_default()
-                );
-                errors += 1;
-                continue;
-            }
-
             eprintln!("  iso: {:?}", file.file_name().unwrap_or_default());
 
             let inner_files = match iso::list_media_files(file, &cfg.media_extensions) {
@@ -195,19 +187,13 @@ fn main() -> Result<()> {
 
             eprintln!("    {} media files inside", inner_files.len());
 
-            for inner_path in &inner_files {
-                match iso::extract_file(file, inner_path, &tmp_dir) {
-                    Ok(p) => expanded.push(p),
-                    Err(e) => {
-                        eprintln!("    extract failed: {:?}: {}", inner_path, e);
-                        errors += 1;
-                    }
-                }
+            for inner_path in inner_files {
+                expanded.push((file.clone(), Some(file.clone()), Some(inner_path)));
             }
             continue;
         }
 
-        expanded.push(file.clone());
+        expanded.push((file.clone(), None, None));
     }
 
     // --- Phase 2: Probe all files to partition skip vs. transcode ---
@@ -216,19 +202,47 @@ fn main() -> Result<()> {
     let mut skipped = 0u32;
     let mut resumed = 0u32;
 
-    for file in &expanded {
-        match probe::probe_file(file) {
+    for (file, iso_p, inner_p) in &expanded {
+        let probe_result = if let (Some(ip), Some(inner)) = (iso_p, inner_p) {
+            probe::probe_iso_file(ip, inner)
+        } else {
+            probe::probe_file(file)
+        };
+
+        match probe_result {
             Ok(info) => {
                 if probe::meets_target(&info, &cfg.target) {
                     skipped += 1;
                 } else {
-                    let source_size = std::fs::metadata(file).map(|m| m.len()).unwrap_or(0);
+                    let source_size = if iso_p.is_some() {
+                        // For ISO entries, get size from isomage
+                        iso_p
+                            .as_ref()
+                            .and_then(|ip| {
+                                inner_p
+                                    .as_ref()
+                                    .and_then(|inner| iso::file_size(ip, inner).ok())
+                            })
+                            .unwrap_or(0)
+                    } else {
+                        std::fs::metadata(file).map(|m| m.len()).unwrap_or(0)
+                    };
 
                     // Resume: check if output already exists and is valid
                     if !cli.overwrite {
                         let out_dir = cli.output_dir.as_deref().or(cfg.output_dir.as_deref());
+                        let source_for_output = if let Some(ref inner) = inner_p {
+                            let inner_name = std::path::Path::new(inner)
+                                .file_name()
+                                .unwrap_or_default();
+                            file.parent()
+                                .unwrap_or(std::path::Path::new("."))
+                                .join(inner_name)
+                        } else {
+                            file.clone()
+                        };
                         if let Ok(out_path) =
-                            transcode::output_path(file, out_dir, &cfg.target.container)
+                            transcode::output_path(&source_for_output, out_dir, &cfg.target.container)
                         {
                             if transcode::output_already_valid(&out_path, file, info.duration_secs)
                             {
@@ -244,6 +258,8 @@ fn main() -> Result<()> {
                         duration_secs: info.duration_secs,
                         pix_fmt: info.pix_fmt,
                         source_size,
+                        iso_path: iso_p.clone(),
+                        inner_path: inner_p.clone(),
                     });
                 }
             }
@@ -263,7 +279,6 @@ fn main() -> Result<()> {
         } else {
             eprintln!("All {} files already meet target.", expanded.len());
         }
-        let _ = std::fs::remove_dir_all(&tmp_dir);
         return Ok(());
     }
 
@@ -307,7 +322,6 @@ fn main() -> Result<()> {
             to_transcode.len(),
             format_size(total_size)
         );
-        let _ = std::fs::remove_dir_all(&tmp_dir);
         return Ok(());
     }
 
@@ -559,12 +573,25 @@ fn main() -> Result<()> {
                 }
 
                 let item = &to_transcode[idx];
-                let name = item
-                    .path
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string();
+                let name = if let Some(ref inner) = item.inner_path {
+                    // For ISO entries, show "iso_name:inner_name"
+                    let iso_name = item
+                        .path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy();
+                    let inner_name = Path::new(inner)
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy();
+                    format!("{}:{}", iso_name, inner_name)
+                } else {
+                    item.path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string()
+                };
                 let short_name = truncate_name(&name, 60);
                 let size_str = format_size(item.source_size);
 
@@ -577,11 +604,20 @@ fn main() -> Result<()> {
                     my_slot.speed.store(0, Ordering::Relaxed);
                 }
 
-                let output_path = if overwrite {
+                let output_path = if overwrite && item.iso_path.is_none() {
                     None
                 } else {
                     let out_dir = output_dir.as_deref().or(cfg.output_dir.as_deref());
-                    match transcode::output_path(&item.path, out_dir, &cfg.target.container) {
+                    // For ISO entries, build a virtual source path from the inner filename
+                    let source_for_output = if let Some(ref inner) = item.inner_path {
+                        let inner_name = Path::new(inner)
+                            .file_name()
+                            .unwrap_or_default();
+                        item.path.parent().unwrap_or(Path::new(".")).join(inner_name)
+                    } else {
+                        item.path.clone()
+                    };
+                    match transcode::output_path(&source_for_output, out_dir, &cfg.target.container) {
                         Ok(p) => Some(p),
                         Err(e) => {
                             completed_lines
@@ -625,17 +661,40 @@ fn main() -> Result<()> {
                         my_slot.speed.store(0, Ordering::Relaxed);
                     }
 
-                    match transcode::transcode(
-                        &item.path,
-                        output_path.as_deref(),
-                        &cfg.target,
-                        &gpu,
-                        item.bitrate_kbps,
-                        item.duration_secs,
-                        &item.pix_fmt,
-                        Some(&my_slot.progress),
-                        Some(&my_slot.speed),
-                    ) {
+                    let encode_result = if let (Some(ref iso), Some(ref inner)) =
+                        (item.iso_path.as_ref(), item.inner_path.as_ref())
+                    {
+                        // ISO entry: stream from disc image to ffmpeg
+                        let out = output_path
+                            .as_deref()
+                            .expect("ISO entries always need an output path");
+                        transcode::transcode_iso(
+                            iso,
+                            inner,
+                            out,
+                            &cfg.target,
+                            &gpu,
+                            item.bitrate_kbps,
+                            item.duration_secs,
+                            &item.pix_fmt,
+                            Some(&my_slot.progress),
+                            Some(&my_slot.speed),
+                        )
+                    } else {
+                        transcode::transcode(
+                            &item.path,
+                            output_path.as_deref(),
+                            &cfg.target,
+                            &gpu,
+                            item.bitrate_kbps,
+                            item.duration_secs,
+                            &item.pix_fmt,
+                            Some(&my_slot.progress),
+                            Some(&my_slot.speed),
+                        )
+                    };
+
+                    match encode_result {
                         Ok(out_path) => {
                             active_encoders.fetch_sub(1, Ordering::SeqCst);
 
@@ -734,7 +793,6 @@ fn main() -> Result<()> {
     let was_cancelled = CANCELLED.load(Ordering::Relaxed);
 
     if was_cancelled {
-        let _ = std::fs::remove_dir_all(&tmp_dir);
         eprintln!(
             "\nCancelled: {} transcoded before interrupt",
             transcoded.load(Ordering::Relaxed)
@@ -777,9 +835,6 @@ fn main() -> Result<()> {
             );
         }
     }
-
-    // Clean up temp extraction dir
-    let _ = std::fs::remove_dir_all(&tmp_dir);
 
     let final_transcoded = transcoded.load(Ordering::Relaxed);
     let final_errors = error_count.load(Ordering::Relaxed);

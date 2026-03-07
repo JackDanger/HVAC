@@ -251,6 +251,208 @@ pub fn transcode(
     Ok(final_output)
 }
 
+/// Transcode a file from inside an ISO by streaming it to ffmpeg via stdin.
+/// The ISO contents are piped directly to ffmpeg without extracting to disk.
+#[allow(clippy::too_many_arguments)]
+pub fn transcode_iso(
+    iso_path: &Path,
+    inner_path: &str,
+    output: &Path,
+    target: &TargetConfig,
+    gpu: &GpuInfo,
+    source_bitrate_kbps: u32,
+    source_duration_secs: f64,
+    source_pix_fmt: &str,
+    progress: Option<&AtomicU64>,
+    speed: Option<&AtomicU64>,
+) -> Result<PathBuf> {
+    let final_output = output.to_path_buf();
+
+    let mut cmd = Command::new("ffmpeg");
+    cmd.args(["-hide_banner", "-y"]);
+
+    // Input from stdin
+    cmd.args(["-i", "pipe:0"]);
+
+    let is_10bit = probe::is_10bit(source_pix_fmt);
+
+    // Video encoding with GPU (same as transcode())
+    match gpu.kind {
+        GpuKind::Nvidia => {
+            cmd.args(["-c:v", "hevc_nvenc"]);
+            let nvenc_preset = match target.preset.as_str() {
+                "slow" | "slower" | "veryslow" => "p7",
+                "medium" => "p4",
+                "fast" | "faster" | "veryfast" => "p1",
+                other => other,
+            };
+            cmd.args(["-preset", nvenc_preset]);
+            cmd.args(["-rc", "vbr"]);
+            cmd.args(["-cq", &target.quality.to_string()]);
+            if source_bitrate_kbps > 0 {
+                cmd.args(["-maxrate", &format!("{}k", source_bitrate_kbps)]);
+                cmd.args(["-bufsize", &format!("{}k", source_bitrate_kbps * 2)]);
+            }
+            cmd.args(["-b:v", "0"]);
+            if is_10bit {
+                cmd.args(["-pix_fmt", "p010le"]);
+            }
+        }
+        GpuKind::Intel => {
+            cmd.args(["-vaapi_device", "/dev/dri/renderD128"]);
+            cmd.args(["-c:v", "hevc_vaapi"]);
+            cmd.args(["-global_quality", &target.quality.to_string()]);
+            if source_bitrate_kbps > 0 {
+                cmd.args(["-maxrate", &format!("{}k", source_bitrate_kbps)]);
+                cmd.args(["-bufsize", &format!("{}k", source_bitrate_kbps * 2)]);
+            }
+            if is_10bit {
+                cmd.args(["-vf", "format=p010le,hwupload"]);
+            } else {
+                cmd.args(["-vf", "format=nv12,hwupload"]);
+            }
+        }
+        GpuKind::Apple => {
+            cmd.args(["-c:v", "hevc_videotoolbox"]);
+            cmd.args(["-q:v", &target.quality.to_string()]);
+            if source_bitrate_kbps > 0 {
+                cmd.args(["-maxrate", &format!("{}k", source_bitrate_kbps)]);
+                cmd.args(["-bufsize", &format!("{}k", source_bitrate_kbps * 2)]);
+            }
+        }
+    }
+
+    // Audio
+    cmd.args(["-c:a", &target.audio_codec]);
+
+    // Subtitles
+    if target.subtitle_codec == "copy" {
+        cmd.args(["-c:s", "copy"]);
+    }
+
+    // Map streams
+    cmd.args(["-map", "0:v:0"]);
+    cmd.args(["-map", "0:a?"]);
+    cmd.args(["-map", "0:s?"]);
+
+    // Progress reporting
+    if progress.is_some() {
+        cmd.args(["-progress", "pipe:1", "-nostats"]);
+    }
+
+    // Output
+    cmd.arg(&final_output);
+
+    log::debug!("Running (piped from ISO): {:?}", cmd);
+
+    cmd.stderr(Stdio::piped());
+    cmd.stdin(Stdio::piped());
+    if progress.is_some() {
+        cmd.stdout(Stdio::piped());
+    } else {
+        cmd.stdout(Stdio::null());
+    }
+
+    let mut guard = ChildGuard(cmd.spawn().context("Failed to execute ffmpeg")?);
+    let stderr = guard.0.stderr.take().unwrap();
+    let stdin = guard.0.stdin.take().unwrap();
+
+    // Stream ISO contents to ffmpeg stdin in a background thread
+    let iso = iso_path.to_path_buf();
+    let inner = inner_path.to_string();
+    let stdin_handle = std::thread::spawn(move || {
+        let mut stdin = stdin;
+        let _ = crate::iso::cat_file(&iso, &inner, &mut stdin);
+        // Drop stdin to signal EOF to ffmpeg
+    });
+
+    // Drain stderr in background
+    let stderr_handle = std::thread::spawn(move || {
+        let reader = std::io::BufReader::new(stderr);
+        let mut buf = String::new();
+        for line in reader.lines().map_while(Result::ok) {
+            buf.push_str(&line);
+            buf.push('\n');
+        }
+        buf
+    });
+
+    // Parse progress from stdout
+    if let Some(prog) = progress {
+        let stdout = guard.0.stdout.take().unwrap();
+        let reader = std::io::BufReader::new(stdout);
+        let duration_us = (source_duration_secs * 1_000_000.0) as i64;
+
+        for line in reader.lines().map_while(Result::ok) {
+            if let Some(time_str) = line.strip_prefix("out_time_us=") {
+                if let Ok(us) = time_str.parse::<i64>() {
+                    if duration_us > 0 && us > 0 {
+                        let pos =
+                            ((us as f64 / duration_us as f64) * 1000.0).clamp(0.0, 1000.0) as u64;
+                        prog.store(pos, Ordering::Relaxed);
+                    }
+                }
+            } else if let Some(speed_str) = line.strip_prefix("speed=") {
+                if let Some(spd) = speed {
+                    let trimmed = speed_str.trim_end_matches('x');
+                    if let Ok(v) = trimmed.parse::<f64>() {
+                        spd.store((v * 100.0) as u64, Ordering::Relaxed);
+                    }
+                }
+            }
+        }
+    }
+
+    let status = guard.0.wait().context("Failed to wait for ffmpeg")?;
+    let stderr_output = stderr_handle.join().unwrap_or_default();
+    let _ = stdin_handle.join();
+
+    // Disarm the guard
+    std::mem::forget(guard);
+
+    if !status.success() {
+        let _ = std::fs::remove_file(&final_output);
+        let context = last_n_lines(&stderr_output, 3);
+        bail!("ffmpeg failed ({}): {}", status, context);
+    }
+
+    // Validate output (can't compare to source size for ISO streams,
+    // just check it's non-empty and has valid duration)
+    let out_meta = std::fs::metadata(&final_output).context("Output file does not exist")?;
+    if out_meta.len() == 0 {
+        let _ = std::fs::remove_file(&final_output);
+        bail!("Output file is empty");
+    }
+
+    let out_info = probe::probe_file(&final_output).context("ffprobe cannot read output file")?;
+    if out_info.codec == "unknown" {
+        let _ = std::fs::remove_file(&final_output);
+        bail!("Output has no recognizable video codec");
+    }
+
+    if source_duration_secs > 0.0 && out_info.duration_secs > 0.0 {
+        let diff = (source_duration_secs - out_info.duration_secs).abs();
+        if diff > 5.0 {
+            let _ = std::fs::remove_file(&final_output);
+            bail!(
+                "Duration mismatch: source {:.1}s vs output {:.1}s (diff {:.1}s)",
+                source_duration_secs,
+                out_info.duration_secs,
+                diff
+            );
+        }
+    }
+
+    log::debug!(
+        "ISO transcode done: {} codec, {:.1}s, {} bytes",
+        out_info.codec,
+        out_info.duration_secs,
+        out_meta.len()
+    );
+
+    Ok(final_output)
+}
+
 /// Return the size of the output file, or 0 if it doesn't exist.
 pub fn output_size(path: &Path) -> u64 {
     std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
