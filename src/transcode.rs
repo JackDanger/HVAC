@@ -63,7 +63,6 @@ pub fn transcode(
     source_pix_fmt: &str,
     progress: Option<&AtomicU64>,
     speed: Option<&AtomicU64>,
-    use_libx265: bool,
 ) -> Result<PathBuf> {
     let final_output = match output {
         Some(p) => p.to_path_buf(),
@@ -83,72 +82,53 @@ pub fn transcode(
     let mut cmd = Command::new("ffmpeg");
     cmd.args(["-hide_banner", "-y"]);
 
-    // CUDA-accelerated decode (must come before -i)
-    if use_libx265 && gpu.kind == GpuKind::Nvidia {
-        cmd.args(["-hwaccel", "cuda"]);
-    }
-
     // Input
     cmd.args(["-i"]).arg(source);
 
     let is_10bit = probe::is_10bit(source_pix_fmt);
 
-    // Video encoding
-    if use_libx265 {
-        // Software encode with libx265 (no NVENC session limit)
-        cmd.args(["-c:v", "libx265"]);
-        cmd.args(["-preset", &target.preset]);
-        cmd.args(["-crf", &target.quality.to_string()]);
-        if source_bitrate_kbps > 0 {
-            cmd.args(["-maxrate", &format!("{}k", source_bitrate_kbps)]);
-            cmd.args(["-bufsize", &format!("{}k", source_bitrate_kbps * 2)]);
-        }
-        if is_10bit {
-            cmd.args(["-pix_fmt", "yuv420p10le"]);
-        }
-    } else {
-        match gpu.kind {
-            GpuKind::Nvidia => {
-                cmd.args(["-c:v", "hevc_nvenc"]);
-                let nvenc_preset = match target.preset.as_str() {
-                    "slow" | "slower" | "veryslow" => "p7",
-                    "medium" => "p4",
-                    "fast" | "faster" | "veryfast" => "p1",
-                    other => other,
-                };
-                cmd.args(["-preset", nvenc_preset]);
-                cmd.args(["-rc", "vbr"]);
-                cmd.args(["-cq", &target.quality.to_string()]);
-                if source_bitrate_kbps > 0 {
-                    cmd.args(["-maxrate", &format!("{}k", source_bitrate_kbps)]);
-                    cmd.args(["-bufsize", &format!("{}k", source_bitrate_kbps * 2)]);
-                }
-                cmd.args(["-b:v", "0"]);
-                if is_10bit {
-                    cmd.args(["-pix_fmt", "p010le"]);
-                }
+    // Video encoding with GPU
+    match gpu.kind {
+        GpuKind::Nvidia => {
+            cmd.args(["-c:v", "hevc_nvenc"]);
+            let nvenc_preset = match target.preset.as_str() {
+                "slow" | "slower" | "veryslow" => "p7",
+                "medium" => "p4",
+                "fast" | "faster" | "veryfast" => "p1",
+                other => other,
+            };
+            cmd.args(["-preset", nvenc_preset]);
+            cmd.args(["-rc", "vbr"]);
+            cmd.args(["-cq", &target.quality.to_string()]);
+            if source_bitrate_kbps > 0 {
+                cmd.args(["-maxrate", &format!("{}k", source_bitrate_kbps)]);
+                cmd.args(["-bufsize", &format!("{}k", source_bitrate_kbps * 2)]);
             }
-            GpuKind::Intel => {
-                cmd.args(["-vaapi_device", "/dev/dri/renderD128"]);
-                cmd.args(["-c:v", "hevc_vaapi"]);
-                cmd.args(["-global_quality", &target.quality.to_string()]);
-                if source_bitrate_kbps > 0 {
-                    cmd.args(["-maxrate", &format!("{}k", source_bitrate_kbps)]);
-                    cmd.args(["-bufsize", &format!("{}k", source_bitrate_kbps * 2)]);
-                }
-                if is_10bit {
-                    cmd.args(["-vf", "format=p010le,hwupload"]);
-                } else {
-                    cmd.args(["-vf", "format=nv12,hwupload"]);
-                }
+            cmd.args(["-b:v", "0"]);
+            if is_10bit {
+                cmd.args(["-pix_fmt", "p010le"]);
             }
-            GpuKind::Apple => {
-                cmd.args(["-c:v", "hevc_videotoolbox"]);
-                cmd.args(["-q:v", &target.quality.to_string()]);
-                if source_bitrate_kbps > 0 {
-                    cmd.args(["-maxrate", &format!("{}k", source_bitrate_kbps)]);
-                    cmd.args(["-bufsize", &format!("{}k", source_bitrate_kbps * 2)]);
-                }
+        }
+        GpuKind::Intel => {
+            cmd.args(["-vaapi_device", "/dev/dri/renderD128"]);
+            cmd.args(["-c:v", "hevc_vaapi"]);
+            cmd.args(["-global_quality", &target.quality.to_string()]);
+            if source_bitrate_kbps > 0 {
+                cmd.args(["-maxrate", &format!("{}k", source_bitrate_kbps)]);
+                cmd.args(["-bufsize", &format!("{}k", source_bitrate_kbps * 2)]);
+            }
+            if is_10bit {
+                cmd.args(["-vf", "format=p010le,hwupload"]);
+            } else {
+                cmd.args(["-vf", "format=nv12,hwupload"]);
+            }
+        }
+        GpuKind::Apple => {
+            cmd.args(["-c:v", "hevc_videotoolbox"]);
+            cmd.args(["-q:v", &target.quality.to_string()]);
+            if source_bitrate_kbps > 0 {
+                cmd.args(["-maxrate", &format!("{}k", source_bitrate_kbps)]);
+                cmd.args(["-bufsize", &format!("{}k", source_bitrate_kbps * 2)]);
             }
         }
     }
