@@ -7,7 +7,7 @@ mod transcode;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
+use indicatif::{ProgressBar, ProgressStyle};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -257,34 +257,16 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    // --- Phase 3: Transcode with multi-progress bars ---
-    let mp = MultiProgress::with_draw_target(ProgressDrawTarget::stderr_with_hz(8));
-
-    let worker_style = ProgressStyle::with_template(
-        "  {msg:<42} {bar:20.green/dark_gray} {percent:>3}%  {prefix}",
-    )
-    .unwrap()
-    .progress_chars("━╸─");
-
-    let main_style = ProgressStyle::with_template(
-        "  {bar:40.cyan/blue} {pos}/{len} transcoded  [{elapsed_precise}]",
-    )
-    .unwrap()
-    .progress_chars("━╸─");
-
-    // Worker bars first (top), then main bar (bottom) — order matters for display
-    let worker_bars: Vec<ProgressBar> = (0..jobs)
-        .map(|_| {
-            let bar = mp.add(ProgressBar::new(1000));
-            bar.set_style(worker_style.clone());
-            bar.set_message("waiting...");
-            bar.enable_steady_tick(std::time::Duration::from_millis(250));
-            bar
-        })
-        .collect();
-
-    let main_bar = mp.add(ProgressBar::new(to_transcode.len() as u64));
-    main_bar.set_style(main_style);
+    // --- Phase 3: Transcode with progress bar ---
+    let bar = ProgressBar::new(to_transcode.len() as u64);
+    bar.set_style(
+        ProgressStyle::with_template(
+            "  {bar:40.cyan/blue} {pos}/{len} transcoded  [{elapsed_precise}]  {msg}",
+        )
+        .unwrap()
+        .progress_chars("━╸─"),
+    );
+    bar.enable_steady_tick(std::time::Duration::from_secs(1));
 
     let transcoded = Arc::new(AtomicU32::new(0));
     let error_count = Arc::new(AtomicU32::new(errors));
@@ -299,7 +281,7 @@ fn main() -> Result<()> {
     let output_dir = cli.output_dir.clone();
 
     std::thread::scope(|s| {
-        for worker_bar in worker_bars.iter().take(jobs) {
+        for _ in 0..jobs {
             let to_transcode = Arc::clone(&to_transcode);
             let next_idx = Arc::clone(&next_idx);
             let transcoded = Arc::clone(&transcoded);
@@ -309,21 +291,16 @@ fn main() -> Result<()> {
             let bytes_output = Arc::clone(&bytes_output);
             let cfg = Arc::clone(&cfg);
             let gpu = Arc::clone(&gpu);
-            let bar = worker_bar.clone();
-            let main_bar = main_bar.clone();
+            let bar = bar.clone();
             let output_dir = output_dir.clone();
 
             s.spawn(move || loop {
                 if CANCELLED.load(Ordering::Relaxed) {
-                    bar.set_message("cancelled");
-                    bar.abandon();
                     break;
                 }
 
                 let idx = next_idx.fetch_add(1, Ordering::Relaxed) as usize;
                 if idx >= to_transcode.len() {
-                    bar.set_message("done");
-                    bar.finish();
                     break;
                 }
 
@@ -334,10 +311,9 @@ fn main() -> Result<()> {
                     .unwrap_or_default()
                     .to_string_lossy()
                     .to_string();
+                let short_name = truncate_name(&name, 50);
 
-                bar.set_message(truncate_name(&name, 42));
-                bar.set_position(0);
-                bar.set_prefix("");
+                bar.println(format!("  ▶ {short_name}"));
 
                 let output_path = if overwrite {
                     None
@@ -346,9 +322,9 @@ fn main() -> Result<()> {
                     match transcode::output_path(&item.path, out_dir, &cfg.target.container) {
                         Ok(p) => Some(p),
                         Err(e) => {
-                            log::error!("Failed to compute output path: {}", e);
+                            bar.println(format!("  ✗ {short_name}: {e}"));
                             error_count.fetch_add(1, Ordering::Relaxed);
-                            main_bar.inc(1);
+                            bar.inc(1);
                             continue;
                         }
                     }
@@ -362,8 +338,9 @@ fn main() -> Result<()> {
                         break;
                     }
                     if attempt > 0 {
-                        bar.set_prefix(format!("retry {attempt}/{MAX_RETRIES}"));
-                        bar.set_position(0);
+                        bar.println(format!(
+                            "  ↻ {short_name} retry {attempt}/{MAX_RETRIES}"
+                        ));
                         std::thread::sleep(std::time::Duration::from_secs(
                             RETRY_DELAY_SECS * attempt as u64,
                         ));
@@ -377,7 +354,7 @@ fn main() -> Result<()> {
                         item.bitrate_kbps,
                         item.duration_secs,
                         &item.pix_fmt,
-                        Some(&bar),
+                        None,
                     ) {
                         Ok(out_path) => {
                             let out_size = transcode::output_size(&out_path);
@@ -388,6 +365,19 @@ fn main() -> Result<()> {
                                     .fetch_add(item.source_size - out_size, Ordering::Relaxed);
                             }
                             transcoded.fetch_add(1, Ordering::Relaxed);
+                            let saved_pct = if item.source_size > 0 {
+                                ((item.source_size as f64 - out_size as f64)
+                                    / item.source_size as f64
+                                    * 100.0) as i32
+                            } else {
+                                0
+                            };
+                            bar.println(format!(
+                                "  ✓ {short_name} ({} → {}, {}%)",
+                                format_size(item.source_size),
+                                format_size(out_size),
+                                saved_pct
+                            ));
                             last_err = None;
                             break;
                         }
@@ -395,12 +385,6 @@ fn main() -> Result<()> {
                             let err_str = e.to_string();
                             if attempt < MAX_RETRIES && transcode::is_session_limit_error(&err_str)
                             {
-                                log::warn!(
-                                    "NVENC session limit hit for {:?}, retry {}/{}",
-                                    item.path,
-                                    attempt + 1,
-                                    MAX_RETRIES
-                                );
                                 last_err = Some(e);
                                 continue;
                             }
@@ -411,20 +395,16 @@ fn main() -> Result<()> {
                 }
 
                 if let Some(e) = last_err {
-                    log::error!("Failed to transcode {:?}: {}", item.path, e);
+                    bar.println(format!("  ✗ {short_name}: {e}"));
                     error_count.fetch_add(1, Ordering::Relaxed);
                 }
 
-                main_bar.inc(1);
+                bar.inc(1);
             });
         }
     });
 
-    // Clear all progress bars now that workers are done
-    for bar in &worker_bars {
-        bar.finish_and_clear();
-    }
-    main_bar.finish_and_clear();
+    bar.finish_and_clear();
 
     // Clean up any leftover .tdorr_tmp_* files from this or previous runs
     cleanup_tmp_files(&to_transcode);
