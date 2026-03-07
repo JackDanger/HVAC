@@ -63,6 +63,7 @@ pub fn transcode(
     source_pix_fmt: &str,
     progress: Option<&AtomicU64>,
     speed: Option<&AtomicU64>,
+    skip_subs: bool,
 ) -> Result<PathBuf> {
     let final_output = match output {
         Some(p) => p.to_path_buf(),
@@ -137,14 +138,16 @@ pub fn transcode(
     cmd.args(["-c:a", &target.audio_codec]);
 
     // Subtitles
-    if target.subtitle_codec == "copy" {
+    if !skip_subs && target.subtitle_codec == "copy" {
         cmd.args(["-c:s", "copy"]);
     }
 
     // Map video, audio, and subtitle streams — skip attached pics (cover art)
     cmd.args(["-map", "0:v:0"]);
     cmd.args(["-map", "0:a?"]);
-    cmd.args(["-map", "0:s?"]);
+    if !skip_subs {
+        cmd.args(["-map", "0:s?"]);
+    }
 
     // Progress reporting via stdout if caller wants it
     if progress.is_some() {
@@ -154,7 +157,7 @@ pub fn transcode(
     // Output
     cmd.arg(&final_output);
 
-    log::debug!("Running: {:?}", cmd);
+    log::debug!("Running{}: {:?}", if skip_subs { " (no subs)" } else { "" }, cmd);
 
     // Pipe stderr always; pipe stdout only if tracking progress
     cmd.stderr(Stdio::piped());
@@ -266,6 +269,7 @@ pub fn transcode_iso(
     source_pix_fmt: &str,
     progress: Option<&AtomicU64>,
     speed: Option<&AtomicU64>,
+    skip_subs: bool,
 ) -> Result<PathBuf> {
     let final_output = output.to_path_buf();
 
@@ -327,14 +331,16 @@ pub fn transcode_iso(
     cmd.args(["-c:a", &target.audio_codec]);
 
     // Subtitles
-    if target.subtitle_codec == "copy" {
+    if !skip_subs && target.subtitle_codec == "copy" {
         cmd.args(["-c:s", "copy"]);
     }
 
     // Map streams
     cmd.args(["-map", "0:v:0"]);
     cmd.args(["-map", "0:a?"]);
-    cmd.args(["-map", "0:s?"]);
+    if !skip_subs {
+        cmd.args(["-map", "0:s?"]);
+    }
 
     // Progress reporting
     if progress.is_some() {
@@ -344,7 +350,7 @@ pub fn transcode_iso(
     // Output
     cmd.arg(&final_output);
 
-    log::debug!("Running (piped from ISO): {:?}", cmd);
+    log::debug!("Running (piped from ISO{}): {:?}", if skip_subs { ", no subs" } else { "" }, cmd);
 
     cmd.stderr(Stdio::piped());
     cmd.stdin(Stdio::piped());
@@ -520,15 +526,26 @@ fn validate_output(output: &Path, source: &Path, source_duration_secs: f64) -> R
 }
 
 /// Check if an ffmpeg error looks like an NVENC session limit issue.
+/// Only matches NVENC-specific initialization errors, not generic exit codes.
 pub fn is_session_limit_error(error_msg: &str) -> bool {
     error_msg.contains("out of memory")
         || error_msg.contains("InitializeEncoder failed")
         || error_msg.contains("Cannot init NVENC")
         || error_msg.contains("OpenEncodeSessionEx failed")
         || error_msg.contains("No capable devices found")
-        || error_msg.contains("Nothing was written into output file")
-        || error_msg.contains("exit status: 69")
-        || error_msg.contains("exit status: 187")
+}
+
+/// Check if an ffmpeg error is a subtitle mapping/copy issue.
+/// These can be retried by dropping subtitle streams.
+pub fn is_subtitle_error(error_msg: &str) -> bool {
+    error_msg.contains("Subtitle encoding currently only possible from text to text or bitmap to bitmap")
+        || error_msg.contains("subtitle codec not supported")
+        || error_msg.contains("Error while opening encoder for output stream")
+            && error_msg.contains("subtitle")
+        || error_msg.contains("Could not find tag for codec")
+            && (error_msg.contains("subtitle") || error_msg.contains("hdmv_pgs"))
+        || error_msg.contains("Unknown encoder")
+            && error_msg.contains("subtitle")
 }
 
 /// Check if an ffmpeg error is a disk space issue.
@@ -608,14 +625,28 @@ mod tests {
 
     #[test]
     fn test_is_session_limit_error() {
-        assert!(is_session_limit_error(
+        assert!(is_session_limit_error("Cannot init NVENC encoder"));
+        assert!(is_session_limit_error("OpenEncodeSessionEx failed"));
+        assert!(is_session_limit_error("InitializeEncoder failed: out of memory"));
+        assert!(!is_session_limit_error("some other error"));
+        // Generic exit codes should NOT be classified as session limit
+        assert!(!is_session_limit_error(
             "ffmpeg exited with status exit status: 69"
         ));
-        assert!(is_session_limit_error("Cannot init NVENC encoder"));
-        assert!(is_session_limit_error(
-            "ffmpeg failed (exit status: 187): Nothing was written into output file"
+        assert!(!is_session_limit_error(
+            "Nothing was written into output file"
         ));
-        assert!(!is_session_limit_error("some other error"));
+    }
+
+    #[test]
+    fn test_is_subtitle_error() {
+        assert!(is_subtitle_error(
+            "Subtitle encoding currently only possible from text to text or bitmap to bitmap"
+        ));
+        assert!(is_subtitle_error(
+            "Could not find tag for codec hdmv_pgs_subtitle"
+        ));
+        assert!(!is_subtitle_error("some other error"));
     }
 
     #[test]
