@@ -29,7 +29,7 @@ pub fn detect_gpu() -> Result<GpuInfo> {
                 kind: GpuKind::Nvidia,
             });
         }
-        log::warn!("NVIDIA GPU found but hevc_nvenc not available in ffmpeg");
+        log::debug!("NVIDIA GPU found but hevc_nvenc not available in ffmpeg");
     }
 
     // Check for Intel GPU via vainfo or /dev/dri
@@ -41,7 +41,7 @@ pub fn detect_gpu() -> Result<GpuInfo> {
                 kind: GpuKind::Intel,
             });
         }
-        log::warn!("Intel GPU found but hevc_vaapi not available in ffmpeg");
+        log::debug!("Intel GPU found but hevc_vaapi not available in ffmpeg");
     }
 
     // Check for Apple VideoToolbox (macOS)
@@ -53,7 +53,7 @@ pub fn detect_gpu() -> Result<GpuInfo> {
                 kind: GpuKind::Apple,
             });
         }
-        log::warn!("Apple GPU found but hevc_videotoolbox not available in ffmpeg");
+        log::debug!("Apple GPU found but hevc_videotoolbox not available in ffmpeg");
     }
 
     bail!(
@@ -156,8 +156,8 @@ pub fn available_sessions(gpu: &GpuInfo) -> usize {
     }
     let active = active_nvenc_sessions();
     if active > 0 {
-        log::info!(
-            "Detected {} active NVENC sessions from other processes",
+        eprintln!(
+            "Note: {} active NVENC sessions from other processes",
             active
         );
     }

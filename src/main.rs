@@ -4,21 +4,28 @@ mod iso;
 mod probe;
 mod scanner;
 mod transcode;
+mod util;
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+use util::format_size;
 
 const MAX_RETRIES: u32 = 3;
 const RETRY_DELAY_SECS: u64 = 10;
 
 static CANCELLED: AtomicBool = AtomicBool::new(false);
 
+/// Directories where tmp files may exist — populated before encoding starts,
+/// read by the CTRL-C handler for cleanup on force-quit.
+static TMP_DIRS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
 #[derive(Parser, Debug)]
-#[command(name = "tdorr", about = "Media transcoder that I could figure out")]
+#[command(name = "tdorr", about = "GPU-accelerated media transcoder")]
 struct Cli {
     /// Path to YAML config file
     #[arg(short, long, default_value = "config.yaml")]
@@ -66,16 +73,6 @@ fn truncate_name(name: &str, max_len: usize) -> String {
     }
 }
 
-fn format_size(bytes: u64) -> String {
-    if bytes >= 1024 * 1024 * 1024 {
-        format!("{:.1}GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
-    } else if bytes >= 1024 * 1024 {
-        format!("{:.0}MB", bytes as f64 / (1024.0 * 1024.0))
-    } else {
-        format!("{:.0}KB", bytes as f64 / 1024.0)
-    }
-}
-
 fn main() -> Result<()> {
     env_logger::init();
     let cli = Cli::parse();
@@ -83,9 +80,8 @@ fn main() -> Result<()> {
     // Register CTRL-C handler: first press cancels gracefully, second force-exits
     ctrlc::set_handler(move || {
         if CANCELLED.load(Ordering::Relaxed) {
-            eprintln!("\nForce quitting...");
-            // Clean up tmp files before force exit
-            cleanup_tmp_files_best_effort();
+            // Second press: force-quit with best-effort cleanup
+            cleanup_tmp_dirs();
             std::process::exit(130);
         }
         CANCELLED.store(true, Ordering::Relaxed);
@@ -96,8 +92,6 @@ fn main() -> Result<()> {
     let cfg = config::Config::load(&cli.config)
         .with_context(|| format!("Failed to load config from {:?}", cli.config))?;
 
-    log::info!("tdorr starting with config: {:?}", cli.config);
-
     let gpu = gpu::detect_gpu()?;
     eprintln!("GPU: {} ({})", gpu.name, gpu.encoder);
 
@@ -106,7 +100,7 @@ fn main() -> Result<()> {
     let files = scanner::scan(&cli.path, &cfg.media_extensions)?;
 
     if files.is_empty() {
-        eprintln!("No media files found. Nothing to do.");
+        eprintln!("No media files found in {:?}", cli.path);
         return Ok(());
     }
 
@@ -118,37 +112,37 @@ fn main() -> Result<()> {
     for file in &files {
         if iso::is_disc_image(file) {
             if !has_isomage {
-                log::error!(
-                    "Skipping {:?}: isomage is required for .iso/.img files but not found in PATH",
-                    file
+                eprintln!(
+                    "  skip: {:?} (isomage not found, required for .iso/.img)",
+                    file.file_name().unwrap_or_default()
                 );
                 errors += 1;
                 continue;
             }
 
-            eprintln!("Disc image: {:?}", file.file_name().unwrap_or_default());
+            eprintln!("  iso: {:?}", file.file_name().unwrap_or_default());
 
             let inner_files = match iso::list_media_files(file, &cfg.media_extensions) {
                 Ok(f) => f,
                 Err(e) => {
-                    log::error!("Failed to list contents of {:?}: {}", file, e);
+                    eprintln!("  skip: {:?}: {}", file.file_name().unwrap_or_default(), e);
                     errors += 1;
                     continue;
                 }
             };
 
             if inner_files.is_empty() {
-                eprintln!("  No media files found inside disc image");
+                eprintln!("    no media files inside");
                 continue;
             }
 
-            eprintln!("  Found {} media files inside", inner_files.len());
+            eprintln!("    {} media files inside", inner_files.len());
 
             for inner_path in &inner_files {
                 match iso::extract_file(file, inner_path, &tmp_dir) {
                     Ok(p) => expanded.push(p),
                     Err(e) => {
-                        log::error!("Failed to extract {:?} from {:?}: {}", inner_path, file, e);
+                        eprintln!("    extract failed: {:?}: {}", inner_path, e);
                         errors += 1;
                     }
                 }
@@ -181,7 +175,6 @@ fn main() -> Result<()> {
                         {
                             if transcode::output_already_valid(&out_path, file, info.duration_secs)
                             {
-                                log::info!("Resuming: {:?} already transcoded, skipping", file);
                                 resumed += 1;
                                 continue;
                             }
@@ -198,25 +191,25 @@ fn main() -> Result<()> {
                 }
             }
             Err(e) => {
-                log::error!("Failed to probe {:?}: {}", file, e);
+                eprintln!(
+                    "  skip: {:?}: {}",
+                    file.file_name().unwrap_or_default(),
+                    e
+                );
                 errors += 1;
             }
         }
     }
 
     if to_transcode.is_empty() {
-        let msg = if resumed > 0 {
-            format!(
+        if resumed > 0 {
+            eprintln!(
                 "Nothing to do: {} already HEVC, {} already transcoded",
                 skipped, resumed
-            )
+            );
         } else {
-            format!(
-                "All {} files already meet target. Nothing to do.",
-                expanded.len()
-            )
-        };
-        eprintln!("{msg}");
+            eprintln!("All {} files already meet target.", expanded.len());
+        }
         let _ = std::fs::remove_dir_all(&tmp_dir);
         return Ok(());
     }
@@ -257,11 +250,23 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    // --- Phase 3: Transcode with progress bar ---
+    // Register work directories for CTRL-C cleanup
+    {
+        let mut dirs = TMP_DIRS.lock().unwrap();
+        for item in &to_transcode {
+            if let Some(parent) = item.path.parent() {
+                if !dirs.contains(&parent.to_path_buf()) {
+                    dirs.push(parent.to_path_buf());
+                }
+            }
+        }
+    }
+
+    // --- Phase 3: Transcode ---
     let bar = ProgressBar::new(to_transcode.len() as u64);
     bar.set_style(
         ProgressStyle::with_template(
-            "  {bar:40.cyan/blue} {pos}/{len} transcoded  [{elapsed_precise}]  {msg}",
+            "  {bar:40.cyan/blue} {pos}/{len} transcoded  [{elapsed_precise}]",
         )
         .unwrap()
         .progress_chars("━╸─"),
@@ -311,9 +316,7 @@ fn main() -> Result<()> {
                     .unwrap_or_default()
                     .to_string_lossy()
                     .to_string();
-                let short_name = truncate_name(&name, 50);
-
-                bar.println(format!("  ▶ {short_name}"));
+                let short_name = truncate_name(&name, 60);
 
                 let output_path = if overwrite {
                     None
@@ -334,7 +337,7 @@ fn main() -> Result<()> {
                 let mut last_err = None;
                 for attempt in 0..=MAX_RETRIES {
                     if CANCELLED.load(Ordering::Relaxed) {
-                        last_err = Some(anyhow::anyhow!("cancelled by user"));
+                        last_err = Some(anyhow::anyhow!("cancelled"));
                         break;
                     }
                     if attempt > 0 {
@@ -354,7 +357,6 @@ fn main() -> Result<()> {
                         item.bitrate_kbps,
                         item.duration_secs,
                         &item.pix_fmt,
-                        None,
                     ) {
                         Ok(out_path) => {
                             let out_size = transcode::output_size(&out_path);
@@ -373,11 +375,13 @@ fn main() -> Result<()> {
                                 0
                             };
                             bar.println(format!(
-                                "  ✓ {short_name} ({} → {}, {}%)",
+                                "  ✓ {short_name} ({} → {}, -{}%)",
                                 format_size(item.source_size),
                                 format_size(out_size),
                                 saved_pct
                             ));
+                            // stdout: completed output path for pipeline use
+                            println!("{}", out_path.display());
                             last_err = None;
                             break;
                         }
@@ -406,10 +410,12 @@ fn main() -> Result<()> {
 
     bar.finish_and_clear();
 
-    // Clean up any leftover .tdorr_tmp_* files from this or previous runs
-    cleanup_tmp_files(&to_transcode);
+    // Clean up any leftover .tdorr_tmp_* files
+    cleanup_tmp_dirs();
 
-    if CANCELLED.load(Ordering::Relaxed) {
+    let was_cancelled = CANCELLED.load(Ordering::Relaxed);
+
+    if was_cancelled {
         let _ = std::fs::remove_dir_all(&tmp_dir);
         eprintln!(
             "\nCancelled: {} transcoded before interrupt",
@@ -426,7 +432,8 @@ fn main() -> Result<()> {
         eprintln!("Replacing originals with transcoded copies...");
         for item in to_transcode.iter() {
             let out_dir = cli.output_dir.as_deref().or(cfg.output_dir.as_deref());
-            if let Ok(out_path) = transcode::output_path(&item.path, out_dir, &cfg.target.container)
+            if let Ok(out_path) =
+                transcode::output_path(&item.path, out_dir, &cfg.target.container)
             {
                 if out_path.exists() {
                     match transcode::replace_original(&item.path, &out_path, item.duration_secs) {
@@ -435,7 +442,11 @@ fn main() -> Result<()> {
                             replace_saved += saved;
                         }
                         Err(e) => {
-                            log::error!("Failed to replace {:?}: {}", item.path, e);
+                            eprintln!(
+                                "  ✗ replace {:?}: {}",
+                                item.path.file_name().unwrap_or_default(),
+                                e
+                            );
                         }
                     }
                 }
@@ -467,7 +478,7 @@ fn main() -> Result<()> {
     if total_input > 0 {
         let pct = (total_saved as f64 / total_input as f64) * 100.0;
         eprintln!(
-            "Size: {} -> {} (saved {}, {:.0}% reduction)",
+            "Size: {} → {} (saved {}, {:.0}% reduction)",
             format_size(total_input),
             format_size(total_output),
             format_size(total_saved),
@@ -475,17 +486,19 @@ fn main() -> Result<()> {
         );
     }
 
+    // Exit non-zero if any files failed
+    if final_errors > 0 {
+        std::process::exit(1);
+    }
+
     Ok(())
 }
 
-/// Remove .tdorr_tmp_* files from directories containing work items.
-fn cleanup_tmp_files(items: &[WorkItem]) {
-    let mut dirs_checked = std::collections::HashSet::new();
-    for item in items {
-        if let Some(parent) = item.path.parent() {
-            if dirs_checked.insert(parent.to_path_buf()) {
-                cleanup_tmp_in_dir(parent);
-            }
+/// Remove .tdorr_tmp_* files from all registered work directories.
+fn cleanup_tmp_dirs() {
+    if let Ok(dirs) = TMP_DIRS.lock() {
+        for dir in dirs.iter() {
+            cleanup_tmp_in_dir(dir);
         }
     }
 }
@@ -495,19 +508,9 @@ fn cleanup_tmp_in_dir(dir: &std::path::Path) {
         for entry in entries.flatten() {
             if let Some(name) = entry.file_name().to_str() {
                 if name.starts_with(".tdorr_tmp_") {
-                    log::info!("Cleaning up tmp file: {:?}", entry.path());
                     let _ = std::fs::remove_file(entry.path());
                 }
             }
         }
-    }
-}
-
-/// Best-effort cleanup for force-quit (second CTRL-C).
-/// Scans common locations for tmp files.
-fn cleanup_tmp_files_best_effort() {
-    // Check current directory and /tmp
-    for dir in &[".", "/tmp"] {
-        cleanup_tmp_in_dir(std::path::Path::new(dir));
     }
 }
