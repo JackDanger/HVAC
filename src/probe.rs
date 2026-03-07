@@ -70,8 +70,57 @@ pub fn probe_file(path: &Path) -> Result<MediaInfo> {
         );
     }
 
+    parse_ffprobe_json(&output.stdout)
+}
+
+/// Probe a file inside an ISO by streaming its contents to ffprobe via stdin.
+pub fn probe_iso_file(iso_path: &Path, inner_path: &str) -> Result<MediaInfo> {
+    use std::process::Stdio;
+
+    let mut child = Command::new("ffprobe")
+        .args([
+            "-v",
+            "quiet",
+            "-print_format",
+            "json",
+            "-show_streams",
+            "-show_format",
+            "-i",
+            "pipe:0",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("Failed to spawn ffprobe")?;
+
+    let mut stdin = child.stdin.take().unwrap();
+
+    // Stream ISO contents to ffprobe in a thread (ffprobe may close stdin early)
+    let iso = iso_path.to_path_buf();
+    let inner = inner_path.to_string();
+    let writer_handle = std::thread::spawn(move || {
+        let _ = crate::iso::cat_file(&iso, &inner, &mut stdin);
+    });
+
+    let output = child.wait_with_output().context("Failed to wait for ffprobe")?;
+    let _ = writer_handle.join();
+
+    if !output.status.success() {
+        bail!(
+            "ffprobe failed for {}:{}: {}",
+            iso_path.display(),
+            inner_path,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    parse_ffprobe_json(&output.stdout)
+}
+
+fn parse_ffprobe_json(json: &[u8]) -> Result<MediaInfo> {
     let probe: FfprobeOutput =
-        serde_json::from_slice(&output.stdout).context("Failed to parse ffprobe JSON output")?;
+        serde_json::from_slice(json).context("Failed to parse ffprobe JSON output")?;
 
     let video_stream = probe
         .streams
