@@ -56,10 +56,16 @@ const ASCII_SYMBOLS: Symbols = Symbols {
 };
 
 fn detect_symbols() -> &'static Symbols {
-    for var in &["LC_ALL", "LC_CTYPE", "LANG"] {
-        if let Ok(val) = std::env::var(var) {
-            let v = val.to_lowercase();
-            if v.contains("utf-8") || v.contains("utf8") {
+    // Check the actual system locale, not just env vars.
+    // LANG=en_US.UTF-8 can be set even when the locale isn't installed,
+    // causing the C library to fall back to ASCII.
+    unsafe {
+        // Initialize locale from environment (required before nl_langinfo)
+        libc::setlocale(libc::LC_ALL, b"\0".as_ptr() as *const _);
+        let codeset = libc::nl_langinfo(libc::CODESET);
+        if !codeset.is_null() {
+            let cs = std::ffi::CStr::from_ptr(codeset).to_string_lossy().to_lowercase();
+            if cs.contains("utf-8") || cs.contains("utf8") {
                 return &UNICODE_SYMBOLS;
             }
         }
