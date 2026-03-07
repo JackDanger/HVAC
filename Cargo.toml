@@ -1,6 +1,6 @@
 [package]
 name = "tdorr"
-version = "0.4.0"
+version = "4.0.0"
 edition = "2021"
 description = "GPU-accelerated media transcoding that I could figure out"
 license = "MIT"
