@@ -266,12 +266,13 @@ fn main() -> Result<()> {
     let bar = ProgressBar::new(to_transcode.len() as u64);
     bar.set_style(
         ProgressStyle::with_template(
-            "  {bar:40.cyan/blue} {pos}/{len} transcoded  [{elapsed_precise}]",
+            "  {bar:40.cyan/blue} {pos}/{len} done  [{elapsed_precise}]  {msg}",
         )
         .unwrap()
         .progress_chars("━╸─"),
     );
     bar.enable_steady_tick(std::time::Duration::from_secs(1));
+    let active_count = Arc::new(AtomicU32::new(0));
 
     let transcoded = Arc::new(AtomicU32::new(0));
     let error_count = Arc::new(AtomicU32::new(errors));
@@ -298,6 +299,7 @@ fn main() -> Result<()> {
             let gpu = Arc::clone(&gpu);
             let bar = bar.clone();
             let output_dir = output_dir.clone();
+            let active_count = Arc::clone(&active_count);
 
             s.spawn(move || loop {
                 if CANCELLED.load(Ordering::Relaxed) {
@@ -317,6 +319,10 @@ fn main() -> Result<()> {
                     .to_string_lossy()
                     .to_string();
                 let short_name = truncate_name(&name, 60);
+
+                let active = active_count.fetch_add(1, Ordering::Relaxed) + 1;
+                bar.set_message(format!("{active} encoding"));
+                bar.println(format!("  ▶ {short_name} ({})", format_size(item.source_size)));
 
                 let output_path = if overwrite {
                     None
@@ -403,6 +409,12 @@ fn main() -> Result<()> {
                     error_count.fetch_add(1, Ordering::Relaxed);
                 }
 
+                let active = active_count.fetch_sub(1, Ordering::Relaxed) - 1;
+                if active > 0 {
+                    bar.set_message(format!("{active} encoding"));
+                } else {
+                    bar.set_message("".to_string());
+                }
                 bar.inc(1);
             });
         }
