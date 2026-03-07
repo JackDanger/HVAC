@@ -323,7 +323,9 @@ pub fn is_session_limit_error(error_msg: &str) -> bool {
         || error_msg.contains("Cannot init NVENC")
         || error_msg.contains("OpenEncodeSessionEx failed")
         || error_msg.contains("No capable devices found")
+        || error_msg.contains("Nothing was written into output file")
         || error_msg.contains("exit status: 69")
+        || error_msg.contains("exit status: 187")
 }
 
 /// Extract the last N non-empty lines from a string, joined by " | ".
@@ -400,6 +402,9 @@ mod tests {
             "ffmpeg exited with status exit status: 69"
         ));
         assert!(is_session_limit_error("Cannot init NVENC encoder"));
+        assert!(is_session_limit_error(
+            "ffmpeg failed (exit status: 187): Nothing was written into output file"
+        ));
         assert!(!is_session_limit_error("some other error"));
     }
 
