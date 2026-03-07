@@ -530,6 +530,13 @@ pub fn is_session_limit_error(error_msg: &str) -> bool {
         || error_msg.contains("exit status: 187")
 }
 
+/// Check if an ffmpeg error is a disk space issue.
+pub fn is_disk_space_error(error_msg: &str) -> bool {
+    error_msg.contains("Disk quota exceeded")
+        || error_msg.contains("No space left on device")
+        || error_msg.contains("ENOSPC")
+}
+
 /// Extract the last N non-empty lines from a string, joined by " | ".
 fn last_n_lines(s: &str, n: usize) -> String {
     let lines: Vec<&str> = s.lines().filter(|l| !l.trim().is_empty()).collect();
@@ -608,6 +615,15 @@ mod tests {
             "ffmpeg failed (exit status: 187): Nothing was written into output file"
         ));
         assert!(!is_session_limit_error("some other error"));
+    }
+
+    #[test]
+    fn test_is_disk_space_error() {
+        assert!(is_disk_space_error(
+            "Error opening output file: Disk quota exceeded"
+        ));
+        assert!(is_disk_space_error("No space left on device"));
+        assert!(!is_disk_space_error("some other ffmpeg error"));
     }
 
     #[test]
