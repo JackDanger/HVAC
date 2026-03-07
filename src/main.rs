@@ -7,13 +7,15 @@ mod transcode;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 const MAX_RETRIES: u32 = 3;
 const RETRY_DELAY_SECS: u64 = 10;
+
+static CANCELLED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Parser, Debug)]
 #[command(name = "tdorr", about = "Media transcoder that I could figure out")]
@@ -77,6 +79,19 @@ fn format_size(bytes: u64) -> String {
 fn main() -> Result<()> {
     env_logger::init();
     let cli = Cli::parse();
+
+    // Register CTRL-C handler: first press cancels gracefully, second force-exits
+    ctrlc::set_handler(move || {
+        if CANCELLED.load(Ordering::Relaxed) {
+            eprintln!("\nForce quitting...");
+            // Clean up tmp files before force exit
+            cleanup_tmp_files_best_effort();
+            std::process::exit(130);
+        }
+        CANCELLED.store(true, Ordering::Relaxed);
+        eprintln!("\nCancelling after current encodes finish... (Ctrl-C again to force quit)");
+    })
+    .ok();
 
     let cfg = config::Config::load(&cli.config)
         .with_context(|| format!("Failed to load config from {:?}", cli.config))?;
@@ -243,7 +258,7 @@ fn main() -> Result<()> {
     }
 
     // --- Phase 3: Transcode with multi-progress bars ---
-    let mp = MultiProgress::new();
+    let mp = MultiProgress::with_draw_target(ProgressDrawTarget::stderr_with_hz(8));
 
     let worker_style = ProgressStyle::with_template(
         "  {msg:<42} {bar:20.green/dark_gray} {percent:>3}%  {prefix}",
@@ -257,19 +272,19 @@ fn main() -> Result<()> {
     .unwrap()
     .progress_chars("━╸─");
 
-    // Main bar at the bottom
-    let main_bar = mp.add(ProgressBar::new(to_transcode.len() as u64));
-    main_bar.set_style(main_style);
-
-    // Worker bars inserted above main bar
+    // Worker bars first (top), then main bar (bottom) — order matters for display
     let worker_bars: Vec<ProgressBar> = (0..jobs)
         .map(|_| {
-            let bar = mp.insert_before(&main_bar, ProgressBar::new(1000));
+            let bar = mp.add(ProgressBar::new(1000));
             bar.set_style(worker_style.clone());
-            bar.set_message("");
+            bar.set_message("waiting...");
+            bar.enable_steady_tick(std::time::Duration::from_millis(250));
             bar
         })
         .collect();
+
+    let main_bar = mp.add(ProgressBar::new(to_transcode.len() as u64));
+    main_bar.set_style(main_style);
 
     let transcoded = Arc::new(AtomicU32::new(0));
     let error_count = Arc::new(AtomicU32::new(errors));
@@ -299,9 +314,16 @@ fn main() -> Result<()> {
             let output_dir = output_dir.clone();
 
             s.spawn(move || loop {
+                if CANCELLED.load(Ordering::Relaxed) {
+                    bar.set_message("cancelled");
+                    bar.abandon();
+                    break;
+                }
+
                 let idx = next_idx.fetch_add(1, Ordering::Relaxed) as usize;
                 if idx >= to_transcode.len() {
-                    bar.finish_and_clear();
+                    bar.set_message("done");
+                    bar.finish();
                     break;
                 }
 
@@ -335,6 +357,10 @@ fn main() -> Result<()> {
                 // Retry loop for transient NVENC errors
                 let mut last_err = None;
                 for attempt in 0..=MAX_RETRIES {
+                    if CANCELLED.load(Ordering::Relaxed) {
+                        last_err = Some(anyhow::anyhow!("cancelled by user"));
+                        break;
+                    }
                     if attempt > 0 {
                         bar.set_prefix(format!("retry {attempt}/{MAX_RETRIES}"));
                         bar.set_position(0);
@@ -394,7 +420,23 @@ fn main() -> Result<()> {
         }
     });
 
+    // Clear all progress bars now that workers are done
+    for bar in &worker_bars {
+        bar.finish_and_clear();
+    }
     main_bar.finish_and_clear();
+
+    // Clean up any leftover .tdorr_tmp_* files from this or previous runs
+    cleanup_tmp_files(&to_transcode);
+
+    if CANCELLED.load(Ordering::Relaxed) {
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        eprintln!(
+            "\nCancelled: {} transcoded before interrupt",
+            transcoded.load(Ordering::Relaxed)
+        );
+        std::process::exit(130);
+    }
 
     // --- Phase 4: Replace originals if --replace ---
     let mut replaced = 0u32;
@@ -454,4 +496,38 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Remove .tdorr_tmp_* files from directories containing work items.
+fn cleanup_tmp_files(items: &[WorkItem]) {
+    let mut dirs_checked = std::collections::HashSet::new();
+    for item in items {
+        if let Some(parent) = item.path.parent() {
+            if dirs_checked.insert(parent.to_path_buf()) {
+                cleanup_tmp_in_dir(parent);
+            }
+        }
+    }
+}
+
+fn cleanup_tmp_in_dir(dir: &std::path::Path) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str() {
+                if name.starts_with(".tdorr_tmp_") {
+                    log::info!("Cleaning up tmp file: {:?}", entry.path());
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+    }
+}
+
+/// Best-effort cleanup for force-quit (second CTRL-C).
+/// Scans common locations for tmp files.
+fn cleanup_tmp_files_best_effort() {
+    // Check current directory and /tmp
+    for dir in &[".", "/tmp"] {
+        cleanup_tmp_in_dir(std::path::Path::new(dir));
+    }
 }
