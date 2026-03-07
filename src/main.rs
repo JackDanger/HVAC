@@ -62,9 +62,12 @@ struct WorkItem {
     duration_secs: f64,
     pix_fmt: String,
     source_size: u64,
-    /// For ISO entries: path to the ISO and path inside the ISO.
+    /// For ISO entries: path to the ISO file.
     iso_path: Option<PathBuf>,
+    /// For ISO with single file: path inside the ISO.
     inner_path: Option<String>,
+    /// For ISO main feature with multiple files: paths to concatenate in order.
+    inner_paths: Option<Vec<String>>,
 }
 
 /// Per-worker display slot for the render thread.
@@ -168,37 +171,61 @@ fn main() -> Result<()> {
     }
 
     // --- Phase 1: Expand disc images into flat work list ---
-    // Each entry is (path, optional iso_path, optional inner_path)
-    let mut expanded: Vec<(PathBuf, Option<PathBuf>, Option<String>)> = Vec::new();
+    // Each entry is (path, optional iso_path, optional inner_path, optional inner_paths)
+    let mut expanded: Vec<(PathBuf, Option<PathBuf>, Option<String>, Option<Vec<String>>)> =
+        Vec::new();
     let mut errors = 0u32;
 
     for file in &files {
         if iso::is_disc_image(file) {
-            eprintln!("  iso: {:?}", file.file_name().unwrap_or_default());
+            let iso_name = file.file_name().unwrap_or_default().to_string_lossy();
 
-            let inner_files = match iso::list_media_files(file, &cfg.media_extensions) {
-                Ok(f) => f,
+            let analysis = match iso::analyze_disc(file) {
+                Ok(a) => a,
                 Err(e) => {
-                    eprintln!("  skip: {:?}: {}", file.file_name().unwrap_or_default(), e);
+                    eprintln!("  skip: {}: {}", iso_name, e);
                     errors += 1;
                     continue;
                 }
             };
 
-            if inner_files.is_empty() {
-                eprintln!("    no media files inside");
+            if analysis.main_feature.is_empty() {
+                eprintln!("  skip: {}: no media files inside", iso_name);
                 continue;
             }
 
-            eprintln!("    {} media files inside", inner_files.len());
+            eprintln!(
+                "  iso: {} ({:?}, {} main feature files, {} extras)",
+                iso_name,
+                analysis.disc_type,
+                analysis.main_feature.len(),
+                analysis.extras.len(),
+            );
 
-            for inner_path in inner_files {
-                expanded.push((file.clone(), Some(file.clone()), Some(inner_path)));
+            if analysis.main_feature.len() == 1 {
+                // Single file: use inner_path
+                expanded.push((
+                    file.clone(),
+                    Some(file.clone()),
+                    Some(analysis.main_feature[0].path.clone()),
+                    None,
+                ));
+            } else {
+                // Multiple files: use inner_paths for concatenation
+                let paths: Vec<String> =
+                    analysis.main_feature.iter().map(|f| f.path.clone()).collect();
+                // Use the first file's path as the representative for probing
+                expanded.push((
+                    file.clone(),
+                    Some(file.clone()),
+                    Some(paths[0].clone()),
+                    Some(paths),
+                ));
             }
             continue;
         }
 
-        expanded.push((file.clone(), None, None));
+        expanded.push((file.clone(), None, None, None));
     }
 
     // --- Phase 2: Probe all files to partition skip vs. transcode ---
@@ -207,7 +234,7 @@ fn main() -> Result<()> {
     let mut skipped = 0u32;
     let mut resumed = 0u32;
 
-    for (file, iso_p, inner_p) in &expanded {
+    for (file, iso_p, inner_p, inner_ps) in &expanded {
         let probe_result = if let (Some(ip), Some(inner)) = (iso_p, inner_p) {
             probe::probe_iso_file(ip, inner)
         } else {
@@ -219,18 +246,34 @@ fn main() -> Result<()> {
                 if probe::meets_target(&info, &cfg.target) {
                     skipped += 1;
                 } else {
-                    let source_size = if iso_p.is_some() {
-                        // For ISO entries, get size from isomage
-                        iso_p
-                            .as_ref()
-                            .and_then(|ip| {
-                                inner_p
-                                    .as_ref()
-                                    .and_then(|inner| iso::file_size(ip, inner).ok())
-                            })
-                            .unwrap_or(0)
+                    let source_size = if let Some(ref ip) = iso_p {
+                        // For ISO entries with multiple files, sum all file sizes
+                        if let Some(ref paths) = inner_ps {
+                            paths
+                                .iter()
+                                .filter_map(|p| iso::file_size(ip, p).ok())
+                                .sum()
+                        } else if let Some(ref inner) = inner_p {
+                            iso::file_size(ip, inner).unwrap_or(0)
+                        } else {
+                            0
+                        }
                     } else {
                         std::fs::metadata(file).map(|m| m.len()).unwrap_or(0)
+                    };
+
+                    // For multi-file ISO features, estimate total duration
+                    // by scaling probe duration by file count ratio
+                    let duration_secs = if let Some(ref paths) = inner_ps {
+                        if paths.len() > 1 {
+                            // Probe was for just the first file; scale by count
+                            // This is approximate but avoids probing every file
+                            info.duration_secs * paths.len() as f64
+                        } else {
+                            info.duration_secs
+                        }
+                    } else {
+                        info.duration_secs
                     };
 
                     // Resume: check if output already exists and is valid
@@ -249,8 +292,7 @@ fn main() -> Result<()> {
                         if let Ok(out_path) =
                             transcode::output_path(&source_for_output, out_dir, &cfg.target.container)
                         {
-                            if transcode::output_already_valid(&out_path, file, info.duration_secs)
-                            {
+                            if transcode::output_already_valid(&out_path, file, duration_secs) {
                                 resumed += 1;
                                 continue;
                             }
@@ -260,11 +302,12 @@ fn main() -> Result<()> {
                     to_transcode.push(WorkItem {
                         path: file.clone(),
                         bitrate_kbps: info.bitrate_kbps,
-                        duration_secs: info.duration_secs,
+                        duration_secs,
                         pix_fmt: info.pix_fmt,
                         source_size,
                         iso_path: iso_p.clone(),
                         inner_path: inner_p.clone(),
+                        inner_paths: inner_ps.clone(),
                     });
                 }
             }
@@ -593,8 +636,16 @@ fn main() -> Result<()> {
                 }
 
                 let item = &to_transcode[idx];
-                let name = if let Some(ref inner) = item.inner_path {
-                    // For ISO entries, show "iso_name:inner_name"
+                let name = if let Some(ref paths) = item.inner_paths {
+                    // Multi-file ISO: show "iso_name (N files)"
+                    let iso_name = item
+                        .path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy();
+                    format!("{} ({} files)", iso_name, paths.len())
+                } else if let Some(ref inner) = item.inner_path {
+                    // Single-file ISO: show "iso_name:inner_name"
                     let iso_name = item
                         .path
                         .file_name()
@@ -628,12 +679,20 @@ fn main() -> Result<()> {
                     None
                 } else {
                     let out_dir = output_dir.as_deref().or(cfg.output_dir.as_deref());
-                    // For ISO entries, build a virtual source path from the inner filename
-                    let source_for_output = if let Some(ref inner) = item.inner_path {
-                        let inner_name = Path::new(inner)
-                            .file_name()
-                            .unwrap_or_default();
-                        item.path.parent().unwrap_or(Path::new(".")).join(inner_name)
+                    // For ISO entries: use ISO filename for output (not inner path)
+                    // For multi-file features, the ISO name is the natural output name
+                    let source_for_output = if item.iso_path.is_some() {
+                        if item.inner_paths.is_some() {
+                            // Multi-file: use ISO stem as output name
+                            item.path.clone()
+                        } else if let Some(ref inner) = item.inner_path {
+                            let inner_name = Path::new(inner)
+                                .file_name()
+                                .unwrap_or_default();
+                            item.path.parent().unwrap_or(Path::new(".")).join(inner_name)
+                        } else {
+                            item.path.clone()
+                        }
                     } else {
                         item.path.clone()
                     };
@@ -716,16 +775,22 @@ fn main() -> Result<()> {
                         my_slot.speed.store(0, Ordering::Relaxed);
                     }
 
-                    let encode_result = if let (Some(ref iso), Some(ref inner)) =
-                        (item.iso_path.as_ref(), item.inner_path.as_ref())
-                    {
+                    let encode_result = if let Some(ref iso) = item.iso_path {
                         // ISO entry: stream from disc image to ffmpeg
                         let out = output_path
                             .as_deref()
                             .expect("ISO entries always need an output path");
+                        // Use inner_paths (multi-file concat) or single inner_path
+                        let paths = item
+                            .inner_paths
+                            .clone()
+                            .or_else(|| {
+                                item.inner_path.as_ref().map(|p| vec![p.clone()])
+                            })
+                            .unwrap_or_default();
                         transcode::transcode_iso(
                             iso,
-                            inner,
+                            &paths,
                             out,
                             &cfg.target,
                             &gpu,

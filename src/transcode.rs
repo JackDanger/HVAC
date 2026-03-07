@@ -251,12 +251,13 @@ pub fn transcode(
     Ok(final_output)
 }
 
-/// Transcode a file from inside an ISO by streaming it to ffmpeg via stdin.
+/// Transcode file(s) from inside an ISO by streaming them to ffmpeg via stdin.
+/// Multiple inner paths are concatenated sequentially (e.g. Blu-ray chapters).
 /// The ISO contents are piped directly to ffmpeg without extracting to disk.
 #[allow(clippy::too_many_arguments)]
 pub fn transcode_iso(
     iso_path: &Path,
-    inner_path: &str,
+    inner_paths: &[String],
     output: &Path,
     target: &TargetConfig,
     gpu: &GpuInfo,
@@ -359,10 +360,10 @@ pub fn transcode_iso(
 
     // Stream ISO contents to ffmpeg stdin in a background thread
     let iso = iso_path.to_path_buf();
-    let inner = inner_path.to_string();
+    let paths = inner_paths.to_vec();
     let stdin_handle = std::thread::spawn(move || {
         let mut stdin = stdin;
-        let _ = crate::iso::cat_file(&iso, &inner, &mut stdin);
+        let _ = crate::iso::cat_files(&iso, &paths, &mut stdin);
         // Drop stdin to signal EOF to ffmpeg
     });
 
