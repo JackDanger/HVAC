@@ -19,7 +19,6 @@ log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
-indicatif = "0.17"
 walkdir = "2"
 
 [dev-dependencies]
