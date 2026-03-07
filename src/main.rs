@@ -248,11 +248,7 @@ fn main() -> Result<()> {
                 }
             }
             Err(e) => {
-                eprintln!(
-                    "  skip: {:?}: {}",
-                    file.file_name().unwrap_or_default(),
-                    e
-                );
+                eprintln!("  skip: {:?}: {}", file.file_name().unwrap_or_default(), e);
                 errors += 1;
             }
         }
@@ -368,8 +364,7 @@ fn main() -> Result<()> {
     std::thread::scope(|s| {
         // Render thread (also controls auto-ramp)
         {
-            let render_slots: Vec<Arc<WorkerSlot>> =
-                worker_slots.iter().map(Arc::clone).collect();
+            let render_slots: Vec<Arc<WorkerSlot>> = worker_slots.iter().map(Arc::clone).collect();
             let render_completed = Arc::clone(&completed_lines);
             let render_completed_units = Arc::clone(&completed_units);
             let render_transcoded = Arc::clone(&transcoded);
@@ -509,10 +504,7 @@ fn main() -> Result<()> {
                                 render_ramping.store(false, Ordering::SeqCst);
                                 if total_speed < ramp_baseline_speed * 85 / 100 {
                                     // Significant drop: revert last ramp
-                                    lower_max(
-                                        &render_max,
-                                        current_max.saturating_sub(1).max(1),
-                                    );
+                                    lower_max(&render_max, current_max.saturating_sub(1).max(1));
                                 }
                             }
                         }
@@ -683,8 +675,7 @@ fn main() -> Result<()> {
                                 // Stop ramping — we found the GPU's limit
                                 ramping.store(false, Ordering::SeqCst);
                                 // Lower the discovered max to current active count
-                                let active =
-                                    active_encoders.load(Ordering::SeqCst).max(1);
+                                let active = active_encoders.load(Ordering::SeqCst).max(1);
                                 lower_max(&max_encoders, active);
                                 // Hide this slot while retrying
                                 *my_slot.info.lock().unwrap() = None;
@@ -759,8 +750,7 @@ fn main() -> Result<()> {
         eprintln!("Replacing originals with transcoded copies...");
         for item in to_transcode.iter() {
             let out_dir = cli.output_dir.as_deref().or(cfg.output_dir.as_deref());
-            if let Ok(out_path) =
-                transcode::output_path(&item.path, out_dir, &cfg.target.container)
+            if let Ok(out_path) = transcode::output_path(&item.path, out_dir, &cfg.target.container)
             {
                 if out_path.exists() {
                     match transcode::replace_original(&item.path, &out_path, item.duration_secs) {
