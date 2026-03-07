@@ -1,3 +1,26 @@
+use anyhow::{bail, Context, Result};
+use std::path::Path;
+
+/// Returns available disk space in bytes for the filesystem containing `path`.
+pub fn available_disk_space(path: &Path) -> Result<u64> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let c_path =
+        CString::new(path.as_os_str().as_bytes()).context("Path contains null bytes")?;
+
+    unsafe {
+        let mut stat: libc::statvfs = std::mem::zeroed();
+        if libc::statvfs(c_path.as_ptr(), &mut stat) != 0 {
+            bail!(
+                "Failed to check disk space: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+        Ok(stat.f_bavail as u64 * stat.f_frsize as u64)
+    }
+}
+
 pub fn format_size(bytes: u64) -> String {
     if bytes >= 1024 * 1024 * 1024 {
         format!("{:.1}GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
@@ -11,6 +34,12 @@ pub fn format_size(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_available_disk_space() {
+        // Just verify the call succeeds — actual value depends on host
+        let _space = available_disk_space(Path::new("/")).unwrap();
+    }
 
     #[test]
     fn test_format_size() {

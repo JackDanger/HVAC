@@ -73,6 +73,7 @@ struct WorkerSlot {
     progress: AtomicU64,
     speed: AtomicU64,
     queued: AtomicBool,
+    disk_wait: AtomicBool,
 }
 
 fn truncate_name(name: &str, max_len: usize) -> String {
@@ -154,6 +155,10 @@ fn main() -> Result<()> {
 
     let gpu = gpu::detect_gpu()?;
     eprintln!("GPU: {} ({})", gpu.name, gpu.encoder);
+
+    if let Ok(avail) = util::available_disk_space(&cli.path) {
+        eprintln!("Disk: {} available", format_size(avail));
+    }
 
     let files = scanner::scan(&cli.path, &cfg.media_extensions)?;
 
@@ -348,6 +353,7 @@ fn main() -> Result<()> {
                 progress: AtomicU64::new(0),
                 speed: AtomicU64::new(0),
                 queued: AtomicBool::new(false),
+                disk_wait: AtomicBool::new(false),
             })
         })
         .collect();
@@ -362,6 +368,12 @@ fn main() -> Result<()> {
     let ramping = Arc::new(AtomicBool::new(auto_ramp));
     // How many workers are still alive (decremented on retirement)
     let worker_count = Arc::new(AtomicU32::new(jobs as u32));
+
+    // Disk space limiter: tracks estimated bytes reserved by in-flight encodes.
+    // We estimate output at source_size/2 (conservative for HEVC compression).
+    // 2GB margin prevents filesystem from getting dangerously full.
+    let disk_reserved = Arc::new(AtomicU64::new(0));
+    const DISK_MARGIN: u64 = 2 * 1024 * 1024 * 1024;
 
     let transcoded = Arc::new(AtomicU32::new(0));
     let error_count = Arc::new(AtomicU32::new(errors));
@@ -419,7 +431,14 @@ fn main() -> Result<()> {
                             let info = slot.info.lock().unwrap();
                             if let Some((ref name, ref size)) = *info {
                                 let is_excess = (slot_idx + 1) as u32 > max;
-                                if slot.queued.load(Ordering::Relaxed) && is_excess {
+                                if slot.disk_wait.load(Ordering::Relaxed) {
+                                    writeln!(
+                                        stderr,
+                                        "  \u{23f3}           {} ({})  waiting for disk",
+                                        name, size,
+                                    )
+                                    .ok();
+                                } else if slot.queued.load(Ordering::Relaxed) && is_excess {
                                     writeln!(
                                         stderr,
                                         "  \u{23f3}           {} ({})  queued {}/{}",
@@ -561,6 +580,7 @@ fn main() -> Result<()> {
             let max_encoders = Arc::clone(&max_encoders);
             let ramping = Arc::clone(&ramping);
             let worker_count = Arc::clone(&worker_count);
+            let disk_reserved = Arc::clone(&disk_reserved);
 
             s.spawn(move || 'outer: loop {
                 if CANCELLED.load(Ordering::Relaxed) {
@@ -632,13 +652,45 @@ fn main() -> Result<()> {
                     }
                 };
 
+                // Estimate output size for disk reservation (conservative: 50% of source)
+                let disk_estimate = (item.source_size / 2).max(100 * 1024 * 1024);
+
                 // Acquire encoding slot + encode with session-limit retry
                 let mut session_retries = 0u32;
+                let mut disk_space_retries = 0u32;
 
                 let last_err: Option<anyhow::Error> = loop {
                     if CANCELLED.load(Ordering::Relaxed) {
                         break None;
                     }
+
+                    // Check disk space before acquiring GPU slot.
+                    // Determine the output filesystem path for the check.
+                    let check_dir = output_path
+                        .as_deref()
+                        .and_then(|p| p.parent())
+                        .unwrap_or_else(|| item.path.parent().unwrap_or(Path::new("/")));
+
+                    let has_disk = if let Ok(avail) = util::available_disk_space(check_dir) {
+                        let reserved = disk_reserved.load(Ordering::SeqCst);
+                        let effective = avail.saturating_sub(reserved);
+                        // Always allow at least 1 encode (avoid deadlock when disk is tight)
+                        reserved == 0 || effective >= disk_estimate + DISK_MARGIN
+                    } else {
+                        true // Can't check? Proceed optimistically
+                    };
+
+                    if !has_disk {
+                        // Show disk wait status
+                        my_slot.disk_wait.store(true, Ordering::Relaxed);
+                        if !auto_ramp {
+                            let mut info = my_slot.info.lock().unwrap();
+                            *info = Some((short_name.clone(), size_str.clone()));
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(2000));
+                        continue;
+                    }
+                    my_slot.disk_wait.store(false, Ordering::Relaxed);
 
                     // Wait for an encoding slot
                     if !try_acquire(&active_encoders, &max_encoders) {
@@ -652,6 +704,9 @@ fn main() -> Result<()> {
                         continue;
                     }
                     my_slot.queued.store(false, Ordering::Relaxed);
+
+                    // Reserve disk space
+                    disk_reserved.fetch_add(disk_estimate, Ordering::SeqCst);
 
                     // In auto mode, become visible now that we have a slot
                     if auto_ramp {
@@ -697,6 +752,7 @@ fn main() -> Result<()> {
                     match encode_result {
                         Ok(out_path) => {
                             active_encoders.fetch_sub(1, Ordering::SeqCst);
+                            disk_reserved.fetch_sub(disk_estimate, Ordering::SeqCst);
 
                             let out_size = transcode::output_size(&out_path);
                             bytes_input.fetch_add(item.source_size, Ordering::Relaxed);
@@ -725,7 +781,22 @@ fn main() -> Result<()> {
                         }
                         Err(e) => {
                             active_encoders.fetch_sub(1, Ordering::SeqCst);
+                            disk_reserved.fetch_sub(disk_estimate, Ordering::SeqCst);
                             let err_str = e.to_string();
+
+                            // Disk space error: wait for other encodes to free space, then retry
+                            if transcode::is_disk_space_error(&err_str)
+                                && disk_space_retries < MAX_SESSION_RETRIES
+                            {
+                                disk_space_retries += 1;
+                                my_slot.disk_wait.store(true, Ordering::Relaxed);
+                                *my_slot.info.lock().unwrap() = Some((short_name.clone(), size_str.clone()));
+                                my_slot.progress.store(0, Ordering::Relaxed);
+                                my_slot.speed.store(0, Ordering::Relaxed);
+                                std::thread::sleep(std::time::Duration::from_secs(5));
+                                my_slot.disk_wait.store(false, Ordering::Relaxed);
+                                continue;
+                            }
 
                             if transcode::is_session_limit_error(&err_str)
                                 && session_retries < MAX_SESSION_RETRIES
@@ -760,6 +831,7 @@ fn main() -> Result<()> {
                 my_slot.progress.store(0, Ordering::Relaxed);
                 my_slot.speed.store(0, Ordering::Relaxed);
                 my_slot.queued.store(false, Ordering::Relaxed);
+                my_slot.disk_wait.store(false, Ordering::Relaxed);
                 completed_units.fetch_add(1000, Ordering::Relaxed);
 
                 // Retire excess workers: if we discovered a lower capacity,
