@@ -289,7 +289,7 @@ fn main() -> Result<()> {
             String::new()
         },
         if auto_ramp {
-            format!("up to {} jobs (auto)", jobs)
+            "auto concurrency".to_string()
         } else {
             format!("{} jobs", jobs)
         },
