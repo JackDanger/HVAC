@@ -202,15 +202,30 @@ pub fn transcode(
 
         if !status.success() {
             let _ = std::fs::remove_file(&final_output);
-            let last_line = stderr_output.lines().last().unwrap_or("unknown error");
-            bail!("ffmpeg exited with status {}: {}", status, last_line);
+            let last_lines = last_n_lines(&stderr_output, 3);
+            bail!("ffmpeg exited with status {}: {}", status, last_lines);
         }
     } else {
-        let status = cmd.status().context("Failed to execute ffmpeg")?;
+        cmd.stdout(Stdio::null());
+        cmd.stderr(Stdio::piped());
+
+        let mut guard = ChildGuard(cmd.spawn().context("Failed to execute ffmpeg")?);
+        let stderr = guard.0.stderr.take().unwrap();
+
+        let stderr_handle = std::thread::spawn(move || {
+            let mut buf = String::new();
+            std::io::Read::read_to_string(&mut std::io::BufReader::new(stderr), &mut buf).ok();
+            buf
+        });
+
+        let status = guard.0.wait().context("Failed to wait for ffmpeg")?;
+        let stderr_output = stderr_handle.join().unwrap_or_default();
+        std::mem::forget(guard);
 
         if !status.success() {
             let _ = std::fs::remove_file(&final_output);
-            bail!("ffmpeg exited with status: {}", status);
+            let last_lines = last_n_lines(&stderr_output, 3);
+            bail!("ffmpeg exited with status {}: {}", status, last_lines);
         }
     }
 
@@ -337,7 +352,21 @@ pub fn is_session_limit_error(error_msg: &str) -> bool {
     error_msg.contains("out of memory")
         || error_msg.contains("InitializeEncoder failed")
         || error_msg.contains("Cannot init NVENC")
+        || error_msg.contains("OpenEncodeSessionEx failed")
+        || error_msg.contains("No capable devices found")
         || error_msg.contains("exit status: 69")
+}
+
+/// Extract the last N non-empty lines from a string, joined by " | ".
+fn last_n_lines(s: &str, n: usize) -> String {
+    let lines: Vec<&str> = s.lines().filter(|l| !l.trim().is_empty()).collect();
+    let start = lines.len().saturating_sub(n);
+    let result = lines[start..].join(" | ");
+    if result.is_empty() {
+        "unknown error".to_string()
+    } else {
+        result
+    }
 }
 
 /// Replace an original file with its transcoded copy.
