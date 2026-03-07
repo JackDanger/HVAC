@@ -837,6 +837,13 @@ fn main() -> Result<()> {
                             } else {
                                 0
                             };
+
+                            // Deactivate slot BEFORE pushing completed line to avoid
+                            // render thread showing both the active slot and the ✓ line.
+                            *my_slot.info.lock().unwrap() = None;
+                            my_slot.progress.store(0, Ordering::Relaxed);
+                            my_slot.speed.store(0, Ordering::Relaxed);
+
                             completed_lines.lock().unwrap().push(format!(
                                 "  \u{2713} {} ({} \u{2192} {}, -{}%)",
                                 short_name,
@@ -896,6 +903,14 @@ fn main() -> Result<()> {
                     }
                 };
 
+                // Deactivate slot before pushing status lines to avoid
+                // render thread showing both the active slot and the status line.
+                *my_slot.info.lock().unwrap() = None;
+                my_slot.progress.store(0, Ordering::Relaxed);
+                my_slot.speed.store(0, Ordering::Relaxed);
+                my_slot.queued.store(false, Ordering::Relaxed);
+                my_slot.disk_wait.store(false, Ordering::Relaxed);
+
                 if let Some(e) = last_err {
                     completed_lines
                         .lock()
@@ -904,12 +919,6 @@ fn main() -> Result<()> {
                     error_count.fetch_add(1, Ordering::Relaxed);
                 }
 
-                // Deactivate slot
-                *my_slot.info.lock().unwrap() = None;
-                my_slot.progress.store(0, Ordering::Relaxed);
-                my_slot.speed.store(0, Ordering::Relaxed);
-                my_slot.queued.store(false, Ordering::Relaxed);
-                my_slot.disk_wait.store(false, Ordering::Relaxed);
                 completed_units.fetch_add(1000, Ordering::Relaxed);
 
                 // Retire excess workers: if we discovered a lower capacity,
