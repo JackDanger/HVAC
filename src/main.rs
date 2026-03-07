@@ -18,6 +18,55 @@ use util::format_size;
 
 const MAX_SESSION_RETRIES: u32 = 5;
 
+/// Display symbols — ASCII fallbacks when locale doesn't support UTF-8.
+struct Symbols {
+    ellipsis: &'static str,
+    bar_filled: &'static str,
+    bar_head: &'static str,
+    bar_empty: &'static str,
+    hourglass: &'static str,
+    play: &'static str,
+    check: &'static str,
+    cross: &'static str,
+    arrow: &'static str,
+}
+
+const UNICODE_SYMBOLS: Symbols = Symbols {
+    ellipsis: "\u{2026}",
+    bar_filled: "\u{2501}",
+    bar_head: "\u{2578}",
+    bar_empty: "\u{2500}",
+    hourglass: "\u{23f3}",
+    play: "\u{25b6}",
+    check: "\u{2713}",
+    cross: "\u{2717}",
+    arrow: "\u{2192}",
+};
+
+const ASCII_SYMBOLS: Symbols = Symbols {
+    ellipsis: "..",
+    bar_filled: "=",
+    bar_head: ">",
+    bar_empty: "-",
+    hourglass: "~",
+    play: ">",
+    check: "+",
+    cross: "x",
+    arrow: "->",
+};
+
+fn detect_symbols() -> &'static Symbols {
+    for var in &["LC_ALL", "LC_CTYPE", "LANG"] {
+        if let Ok(val) = std::env::var(var) {
+            let v = val.to_lowercase();
+            if v.contains("utf-8") || v.contains("utf8") {
+                return &UNICODE_SYMBOLS;
+            }
+        }
+    }
+    &ASCII_SYMBOLS
+}
+
 static CANCELLED: AtomicBool = AtomicBool::new(false);
 
 /// Directories where tmp files may exist — populated before encoding starts,
@@ -79,24 +128,25 @@ struct WorkerSlot {
     disk_wait: AtomicBool,
 }
 
-fn truncate_name(name: &str, max_len: usize) -> String {
+fn truncate_name(name: &str, max_len: usize, sym: &Symbols) -> String {
     if name.chars().count() <= max_len {
         name.to_string()
     } else {
         let truncated: String = name.chars().take(max_len - 1).collect();
-        format!("{truncated}\u{2026}")
+        format!("{truncated}{}", sym.ellipsis)
     }
 }
 
-fn progress_bar_str(fraction: f64, width: usize) -> String {
+fn progress_bar_str(fraction: f64, width: usize, sym: &Symbols) -> String {
     let filled = (fraction * width as f64) as usize;
     if filled >= width {
-        "\u{2501}".repeat(width)
+        sym.bar_filled.repeat(width)
     } else {
         format!(
-            "{}\u{2578}{}",
-            "\u{2501}".repeat(filled),
-            "\u{2500}".repeat(width.saturating_sub(filled + 1))
+            "{}{}{}",
+            sym.bar_filled.repeat(filled),
+            sym.bar_head,
+            sym.bar_empty.repeat(width.saturating_sub(filled + 1))
         )
     }
 }
@@ -152,6 +202,8 @@ fn main() -> Result<()> {
         eprintln!("\nCancelling after current encodes finish... (Ctrl-C again to force quit)");
     })
     .ok();
+
+    let sym = detect_symbols();
 
     let cfg = config::Config::load(&cli.config)
         .with_context(|| format!("Failed to load config from {:?}", cli.config))?;
@@ -477,14 +529,15 @@ fn main() -> Result<()> {
                                 if slot.disk_wait.load(Ordering::Relaxed) {
                                     writeln!(
                                         stderr,
-                                        "  \u{23f3}           {} ({})  waiting for disk",
-                                        name, size,
+                                        "  {}           {} ({})  waiting for disk",
+                                        sym.hourglass, name, size,
                                     )
                                     .ok();
                                 } else if slot.queued.load(Ordering::Relaxed) && is_excess {
                                     writeln!(
                                         stderr,
-                                        "  \u{23f3}           {} ({})  queued {}/{}",
+                                        "  {}           {} ({})  queued {}/{}",
+                                        sym.hourglass,
                                         name,
                                         size,
                                         slot_idx + 1,
@@ -501,8 +554,8 @@ fn main() -> Result<()> {
                                     };
                                     writeln!(
                                         stderr,
-                                        "  \u{25b6} {:>2}% {:>4} {} ({})",
-                                        pct, speed_str, name, size
+                                        "  {} {:>2}% {:>4} {} ({})",
+                                        sym.play, pct, speed_str, name, size
                                     )
                                     .ok();
                                 }
@@ -531,7 +584,7 @@ fn main() -> Result<()> {
                         writeln!(
                             stderr,
                             "  {} {}/{} done  [{:02}:{:02}:{:02}]",
-                            progress_bar_str(frac, 40),
+                            progress_bar_str(frac, 40, sym),
                             finished,
                             file_count,
                             elapsed / 3600,
@@ -663,7 +716,7 @@ fn main() -> Result<()> {
                         .to_string_lossy()
                         .to_string()
                 };
-                let short_name = truncate_name(&name, 60);
+                let short_name = truncate_name(&name, 60, sym);
                 let size_str = format_size(item.source_size);
 
                 // In fixed mode (-j specified), show file immediately.
@@ -702,7 +755,7 @@ fn main() -> Result<()> {
                             completed_lines
                                 .lock()
                                 .unwrap()
-                                .push(format!("  \u{2717} {short_name}: {e}"));
+                                .push(format!("  {} {short_name}: {e}", sym.cross));
                             error_count.fetch_add(1, Ordering::Relaxed);
                             *my_slot.info.lock().unwrap() = None;
                             completed_units.fetch_add(1000, Ordering::Relaxed);
@@ -845,9 +898,11 @@ fn main() -> Result<()> {
                             my_slot.speed.store(0, Ordering::Relaxed);
 
                             completed_lines.lock().unwrap().push(format!(
-                                "  \u{2713} {} ({} \u{2192} {}, -{}%)",
+                                "  {} {} ({} {} {}, -{}%)",
+                                sym.check,
                                 short_name,
                                 format_size(item.source_size),
+                                sym.arrow,
                                 format_size(out_size),
                                 saved_pct
                             ));
@@ -915,7 +970,7 @@ fn main() -> Result<()> {
                     completed_lines
                         .lock()
                         .unwrap()
-                        .push(format!("  \u{2717} {short_name}: {e}"));
+                        .push(format!("  {} {short_name}: {e}", sym.cross));
                     error_count.fetch_add(1, Ordering::Relaxed);
                 }
 
@@ -977,7 +1032,8 @@ fn main() -> Result<()> {
                         }
                         Err(e) => {
                             eprintln!(
-                                "  \u{2717} replace {:?}: {}",
+                                "  {} replace {:?}: {}",
+                                sym.cross,
                                 item.path.file_name().unwrap_or_default(),
                                 e
                             );
@@ -1009,8 +1065,9 @@ fn main() -> Result<()> {
     if total_input > 0 {
         let pct = (total_saved as f64 / total_input as f64) * 100.0;
         eprintln!(
-            "Size: {} \u{2192} {} (saved {}, {:.0}% reduction)",
+            "Size: {} {} {} (saved {}, {:.0}% reduction)",
             format_size(total_input),
+            sym.arrow,
             format_size(total_output),
             format_size(total_saved),
             pct
