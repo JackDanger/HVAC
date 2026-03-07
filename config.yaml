@@ -26,9 +26,17 @@ media_extensions:
   - avi
   - ts
   - m2ts
+  - mts
   - wmv
   - flv
   - mov
+  - webm
+  - vob
+  - mpg
+  - mpeg
+  - ogv
+  - 3gp
+  - divx
   - iso
   - img
 

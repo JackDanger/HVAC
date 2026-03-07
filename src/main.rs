@@ -717,6 +717,7 @@ fn main() -> Result<()> {
                 // Acquire encoding slot + encode with session-limit retry
                 let mut session_retries = 0u32;
                 let mut disk_space_retries = 0u32;
+                let mut skip_subs = false;
 
                 let last_err: Option<anyhow::Error> = loop {
                     if CANCELLED.load(Ordering::Relaxed) {
@@ -799,6 +800,7 @@ fn main() -> Result<()> {
                             &item.pix_fmt,
                             Some(&my_slot.progress),
                             Some(&my_slot.speed),
+                            skip_subs,
                         )
                     } else {
                         transcode::transcode(
@@ -811,6 +813,7 @@ fn main() -> Result<()> {
                             &item.pix_fmt,
                             Some(&my_slot.progress),
                             Some(&my_slot.speed),
+                            skip_subs,
                         )
                     };
 
@@ -878,6 +881,16 @@ fn main() -> Result<()> {
                                 my_slot.speed.store(0, Ordering::Relaxed);
                                 continue;
                             }
+
+                            // Subtitle error: retry without subtitle streams
+                            if transcode::is_subtitle_error(&err_str) && !skip_subs {
+                                skip_subs = true;
+                                log::info!("{}: retrying without subtitles", short_name);
+                                my_slot.progress.store(0, Ordering::Relaxed);
+                                my_slot.speed.store(0, Ordering::Relaxed);
+                                continue;
+                            }
+
                             break Some(e);
                         }
                     }
