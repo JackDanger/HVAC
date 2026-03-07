@@ -650,7 +650,7 @@ fn main() -> Result<()> {
                     let cancelled = CANCELLED.load(Ordering::Relaxed);
                     if (completed + errs) as u64 >= file_count || cancelled {
                         let mut stderr = std::io::stderr().lock();
-                        if !cancelled && prev_viewport > 0 {
+                        if prev_viewport > 0 {
                             write!(stderr, "\x1b[{}A\x1b[J", prev_viewport).ok();
                         }
                         write!(stderr, "\x1b[?25h\x1b[0m").ok();
