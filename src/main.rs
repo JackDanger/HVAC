@@ -415,15 +415,14 @@ fn main() -> Result<()> {
 
                     let completed = render_transcoded.load(Ordering::Relaxed);
                     let errs = render_errors.load(Ordering::Relaxed);
-                    if (completed + errs) as u64 >= file_count
-                        || CANCELLED.load(Ordering::Relaxed)
-                    {
-                        // Clear viewport so summary prints cleanly
-                        let mut stderr = std::io::stderr().lock();
-                        if prev_viewport > 0 {
+                    let cancelled = CANCELLED.load(Ordering::Relaxed);
+                    if (completed + errs) as u64 >= file_count || cancelled {
+                        if !cancelled && prev_viewport > 0 {
+                            // Clear viewport so summary prints cleanly
+                            let mut stderr = std::io::stderr().lock();
                             write!(stderr, "\x1b[{}A\x1b[J", prev_viewport).ok();
+                            stderr.flush().ok();
                         }
-                        stderr.flush().ok();
                         break;
                     }
 
