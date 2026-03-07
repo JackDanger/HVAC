@@ -269,11 +269,15 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let available = gpu::available_sessions(&gpu);
-    let jobs = cli.jobs.unwrap_or(available).max(1);
+    let jobs_specified = cli.jobs.is_some();
+    let jobs = cli
+        .jobs
+        .unwrap_or_else(|| gpu::max_encode_sessions(&gpu))
+        .max(1);
+    let auto_ramp = !jobs_specified;
 
     eprintln!(
-        "{} to transcode, {} already HEVC{}, {} jobs",
+        "{} to transcode, {} already HEVC{}, {}",
         to_transcode.len(),
         skipped,
         if resumed > 0 {
@@ -281,7 +285,11 @@ fn main() -> Result<()> {
         } else {
             String::new()
         },
-        jobs,
+        if auto_ramp {
+            format!("up to {} jobs (auto)", jobs)
+        } else {
+            format!("{} jobs", jobs)
+        },
     );
 
     if cli.dry_run {
@@ -333,9 +341,12 @@ fn main() -> Result<()> {
     let completed_lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let completed_units = Arc::new(AtomicU64::new(0));
 
-    // Encoding limiter: discovers actual NVENC session capacity at runtime
+    // Encoding limiter: discovers actual GPU session capacity at runtime
     let active_encoders = Arc::new(AtomicU32::new(0));
-    let max_encoders = Arc::new(AtomicU32::new(jobs as u32));
+    let initial_max = if auto_ramp { 1u32 } else { jobs as u32 };
+    let max_encoders = Arc::new(AtomicU32::new(initial_max));
+    // Whether we're still probing for the GPU's actual session limit
+    let ramping = Arc::new(AtomicBool::new(auto_ramp));
     // How many workers are still alive (decremented on retirement)
     let worker_count = Arc::new(AtomicU32::new(jobs as u32));
 
@@ -390,27 +401,28 @@ fn main() -> Result<()> {
                         for (slot_idx, slot) in render_slots.iter().enumerate() {
                             let info = slot.info.lock().unwrap();
                             if let Some((ref name, ref size)) = *info {
-                                if slot.queued.load(Ordering::Relaxed) {
+                                let is_excess = (slot_idx + 1) as u32 > max;
+                                if slot.queued.load(Ordering::Relaxed) && is_excess {
                                     writeln!(
                                         stderr,
-                                        "  \u{23f3} queued {}/{} {} ({})",
-                                        slot_idx + 1,
-                                        max,
+                                        "  \u{23f3}           {} ({})  queued {}/{}",
                                         name,
-                                        size
+                                        size,
+                                        slot_idx + 1,
+                                        max
                                     )
                                     .ok();
                                 } else {
                                     let pct = slot.progress.load(Ordering::Relaxed) / 10;
                                     let spd = slot.speed.load(Ordering::Relaxed);
                                     let speed_str = if spd > 0 {
-                                        format!(" {}.{}x", spd / 100, (spd % 100) / 10)
+                                        format!("{}.{}x", spd / 100, (spd % 100) / 10)
                                     } else {
                                         String::new()
                                     };
                                     writeln!(
                                         stderr,
-                                        "  \u{25b6} {:>2}%{} {} ({})",
+                                        "  \u{25b6} {:>2}% {:>4} {} ({})",
                                         pct, speed_str, name, size
                                     )
                                     .ok();
@@ -489,6 +501,7 @@ fn main() -> Result<()> {
             let my_slot = Arc::clone(&worker_slots[worker_id]);
             let active_encoders = Arc::clone(&active_encoders);
             let max_encoders = Arc::clone(&max_encoders);
+            let ramping = Arc::clone(&ramping);
             let worker_count = Arc::clone(&worker_count);
 
             s.spawn(move || 'outer: loop {
@@ -511,13 +524,14 @@ fn main() -> Result<()> {
                 let short_name = truncate_name(&name, 60);
                 let size_str = format_size(item.source_size);
 
-                // Activate slot
-                {
+                // In fixed mode (-j specified), show file immediately.
+                // In auto mode, stay invisible until we acquire an encoding slot.
+                if !auto_ramp {
                     let mut info = my_slot.info.lock().unwrap();
-                    *info = Some((short_name.clone(), size_str));
+                    *info = Some((short_name.clone(), size_str.clone()));
+                    my_slot.progress.store(0, Ordering::Relaxed);
+                    my_slot.speed.store(0, Ordering::Relaxed);
                 }
-                my_slot.progress.store(0, Ordering::Relaxed);
-                my_slot.speed.store(0, Ordering::Relaxed);
 
                 let output_path = if overwrite {
                     None
@@ -548,13 +562,37 @@ fn main() -> Result<()> {
 
                     // Wait for an encoding slot
                     if !try_acquire(&active_encoders, &max_encoders) {
-                        my_slot.queued.store(true, Ordering::Relaxed);
-                        my_slot.progress.store(0, Ordering::Relaxed);
-                        my_slot.speed.store(0, Ordering::Relaxed);
+                        // In fixed mode, show queued status for excess workers
+                        if !auto_ramp {
+                            my_slot.queued.store(true, Ordering::Relaxed);
+                            my_slot.progress.store(0, Ordering::Relaxed);
+                            my_slot.speed.store(0, Ordering::Relaxed);
+                        }
                         std::thread::sleep(std::time::Duration::from_millis(500));
                         continue;
                     }
                     my_slot.queued.store(false, Ordering::Relaxed);
+
+                    // In auto mode, become visible now that we have a slot
+                    if auto_ramp {
+                        let mut info = my_slot.info.lock().unwrap();
+                        *info = Some((short_name.clone(), size_str.clone()));
+                        my_slot.progress.store(0, Ordering::Relaxed);
+                        my_slot.speed.store(0, Ordering::Relaxed);
+
+                        // Ramp: allow one more concurrent encode
+                        if ramping.load(Ordering::SeqCst) {
+                            let current = max_encoders.load(Ordering::SeqCst);
+                            if current < jobs as u32 {
+                                let _ = max_encoders.compare_exchange(
+                                    current,
+                                    current + 1,
+                                    Ordering::SeqCst,
+                                    Ordering::SeqCst,
+                                );
+                            }
+                        }
+                    }
 
                     match transcode::transcode(
                         &item.path,
@@ -603,10 +641,14 @@ fn main() -> Result<()> {
                                 && session_retries < MAX_SESSION_RETRIES
                             {
                                 session_retries += 1;
+                                // Stop ramping — we found the GPU's limit
+                                ramping.store(false, Ordering::SeqCst);
                                 // Lower the discovered max to current active count
-                                let active = active_encoders.load(Ordering::SeqCst);
+                                let active =
+                                    active_encoders.load(Ordering::SeqCst).max(1);
                                 lower_max(&max_encoders, active);
-                                // Loop back to acquire (will wait if at capacity)
+                                // Hide this slot while retrying
+                                *my_slot.info.lock().unwrap() = None;
                                 my_slot.progress.store(0, Ordering::Relaxed);
                                 my_slot.speed.store(0, Ordering::Relaxed);
                                 continue;
