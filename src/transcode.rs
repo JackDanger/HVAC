@@ -62,6 +62,7 @@ pub fn transcode(
     source_duration_secs: f64,
     source_pix_fmt: &str,
     progress: Option<&AtomicU64>,
+    speed: Option<&AtomicU64>,
     use_libx265: bool,
 ) -> Result<PathBuf> {
     let final_output = match output {
@@ -210,6 +211,14 @@ pub fn transcode(
                         let pos =
                             ((us as f64 / duration_us as f64) * 1000.0).clamp(0.0, 1000.0) as u64;
                         prog.store(pos, Ordering::Relaxed);
+                    }
+                }
+            } else if let Some(speed_str) = line.strip_prefix("speed=") {
+                if let Some(spd) = speed {
+                    // speed looks like "1.23x" or "N/A"
+                    let trimmed = speed_str.trim_end_matches('x');
+                    if let Ok(v) = trimmed.parse::<f64>() {
+                        spd.store((v * 100.0) as u64, Ordering::Relaxed);
                     }
                 }
             }
