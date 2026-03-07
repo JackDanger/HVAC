@@ -8,10 +8,11 @@ mod util;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use indicatif::{ProgressBar, ProgressStyle};
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use util::format_size;
 
@@ -53,6 +54,10 @@ struct Cli {
     /// Replace originals with transcoded copies after all encodes complete
     #[arg(long, default_value_t = false)]
     replace: bool,
+
+    /// Use libx265 software encoding with CUDA decode (no NVENC session limit)
+    #[arg(long, default_value_t = false)]
+    cuda: bool,
 }
 
 /// File ready to transcode, with pre-probed metadata.
@@ -64,12 +69,31 @@ struct WorkItem {
     source_size: u64,
 }
 
+/// Per-worker display slot for the render thread.
+struct WorkerSlot {
+    info: Mutex<Option<(String, String)>>,
+    progress: AtomicU64,
+}
+
 fn truncate_name(name: &str, max_len: usize) -> String {
     if name.chars().count() <= max_len {
         name.to_string()
     } else {
         let truncated: String = name.chars().take(max_len - 1).collect();
-        format!("{truncated}…")
+        format!("{truncated}\u{2026}")
+    }
+}
+
+fn progress_bar_str(fraction: f64, width: usize) -> String {
+    let filled = (fraction * width as f64) as usize;
+    if filled >= width {
+        "\u{2501}".repeat(width)
+    } else {
+        format!(
+            "{}\u{2578}{}",
+            "\u{2501}".repeat(filled),
+            "\u{2500}".repeat(width.saturating_sub(filled + 1))
+        )
     }
 }
 
@@ -80,7 +104,6 @@ fn main() -> Result<()> {
     // Register CTRL-C handler: first press cancels gracefully, second force-exits
     ctrlc::set_handler(move || {
         if CANCELLED.load(Ordering::Relaxed) {
-            // Second press: force-quit with best-effort cleanup
             cleanup_tmp_dirs();
             std::process::exit(130);
         }
@@ -93,7 +116,11 @@ fn main() -> Result<()> {
         .with_context(|| format!("Failed to load config from {:?}", cli.config))?;
 
     let gpu = gpu::detect_gpu()?;
-    eprintln!("GPU: {} ({})", gpu.name, gpu.encoder);
+    if cli.cuda {
+        eprintln!("GPU: {} (libx265 + CUDA decode)", gpu.name);
+    } else {
+        eprintln!("GPU: {} ({})", gpu.name, gpu.encoder);
+    }
 
     let has_isomage = iso::isomage_available();
 
@@ -214,12 +241,16 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Account for other running NVENC sessions
-    let available = gpu::available_sessions(&gpu);
-    let jobs = cli.jobs.unwrap_or(available).max(1);
+    // Job count: --cuda bypasses NVENC session limits (CPU-bound, default 2)
+    let jobs = if cli.cuda {
+        cli.jobs.unwrap_or(2).max(1)
+    } else {
+        let available = gpu::available_sessions(&gpu);
+        cli.jobs.unwrap_or(available).max(1)
+    };
 
     eprintln!(
-        "{} to transcode, {} already HEVC{}, {} jobs",
+        "{} to transcode, {} already HEVC{}, {} jobs{}",
         to_transcode.len(),
         skipped,
         if resumed > 0 {
@@ -228,6 +259,7 @@ fn main() -> Result<()> {
             String::new()
         },
         jobs,
+        if cli.cuda { " (libx265)" } else { "" },
     );
 
     if cli.dry_run {
@@ -262,22 +294,20 @@ fn main() -> Result<()> {
         }
     }
 
-    // --- Phase 3: Transcode ---
-    // Bar tracks total progress in milli-files (0-1000 per file) for smooth movement
+    // --- Phase 3: Transcode with live viewport rendering ---
     let total_units = to_transcode.len() as u64 * 1000;
-    let bar = ProgressBar::new(total_units);
-    bar.set_style(
-        ProgressStyle::with_template(
-            "  {bar:40.cyan/blue} {msg}  [{elapsed_precise}]",
-        )
-        .unwrap()
-        .progress_chars("━╸─"),
-    );
+    let file_count = to_transcode.len() as u64;
+
+    let worker_slots: Vec<Arc<WorkerSlot>> = (0..jobs)
+        .map(|_| {
+            Arc::new(WorkerSlot {
+                info: Mutex::new(None),
+                progress: AtomicU64::new(0),
+            })
+        })
+        .collect();
+    let completed_lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let completed_units = Arc::new(AtomicU64::new(0));
-    let active_count = Arc::new(AtomicU32::new(0));
-    // Per-worker progress atomics (0-1000 each)
-    let worker_progress: Vec<Arc<AtomicU64>> =
-        (0..jobs).map(|_| Arc::new(AtomicU64::new(0))).collect();
 
     let transcoded = Arc::new(AtomicU32::new(0));
     let error_count = Arc::new(AtomicU32::new(errors));
@@ -289,48 +319,108 @@ fn main() -> Result<()> {
     let cfg = Arc::new(cfg);
     let gpu = Arc::new(gpu);
     let overwrite = cli.overwrite;
+    let use_libx265 = cli.cuda;
     let output_dir = cli.output_dir.clone();
 
     std::thread::scope(|s| {
-        // Render thread: updates bar position from worker progress atomics
+        // Render thread: redraws active worker lines + progress bar in place
         {
-            let bar = bar.clone();
-            let completed_units = Arc::clone(&completed_units);
-            let worker_progress: Vec<Arc<AtomicU64>> =
-                worker_progress.iter().map(Arc::clone).collect();
-            let file_count = to_transcode.len() as u64;
-            let transcoded = Arc::clone(&transcoded);
-            let error_count_r = Arc::clone(&error_count);
-            s.spawn(move || loop {
-                let done = completed_units.load(Ordering::Relaxed);
-                let active: u64 = worker_progress.iter().map(|w| w.load(Ordering::Relaxed)).sum();
-                bar.set_position((done + active).min(total_units));
+            let render_slots: Vec<Arc<WorkerSlot>> =
+                worker_slots.iter().map(Arc::clone).collect();
+            let render_completed = Arc::clone(&completed_lines);
+            let render_completed_units = Arc::clone(&completed_units);
+            let render_transcoded = Arc::clone(&transcoded);
+            let render_errors = Arc::clone(&error_count);
 
-                let completed = transcoded.load(Ordering::Relaxed);
-                let errors = error_count_r.load(Ordering::Relaxed);
-                let finished = completed + errors;
+            s.spawn(move || {
+                let start = Instant::now();
+                let mut prev_viewport = 0usize;
 
-                // Show per-worker encode percentages so user can see activity
-                let pcts: Vec<String> = worker_progress
-                    .iter()
-                    .map(|w| w.load(Ordering::Relaxed))
-                    .filter(|&p| p > 0)
-                    .map(|p| format!("{}%", p / 10))
-                    .collect();
-                let detail = if pcts.is_empty() {
-                    String::new()
-                } else {
-                    format!(" [{}]", pcts.join(" "))
-                };
-                bar.set_message(format!("{finished}/{file_count} done{detail}"));
+                loop {
+                    {
+                        let mut stderr = std::io::stderr().lock();
 
-                if finished as u64 >= file_count || CANCELLED.load(Ordering::Relaxed) {
-                    break;
+                        // Move to top of previous viewport and clear to end of screen
+                        if prev_viewport > 0 {
+                            write!(stderr, "\x1b[{}A", prev_viewport).ok();
+                        }
+                        write!(stderr, "\x1b[J").ok();
+
+                        // Drain completed lines (permanent, scroll above viewport)
+                        {
+                            let mut lines = render_completed.lock().unwrap();
+                            for line in lines.drain(..) {
+                                writeln!(stderr, "{}", line).ok();
+                            }
+                        }
+
+                        // Draw active worker lines with percentage
+                        let mut viewport = 0;
+                        for slot in &render_slots {
+                            let info = slot.info.lock().unwrap();
+                            if let Some((ref name, ref size)) = *info {
+                                let pct = slot.progress.load(Ordering::Relaxed) / 10;
+                                writeln!(stderr, "  \u{25b6} {:>2}% {} ({})", pct, name, size)
+                                    .ok();
+                                viewport += 1;
+                            }
+                        }
+
+                        // Progress bar line
+                        let done_units = render_completed_units.load(Ordering::Relaxed);
+                        let active_sum: u64 = render_slots
+                            .iter()
+                            .map(|s| s.progress.load(Ordering::Relaxed))
+                            .sum();
+                        let current = (done_units + active_sum).min(total_units);
+                        let frac = if total_units > 0 {
+                            current as f64 / total_units as f64
+                        } else {
+                            0.0
+                        };
+
+                        let completed = render_transcoded.load(Ordering::Relaxed);
+                        let errs = render_errors.load(Ordering::Relaxed);
+                        let finished = completed + errs;
+                        let elapsed = start.elapsed().as_secs();
+
+                        writeln!(
+                            stderr,
+                            "  {} {}/{} done  [{:02}:{:02}:{:02}]",
+                            progress_bar_str(frac, 40),
+                            finished,
+                            file_count,
+                            elapsed / 3600,
+                            (elapsed % 3600) / 60,
+                            elapsed % 60
+                        )
+                        .ok();
+                        viewport += 1;
+
+                        stderr.flush().ok();
+                        prev_viewport = viewport;
+                    }
+
+                    let completed = render_transcoded.load(Ordering::Relaxed);
+                    let errs = render_errors.load(Ordering::Relaxed);
+                    if (completed + errs) as u64 >= file_count
+                        || CANCELLED.load(Ordering::Relaxed)
+                    {
+                        // Clear viewport so summary prints cleanly
+                        let mut stderr = std::io::stderr().lock();
+                        if prev_viewport > 0 {
+                            write!(stderr, "\x1b[{}A\x1b[J", prev_viewport).ok();
+                        }
+                        stderr.flush().ok();
+                        break;
+                    }
+
+                    std::thread::sleep(std::time::Duration::from_millis(200));
                 }
-                std::thread::sleep(std::time::Duration::from_millis(200));
             });
         }
 
+        // Worker threads
         for worker_id in 0..jobs {
             let to_transcode = Arc::clone(&to_transcode);
             let next_idx = Arc::clone(&next_idx);
@@ -341,11 +431,10 @@ fn main() -> Result<()> {
             let bytes_output = Arc::clone(&bytes_output);
             let cfg = Arc::clone(&cfg);
             let gpu = Arc::clone(&gpu);
-            let bar = bar.clone();
             let output_dir = output_dir.clone();
-            let active_count = Arc::clone(&active_count);
             let completed_units = Arc::clone(&completed_units);
-            let my_progress = Arc::clone(&worker_progress[worker_id]);
+            let completed_lines = Arc::clone(&completed_lines);
+            let my_slot = Arc::clone(&worker_slots[worker_id]);
 
             s.spawn(move || loop {
                 if CANCELLED.load(Ordering::Relaxed) {
@@ -365,10 +454,14 @@ fn main() -> Result<()> {
                     .to_string_lossy()
                     .to_string();
                 let short_name = truncate_name(&name, 60);
+                let size_str = format_size(item.source_size);
 
-                active_count.fetch_add(1, Ordering::Relaxed);
-                my_progress.store(0, Ordering::Relaxed);
-                bar.println(format!("  ▶ {short_name} ({})", format_size(item.source_size)));
+                // Activate slot (render thread will pick it up)
+                {
+                    let mut info = my_slot.info.lock().unwrap();
+                    *info = Some((short_name.clone(), size_str));
+                }
+                my_slot.progress.store(0, Ordering::Relaxed);
 
                 let output_path = if overwrite {
                     None
@@ -377,11 +470,14 @@ fn main() -> Result<()> {
                     match transcode::output_path(&item.path, out_dir, &cfg.target.container) {
                         Ok(p) => Some(p),
                         Err(e) => {
-                            bar.println(format!("  ✗ {short_name}: {e}"));
+                            completed_lines
+                                .lock()
+                                .unwrap()
+                                .push(format!("  \u{2717} {short_name}: {e}"));
                             error_count.fetch_add(1, Ordering::Relaxed);
-                            my_progress.store(0, Ordering::Relaxed);
+                            *my_slot.info.lock().unwrap() = None;
+                            my_slot.progress.store(0, Ordering::Relaxed);
                             completed_units.fetch_add(1000, Ordering::Relaxed);
-                            active_count.fetch_sub(1, Ordering::Relaxed);
                             continue;
                         }
                     }
@@ -395,9 +491,11 @@ fn main() -> Result<()> {
                         break;
                     }
                     if attempt > 0 {
-                        bar.println(format!(
-                            "  ↻ {short_name} retry {attempt}/{MAX_RETRIES}"
-                        ));
+                        completed_lines
+                            .lock()
+                            .unwrap()
+                            .push(format!("  \u{21bb} {short_name} retry {attempt}/{MAX_RETRIES}"));
+                        my_slot.progress.store(0, Ordering::Relaxed);
                         std::thread::sleep(std::time::Duration::from_secs(
                             RETRY_DELAY_SECS * attempt as u64,
                         ));
@@ -411,7 +509,8 @@ fn main() -> Result<()> {
                         item.bitrate_kbps,
                         item.duration_secs,
                         &item.pix_fmt,
-                        Some(&my_progress),
+                        Some(&my_slot.progress),
+                        use_libx265,
                     ) {
                         Ok(out_path) => {
                             let out_size = transcode::output_size(&out_path);
@@ -429,8 +528,9 @@ fn main() -> Result<()> {
                             } else {
                                 0
                             };
-                            bar.println(format!(
-                                "  ✓ {short_name} ({} → {}, -{}%)",
+                            completed_lines.lock().unwrap().push(format!(
+                                "  \u{2713} {} ({} \u{2192} {}, -{}%)",
+                                short_name,
                                 format_size(item.source_size),
                                 format_size(out_size),
                                 saved_pct
@@ -454,18 +554,28 @@ fn main() -> Result<()> {
                 }
 
                 if let Some(e) = last_err {
-                    bar.println(format!("  ✗ {short_name}: {e}"));
+                    completed_lines
+                        .lock()
+                        .unwrap()
+                        .push(format!("  \u{2717} {short_name}: {e}"));
                     error_count.fetch_add(1, Ordering::Relaxed);
                 }
 
-                my_progress.store(0, Ordering::Relaxed);
+                // Deactivate slot
+                *my_slot.info.lock().unwrap() = None;
+                my_slot.progress.store(0, Ordering::Relaxed);
                 completed_units.fetch_add(1000, Ordering::Relaxed);
-                active_count.fetch_sub(1, Ordering::Relaxed);
             });
         }
     });
 
-    bar.finish_and_clear();
+    // Drain any completed lines the render thread didn't get to
+    {
+        let lines = completed_lines.lock().unwrap();
+        for line in lines.iter() {
+            eprintln!("{}", line);
+        }
+    }
 
     // Clean up any leftover .tdorr_tmp_* files
     cleanup_tmp_dirs();
@@ -500,7 +610,7 @@ fn main() -> Result<()> {
                         }
                         Err(e) => {
                             eprintln!(
-                                "  ✗ replace {:?}: {}",
+                                "  \u{2717} replace {:?}: {}",
                                 item.path.file_name().unwrap_or_default(),
                                 e
                             );
@@ -535,7 +645,7 @@ fn main() -> Result<()> {
     if total_input > 0 {
         let pct = (total_saved as f64 / total_input as f64) * 100.0;
         eprintln!(
-            "Size: {} → {} (saved {}, {:.0}% reduction)",
+            "Size: {} \u{2192} {} (saved {}, {:.0}% reduction)",
             format_size(total_input),
             format_size(total_output),
             format_size(total_saved),
