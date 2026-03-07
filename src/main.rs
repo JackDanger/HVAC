@@ -102,6 +102,8 @@ fn main() -> Result<()> {
     // Register CTRL-C handler: first press cancels gracefully, second force-exits
     ctrlc::set_handler(move || {
         if CANCELLED.load(Ordering::Relaxed) {
+            // Restore cursor before force-quit
+            eprint!("\x1b[?25h");
             cleanup_tmp_dirs();
             std::process::exit(130);
         }
@@ -324,6 +326,9 @@ fn main() -> Result<()> {
                 let start = Instant::now();
                 let mut prev_viewport = 0usize;
 
+                // Hide cursor during rendering
+                eprint!("\x1b[?25l");
+
                 loop {
                     {
                         let mut stderr = std::io::stderr().lock();
@@ -403,12 +408,14 @@ fn main() -> Result<()> {
                     let errs = render_errors.load(Ordering::Relaxed);
                     let cancelled = CANCELLED.load(Ordering::Relaxed);
                     if (completed + errs) as u64 >= file_count || cancelled {
+                        let mut stderr = std::io::stderr().lock();
                         if !cancelled && prev_viewport > 0 {
                             // Clear viewport so summary prints cleanly
-                            let mut stderr = std::io::stderr().lock();
                             write!(stderr, "\x1b[{}A\x1b[J", prev_viewport).ok();
-                            stderr.flush().ok();
                         }
+                        // Restore cursor
+                        write!(stderr, "\x1b[?25h").ok();
+                        stderr.flush().ok();
                         break;
                     }
 
