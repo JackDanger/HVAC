@@ -3,6 +3,7 @@ use std::io::BufRead;
 use std::os::unix::fs::{chown, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::config::TargetConfig;
 use crate::gpu::{GpuInfo, GpuKind};
@@ -50,6 +51,7 @@ pub fn output_already_valid(output: &Path, source: &Path, source_duration_secs: 
 /// If `output` is None, transcode in-place (to a temp file, then replace original).
 /// `source_bitrate_kbps` is used to cap the output so we never produce a larger file.
 /// `source_pix_fmt` is used to handle 10-bit content that needs pixel format conversion.
+/// If `progress` is provided, it's updated with 0-1000 as encoding progresses.
 #[allow(clippy::too_many_arguments)]
 pub fn transcode(
     source: &Path,
@@ -59,6 +61,7 @@ pub fn transcode(
     source_bitrate_kbps: u32,
     source_duration_secs: f64,
     source_pix_fmt: &str,
+    progress: Option<&AtomicU64>,
 ) -> Result<PathBuf> {
     let final_output = match output {
         Some(p) => p.to_path_buf(),
@@ -142,18 +145,28 @@ pub fn transcode(
     cmd.args(["-map", "0:a?"]);
     cmd.args(["-map", "0:s?"]);
 
+    // Progress reporting via stdout if caller wants it
+    if progress.is_some() {
+        cmd.args(["-progress", "pipe:1", "-nostats"]);
+    }
+
     // Output
     cmd.arg(&final_output);
 
     log::debug!("Running: {:?}", cmd);
 
-    // Always pipe stdout/stderr to suppress noise and capture errors
-    cmd.stdout(Stdio::null());
+    // Pipe stderr always; pipe stdout only if tracking progress
     cmd.stderr(Stdio::piped());
+    if progress.is_some() {
+        cmd.stdout(Stdio::piped());
+    } else {
+        cmd.stdout(Stdio::null());
+    }
 
     let mut guard = ChildGuard(cmd.spawn().context("Failed to execute ffmpeg")?);
     let stderr = guard.0.stderr.take().unwrap();
 
+    // Drain stderr in background
     let stderr_handle = std::thread::spawn(move || {
         let reader = std::io::BufReader::new(stderr);
         let mut buf = String::new();
@@ -163,6 +176,25 @@ pub fn transcode(
         }
         buf
     });
+
+    // Parse ffmpeg progress from stdout if tracking
+    if let Some(prog) = progress {
+        let stdout = guard.0.stdout.take().unwrap();
+        let reader = std::io::BufReader::new(stdout);
+        let duration_us = (source_duration_secs * 1_000_000.0) as i64;
+
+        for line in reader.lines().map_while(Result::ok) {
+            if let Some(time_str) = line.strip_prefix("out_time_us=") {
+                if let Ok(us) = time_str.parse::<i64>() {
+                    if duration_us > 0 && us > 0 {
+                        let pos =
+                            ((us as f64 / duration_us as f64) * 1000.0).clamp(0.0, 1000.0) as u64;
+                        prog.store(pos, Ordering::Relaxed);
+                    }
+                }
+            }
+        }
+    }
 
     let status = guard.0.wait().context("Failed to wait for ffmpeg")?;
     let stderr_output = stderr_handle.join().unwrap_or_default();

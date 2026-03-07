@@ -263,16 +263,21 @@ fn main() -> Result<()> {
     }
 
     // --- Phase 3: Transcode ---
-    let bar = ProgressBar::new(to_transcode.len() as u64);
+    // Bar tracks total progress in milli-files (0-1000 per file) for smooth movement
+    let total_units = to_transcode.len() as u64 * 1000;
+    let bar = ProgressBar::new(total_units);
     bar.set_style(
         ProgressStyle::with_template(
-            "  {bar:40.cyan/blue} {pos}/{len} done  [{elapsed_precise}]  {msg}",
+            "  {bar:40.cyan/blue} {msg}  [{elapsed_precise}]",
         )
         .unwrap()
         .progress_chars("━╸─"),
     );
-    bar.enable_steady_tick(std::time::Duration::from_secs(1));
+    let completed_units = Arc::new(AtomicU64::new(0));
     let active_count = Arc::new(AtomicU32::new(0));
+    // Per-worker progress atomics (0-1000 each)
+    let worker_progress: Vec<Arc<AtomicU64>> =
+        (0..jobs).map(|_| Arc::new(AtomicU64::new(0))).collect();
 
     let transcoded = Arc::new(AtomicU32::new(0));
     let error_count = Arc::new(AtomicU32::new(errors));
@@ -287,7 +292,46 @@ fn main() -> Result<()> {
     let output_dir = cli.output_dir.clone();
 
     std::thread::scope(|s| {
-        for _ in 0..jobs {
+        // Render thread: updates bar position from worker progress atomics
+        {
+            let bar = bar.clone();
+            let completed_units = Arc::clone(&completed_units);
+            let worker_progress: Vec<Arc<AtomicU64>> =
+                worker_progress.iter().map(Arc::clone).collect();
+            let file_count = to_transcode.len() as u64;
+            let transcoded = Arc::clone(&transcoded);
+            let error_count_r = Arc::clone(&error_count);
+            s.spawn(move || loop {
+                let done = completed_units.load(Ordering::Relaxed);
+                let active: u64 = worker_progress.iter().map(|w| w.load(Ordering::Relaxed)).sum();
+                bar.set_position((done + active).min(total_units));
+
+                let completed = transcoded.load(Ordering::Relaxed);
+                let errors = error_count_r.load(Ordering::Relaxed);
+                let finished = completed + errors;
+
+                // Show per-worker encode percentages so user can see activity
+                let pcts: Vec<String> = worker_progress
+                    .iter()
+                    .map(|w| w.load(Ordering::Relaxed))
+                    .filter(|&p| p > 0)
+                    .map(|p| format!("{}%", p / 10))
+                    .collect();
+                let detail = if pcts.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [{}]", pcts.join(" "))
+                };
+                bar.set_message(format!("{finished}/{file_count} done{detail}"));
+
+                if finished as u64 >= file_count || CANCELLED.load(Ordering::Relaxed) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            });
+        }
+
+        for worker_id in 0..jobs {
             let to_transcode = Arc::clone(&to_transcode);
             let next_idx = Arc::clone(&next_idx);
             let transcoded = Arc::clone(&transcoded);
@@ -300,6 +344,8 @@ fn main() -> Result<()> {
             let bar = bar.clone();
             let output_dir = output_dir.clone();
             let active_count = Arc::clone(&active_count);
+            let completed_units = Arc::clone(&completed_units);
+            let my_progress = Arc::clone(&worker_progress[worker_id]);
 
             s.spawn(move || loop {
                 if CANCELLED.load(Ordering::Relaxed) {
@@ -320,8 +366,8 @@ fn main() -> Result<()> {
                     .to_string();
                 let short_name = truncate_name(&name, 60);
 
-                let active = active_count.fetch_add(1, Ordering::Relaxed) + 1;
-                bar.set_message(format!("{active} encoding"));
+                active_count.fetch_add(1, Ordering::Relaxed);
+                my_progress.store(0, Ordering::Relaxed);
                 bar.println(format!("  ▶ {short_name} ({})", format_size(item.source_size)));
 
                 let output_path = if overwrite {
@@ -333,7 +379,9 @@ fn main() -> Result<()> {
                         Err(e) => {
                             bar.println(format!("  ✗ {short_name}: {e}"));
                             error_count.fetch_add(1, Ordering::Relaxed);
-                            bar.inc(1);
+                            my_progress.store(0, Ordering::Relaxed);
+                            completed_units.fetch_add(1000, Ordering::Relaxed);
+                            active_count.fetch_sub(1, Ordering::Relaxed);
                             continue;
                         }
                     }
@@ -363,6 +411,7 @@ fn main() -> Result<()> {
                         item.bitrate_kbps,
                         item.duration_secs,
                         &item.pix_fmt,
+                        Some(&my_progress),
                     ) {
                         Ok(out_path) => {
                             let out_size = transcode::output_size(&out_path);
@@ -409,13 +458,9 @@ fn main() -> Result<()> {
                     error_count.fetch_add(1, Ordering::Relaxed);
                 }
 
-                let active = active_count.fetch_sub(1, Ordering::Relaxed) - 1;
-                if active > 0 {
-                    bar.set_message(format!("{active} encoding"));
-                } else {
-                    bar.set_message("".to_string());
-                }
-                bar.inc(1);
+                my_progress.store(0, Ordering::Relaxed);
+                completed_units.fetch_add(1000, Ordering::Relaxed);
+                active_count.fetch_sub(1, Ordering::Relaxed);
             });
         }
     });
