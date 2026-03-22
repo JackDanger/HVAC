@@ -334,8 +334,8 @@ fn main() -> Result<()> {
                         info.duration_secs
                     };
 
-                    // Resume: check if output already exists and is valid
-                    if !cli.overwrite {
+                    // Resume / adopt: check if .transcoded output already exists
+                    {
                         let out_dir = cli.output_dir.as_deref().or(cfg.output_dir.as_deref());
                         let source_for_output = if let Some(ref inner) = inner_p {
                             let inner_name = std::path::Path::new(inner)
@@ -351,8 +351,30 @@ fn main() -> Result<()> {
                             transcode::output_path(&source_for_output, out_dir, &cfg.target.container)
                         {
                             if transcode::output_already_valid(&out_path, file, duration_secs) {
-                                resumed += 1;
-                                continue;
+                                if cli.overwrite {
+                                    // Adopt: replace original with existing transcoded file
+                                    match transcode::replace_original(file, &out_path, duration_secs) {
+                                        Ok(_saved) => {
+                                            eprintln!(
+                                                "  Replaced {:?} with existing transcoded copy",
+                                                file.file_name().unwrap_or_default()
+                                            );
+                                            resumed += 1;
+                                            continue;
+                                        }
+                                        Err(e) => {
+                                            eprintln!(
+                                                "  Failed to replace {:?}: {}",
+                                                file.file_name().unwrap_or_default(),
+                                                e
+                                            );
+                                            // Fall through to re-transcode
+                                        }
+                                    }
+                                } else {
+                                    resumed += 1;
+                                    continue;
+                                }
                             }
                         }
                     }

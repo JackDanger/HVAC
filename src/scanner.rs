@@ -20,6 +20,15 @@ pub fn scan(root: &Path, extensions: &[String]) -> Result<Vec<PathBuf>> {
         .filter(|entry| entry.file_type().is_file())
         .filter(|entry| {
             let path = entry.path();
+            // Skip tdorr temporary and transcoded output files
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if name.starts_with(".tdorr_tmp_") {
+                    return false;
+                }
+                if name.contains(".transcoded.") {
+                    return false;
+                }
+            }
             if iso::is_disc_image(path) {
                 return true;
             }
@@ -88,6 +97,30 @@ mod tests {
         let exts = vec!["mkv".to_string()];
         let files = scan(dir.path(), &exts).unwrap();
         assert_eq!(files.len(), 1);
+    }
+
+    #[test]
+    fn test_scan_skips_transcoded_files() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("episode.mkv"), "fake").unwrap();
+        fs::write(dir.path().join("episode.transcoded.mkv"), "fake").unwrap();
+
+        let exts = vec!["mkv".to_string()];
+        let files = scan(dir.path(), &exts).unwrap();
+        assert_eq!(files.len(), 1);
+        assert!(files[0].file_name().unwrap().to_str().unwrap() == "episode.mkv");
+    }
+
+    #[test]
+    fn test_scan_skips_tmp_files() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("episode.mkv"), "fake").unwrap();
+        fs::write(dir.path().join(".tdorr_tmp_episode.mkv"), "fake").unwrap();
+
+        let exts = vec!["mkv".to_string()];
+        let files = scan(dir.path(), &exts).unwrap();
+        assert_eq!(files.len(), 1);
+        assert!(files[0].file_name().unwrap().to_str().unwrap() == "episode.mkv");
     }
 
     #[test]
