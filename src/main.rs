@@ -82,12 +82,21 @@ static TMP_DIRS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 #[derive(Parser, Debug)]
 #[command(name = "tdorr", version, about = "GPU-accelerated media transcoder")]
 struct Cli {
-    /// Path to YAML config file
-    #[arg(short, long, default_value = "config.yaml")]
-    config: PathBuf,
-
     /// Directory to scan for media files
-    path: PathBuf,
+    #[arg(required_unless_present = "dump_config")]
+    path: Option<PathBuf>,
+
+    /// Path to YAML config file (uses built-in defaults if omitted)
+    #[arg(short, long)]
+    config: Option<PathBuf>,
+
+    /// Print the built-in default config to stdout and exit
+    #[arg(long)]
+    dump_config: bool,
+
+    /// Suppress the banner shown when running with built-in default config
+    #[arg(short, long)]
+    quiet: bool,
 
     /// Overwrite original files instead of creating copies
     #[arg(long, default_value_t = false)]
@@ -191,9 +200,55 @@ fn lower_max(max_encoders: &AtomicU32, new_max: u32) {
     }
 }
 
+/// Returns the banner printed when the built-in default config is used.
+/// `use_unicode` selects box-drawing chars vs plain ASCII borders.
+fn embedded_config_banner(use_unicode: bool) -> String {
+    const W: usize = 62; // inner width (chars between the border columns)
+
+    let content: &[&str] = &[
+        "  tdorr: using built-in default configuration",
+        "",
+        "  To customise encoding settings, save the defaults to a file:",
+        "",
+        "    tdorr --dump-config > config.yaml",
+        "    $EDITOR config.yaml",
+        "    tdorr --config config.yaml /path/to/media",
+        "",
+        "  Suppress this message: tdorr --quiet ...",
+    ];
+
+    let (tl, tr, bl, br, h, v) = if use_unicode {
+        ("╭", "╮", "╰", "╯", "─", "│")
+    } else {
+        ("+", "+", "+", "+", "-", "|")
+    };
+
+    let top = format!("{}{}{}", tl, h.repeat(W), tr);
+    let bot = format!("{}{}{}", bl, h.repeat(W), br);
+
+    let mut out = top;
+    for line in content {
+        let pad = W.saturating_sub(line.chars().count());
+        out.push('\n');
+        out.push_str(&format!("{}{}{}{}", v, line, " ".repeat(pad), v));
+    }
+    out.push('\n');
+    out.push_str(&bot);
+    out
+}
+
 fn main() -> Result<()> {
     env_logger::init();
     let cli = Cli::parse();
+
+    // --dump-config: print embedded defaults to stdout and exit (no GPU or path needed)
+    if cli.dump_config {
+        print!("{}", config::EMBEDDED);
+        return Ok(());
+    }
+
+    // Safety: clap enforces `path` is present unless --dump-config is set
+    let path = cli.path.as_deref().unwrap();
 
     // Register CTRL-C handler: first press cancels gracefully, second force-exits
     ctrlc::set_handler(move || {
@@ -210,21 +265,31 @@ fn main() -> Result<()> {
     .ok();
 
     let sym = detect_symbols();
+    let use_unicode = std::ptr::eq(sym, &UNICODE_SYMBOLS);
 
-    let cfg = config::Config::load(&cli.config)
-        .with_context(|| format!("Failed to load config from {:?}", cli.config))?;
+    // Load config: explicit --config path must exist; omitting it uses embedded defaults.
+    let cfg = match &cli.config {
+        Some(p) => config::Config::load(p)
+            .with_context(|| format!("Failed to load config from {:?}", p))?,
+        None => {
+            if !cli.quiet {
+                eprintln!("{}", embedded_config_banner(use_unicode));
+            }
+            config::Config::from_embedded()
+        }
+    };
 
     let gpu = gpu::detect_gpu()?;
     eprintln!("GPU: {} ({})", gpu.name, gpu.encoder);
 
-    if let Ok(avail) = util::available_disk_space(&cli.path) {
+    if let Ok(avail) = util::available_disk_space(path) {
         eprintln!("Disk: {} available", format_size(avail));
     }
 
-    let files = scanner::scan(&cli.path, &cfg.media_extensions)?;
+    let files = scanner::scan(path, &cfg.media_extensions)?;
 
     if files.is_empty() {
-        eprintln!("No media files found in {:?}", cli.path);
+        eprintln!("No media files found in {:?}", path);
         return Ok(());
     }
 
@@ -1125,6 +1190,50 @@ fn cleanup_tmp_in_dir(dir: &std::path::Path) {
                 if name.starts_with(".tdorr_tmp_") {
                     let _ = std::fs::remove_file(entry.path());
                 }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_banner_contains_key_instructions() {
+        for use_unicode in [true, false] {
+            let banner = embedded_config_banner(use_unicode);
+            assert!(banner.contains("--dump-config"), "banner missing --dump-config");
+            assert!(banner.contains("--config"), "banner missing --config");
+            assert!(banner.contains("--quiet"), "banner missing --quiet");
+            assert!(banner.contains("$EDITOR"), "banner missing $EDITOR");
+        }
+    }
+
+    #[test]
+    fn test_banner_unicode_uses_box_chars() {
+        let banner = embedded_config_banner(true);
+        assert!(banner.contains('╭'), "unicode banner missing ╭");
+        assert!(banner.contains('╯'), "unicode banner missing ╯");
+        assert!(!banner.contains('+'), "unicode banner should not contain +");
+    }
+
+    #[test]
+    fn test_banner_ascii_uses_plain_chars() {
+        let banner = embedded_config_banner(false);
+        assert!(banner.contains('+'), "ascii banner missing +");
+        assert!(!banner.contains('╭'), "ascii banner should not contain ╭");
+    }
+
+    #[test]
+    fn test_banner_lines_are_equal_width() {
+        // Every line in the banner must be the same display width.
+        for use_unicode in [true, false] {
+            let banner = embedded_config_banner(use_unicode);
+            let widths: Vec<usize> = banner.lines().map(|l| l.chars().count()).collect();
+            let first = widths[0];
+            for (i, w) in widths.iter().enumerate() {
+                assert_eq!(*w, first, "line {} has width {} but expected {}", i, w, first);
             }
         }
     }

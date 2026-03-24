@@ -2,6 +2,9 @@ use anyhow::Result;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
+/// The default `config.yaml` baked in at compile time.
+pub const EMBEDDED: &str = include_str!("../config.yaml");
+
 #[derive(Debug, Deserialize)]
 pub struct Config {
     pub target: TargetConfig,
@@ -60,6 +63,12 @@ impl Config {
         let config: Config = serde_yaml::from_str(&content)?;
         Ok(config)
     }
+
+    /// Parse the built-in default config embedded at compile time.
+    /// Panics if the embedded YAML is invalid (a compile-time invariant).
+    pub fn from_embedded() -> Self {
+        serde_yaml::from_str(EMBEDDED).expect("embedded config.yaml is invalid YAML")
+    }
 }
 
 #[cfg(test)]
@@ -87,6 +96,33 @@ media_extensions:
         assert_eq!(config.target.codec, "hevc");
         assert_eq!(config.target.quality, 22);
         assert_eq!(config.media_extensions.len(), 2);
+    }
+
+    #[test]
+    fn test_embedded_const_is_valid_yaml() {
+        // The EMBEDDED constant must always parse cleanly — it's the shipped defaults.
+        let result: Result<Config, _> = serde_yaml::from_str(EMBEDDED);
+        assert!(result.is_ok(), "EMBEDDED config.yaml failed to parse: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_from_embedded_has_expected_values() {
+        let cfg = Config::from_embedded();
+        assert_eq!(cfg.target.codec, "hevc");
+        assert_eq!(cfg.target.quality, 28);
+        assert_eq!(cfg.target.preset, "slow");
+        assert_eq!(cfg.target.container, "mkv");
+        assert_eq!(cfg.target.audio_codec, "copy");
+        assert!(cfg.media_extensions.contains(&"mkv".to_string()));
+        assert!(cfg.media_extensions.contains(&"mp4".to_string()));
+        assert!(cfg.media_extensions.contains(&"iso".to_string()));
+    }
+
+    #[test]
+    fn test_load_falls_back_gracefully_on_missing_file() {
+        // Config::load on a nonexistent path must return Err (not panic).
+        let result = Config::load(std::path::Path::new("/nonexistent/config.yaml"));
+        assert!(result.is_err());
     }
 
     #[test]
