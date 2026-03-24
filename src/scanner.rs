@@ -1,9 +1,30 @@
 use anyhow::Result;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use walkdir::WalkDir;
 
 use crate::iso;
+
+/// Recursively collect all files under `dir`, following symlinks.
+/// Tracks visited canonical directory paths to prevent infinite symlink cycles.
+fn walk_files(dir: &Path, out: &mut Vec<PathBuf>, visited_dirs: &mut HashSet<PathBuf>) {
+    let canonical = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    if !visited_dirs.insert(canonical) {
+        return;
+    }
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        // Use metadata() (follows symlinks) so symlinked dirs/files are handled correctly
+        match std::fs::metadata(&path) {
+            Ok(m) if m.is_dir() => walk_files(&path, out, visited_dirs),
+            Ok(m) if m.is_file() => out.push(path),
+            _ => {}
+        }
+    }
+}
 
 /// Scan a directory tree for media files matching the given extensions.
 /// Also picks up .iso and .img disc images.
@@ -12,14 +33,13 @@ use crate::iso;
 pub fn scan(root: &Path, extensions: &[String]) -> Result<Vec<PathBuf>> {
     let ext_lower: Vec<String> = extensions.iter().map(|e| e.to_lowercase()).collect();
 
+    let mut all_files = Vec::new();
+    walk_files(root, &mut all_files, &mut HashSet::new());
+
     let mut seen = HashSet::new();
-    let mut files: Vec<PathBuf> = WalkDir::new(root)
-        .follow_links(true)
+    let mut files: Vec<PathBuf> = all_files
         .into_iter()
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.file_type().is_file())
-        .filter(|entry| {
-            let path = entry.path();
+        .filter(|path| {
             // Skip tdorr temporary and transcoded output files
             if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
                 if name.starts_with(".tdorr_tmp_") {
@@ -37,11 +57,10 @@ pub fn scan(root: &Path, extensions: &[String]) -> Result<Vec<PathBuf>> {
                 .map(|e| ext_lower.contains(&e.to_lowercase()))
                 .unwrap_or(false)
         })
-        .filter(|entry| {
-            let canonical = entry.path().canonicalize().unwrap_or_else(|_| entry.path().to_path_buf());
+        .filter(|path| {
+            let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
             seen.insert(canonical)
         })
-        .map(|entry| entry.into_path())
         .collect();
 
     files.sort();

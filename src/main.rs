@@ -80,7 +80,7 @@ static CANCELLED: AtomicBool = AtomicBool::new(false);
 static TMP_DIRS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
 #[derive(Parser, Debug)]
-#[command(name = "tdorr", about = "GPU-accelerated media transcoder")]
+#[command(name = "tdorr", version, about = "GPU-accelerated media transcoder")]
 struct Cli {
     /// Path to YAML config file
     #[arg(short, long, default_value = "config.yaml")]
