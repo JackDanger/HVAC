@@ -56,12 +56,9 @@ pub struct DiscAnalysis {
 /// that look like feature content are included. For DVDs, the entire largest
 /// title set is included.
 pub fn analyze_disc(iso_path: &Path) -> Result<DiscAnalysis> {
-    let mut file = File::open(iso_path)
-        .with_context(|| format!("Failed to open {:?}", iso_path))?;
-    let filename = iso_path
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy();
+    let mut file =
+        File::open(iso_path).with_context(|| format!("Failed to open {:?}", iso_path))?;
+    let filename = iso_path.file_name().unwrap_or_default().to_string_lossy();
     let root = isomage::detect_and_parse_filesystem(&mut file, &filename)
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
@@ -191,9 +188,8 @@ fn analyze_bluray(root: &isomage::TreeNode, stream_path: &str) -> Result<DiscAna
     // Threshold: 25% of largest file qualifies as a chapter
     let threshold = max_size / 4;
 
-    let (main_feature, extras): (Vec<_>, Vec<_>) = media
-        .into_iter()
-        .partition(|f| f.size >= threshold);
+    let (main_feature, extras): (Vec<_>, Vec<_>) =
+        media.into_iter().partition(|f| f.size >= threshold);
 
     let main_feature_size = main_feature.iter().map(|f| f.size).sum();
 
@@ -259,13 +255,10 @@ fn analyze_dvd(root: &isomage::TreeNode) -> Result<DiscAnalysis> {
 
         // Parse VTS_NN_M.VOB
         if let Some(title_num) = parse_vts_title(&upper) {
-            title_sets
-                .entry(title_num)
-                .or_default()
-                .push(IsoMediaFile {
-                    path: format!("{}/{}", video_ts_path, child.name),
-                    size: child.size,
-                });
+            title_sets.entry(title_num).or_default().push(IsoMediaFile {
+                path: format!("{}/{}", video_ts_path, child.name),
+                size: child.size,
+            });
         }
     }
 
@@ -395,8 +388,8 @@ fn analyze_avchd(root: &isomage::TreeNode) -> Result<DiscAnalysis> {
 /// multi-part archives). Everything else is extras.
 fn analyze_bare_media(root: &isomage::TreeNode) -> Result<DiscAnalysis> {
     let media_exts = [
-        "mkv", "mp4", "avi", "m2ts", "m2t", "mts", "ts", "mpg", "mpeg", "wmv", "mov", "vob",
-        "m4v", "webm", "flv",
+        "mkv", "mp4", "avi", "m2ts", "m2t", "mts", "ts", "mpg", "mpeg", "wmv", "mov", "vob", "m4v",
+        "webm", "flv",
     ];
 
     let mut all_media: Vec<IsoMediaFile> = Vec::new();
@@ -459,12 +452,9 @@ fn collect_all_media(
 /// Returns paths relative to the disc root (e.g. "STREAM/00000.M2T").
 #[cfg(test)]
 pub fn list_media_files(iso_path: &Path, media_extensions: &[String]) -> Result<Vec<String>> {
-    let mut file = File::open(iso_path)
-        .with_context(|| format!("Failed to open {:?}", iso_path))?;
-    let filename = iso_path
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy();
+    let mut file =
+        File::open(iso_path).with_context(|| format!("Failed to open {:?}", iso_path))?;
+    let filename = iso_path.file_name().unwrap_or_default().to_string_lossy();
     let root = isomage::detect_and_parse_filesystem(&mut file, &filename)
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
@@ -507,12 +497,9 @@ fn has_media_extension(name: &str, exts: &[String]) -> bool {
 /// Stream a file from inside an ISO to a writer using the isomage library.
 /// This avoids extracting to disk — data goes directly to the writer (e.g. ffmpeg stdin).
 pub fn cat_file<W: Write>(iso_path: &Path, inner_path: &str, writer: &mut W) -> Result<()> {
-    let mut file = File::open(iso_path)
-        .with_context(|| format!("Failed to open {:?}", iso_path))?;
-    let filename = iso_path
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy();
+    let mut file =
+        File::open(iso_path).with_context(|| format!("Failed to open {:?}", iso_path))?;
+    let filename = iso_path.file_name().unwrap_or_default().to_string_lossy();
     let root = isomage::detect_and_parse_filesystem(&mut file, &filename)
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
@@ -526,12 +513,9 @@ pub fn cat_file<W: Write>(iso_path: &Path, inner_path: &str, writer: &mut W) -> 
 /// Stream multiple files from inside an ISO sequentially to a writer.
 /// Used to concatenate chapter files for the main feature.
 pub fn cat_files<W: Write>(iso_path: &Path, inner_paths: &[String], writer: &mut W) -> Result<()> {
-    let mut file = File::open(iso_path)
-        .with_context(|| format!("Failed to open {:?}", iso_path))?;
-    let filename = iso_path
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy();
+    let mut file =
+        File::open(iso_path).with_context(|| format!("Failed to open {:?}", iso_path))?;
+    let filename = iso_path.file_name().unwrap_or_default().to_string_lossy();
     let root = isomage::detect_and_parse_filesystem(&mut file, &filename)
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
@@ -548,12 +532,9 @@ pub fn cat_files<W: Write>(iso_path: &Path, inner_paths: &[String], writer: &mut
 
 /// Get the size of a file inside an ISO without extracting it.
 pub fn file_size(iso_path: &Path, inner_path: &str) -> Result<u64> {
-    let mut file = File::open(iso_path)
-        .with_context(|| format!("Failed to open {:?}", iso_path))?;
-    let filename = iso_path
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy();
+    let mut file =
+        File::open(iso_path).with_context(|| format!("Failed to open {:?}", iso_path))?;
+    let filename = iso_path.file_name().unwrap_or_default().to_string_lossy();
     let root = isomage::detect_and_parse_filesystem(&mut file, &filename)
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
@@ -659,7 +640,12 @@ mod tests {
             );
             // Should be sorted by filename
             for w in a.main_feature.windows(2) {
-                assert!(w[0].path < w[1].path, "Files should be sorted: {} < {}", w[0].path, w[1].path);
+                assert!(
+                    w[0].path < w[1].path,
+                    "Files should be sorted: {} < {}",
+                    w[0].path,
+                    w[1].path
+                );
             }
         }
     }
@@ -688,7 +674,8 @@ mod tests {
             assert!(
                 a.main_feature_size > extras_size,
                 "Main feature ({}) should be larger than extras ({})",
-                a.main_feature_size, extras_size
+                a.main_feature_size,
+                extras_size
             );
         }
     }
@@ -766,7 +753,8 @@ mod tests {
                 assert!(
                     w[0].path < w[1].path,
                     "VOBs should be sequential: {} < {}",
-                    w[0].path, w[1].path
+                    w[0].path,
+                    w[1].path
                 );
             }
         }
@@ -815,10 +803,7 @@ mod tests {
         if let Some(p) = iso {
             let a = analyze_disc(&p).unwrap();
             // movie.mkv (60s) should be in main feature
-            assert!(
-                !a.main_feature.is_empty(),
-                "Should have a main feature"
-            );
+            assert!(!a.main_feature.is_empty(), "Should have a main feature");
             assert!(
                 a.main_feature[0].path.contains("movie") || a.main_feature[0].size > 0,
                 "Largest file should be in main feature"
@@ -852,10 +837,7 @@ mod tests {
                 let paths: Vec<String> = a.main_feature.iter().map(|f| f.path.clone()).collect();
                 let mut buf = Vec::new();
                 cat_files(&p, &paths, &mut buf).expect("cat_files failed");
-                assert!(
-                    buf.len() > 0,
-                    "Concatenated output should be non-empty"
-                );
+                assert!(buf.len() > 0, "Concatenated output should be non-empty");
                 // Total should be approximately the sum of individual sizes
                 let total_size: u64 = a.main_feature.iter().map(|f| f.size).sum();
                 assert!(
@@ -896,7 +878,10 @@ mod tests {
 
             assert!(buf.len() > 188, "Should have at least one TS packet");
             let has_sync = buf.windows(1).any(|w| w[0] == 0x47);
-            assert!(has_sync, "Should contain at least one MPEG-TS sync byte (0x47)");
+            assert!(
+                has_sync,
+                "Should contain at least one MPEG-TS sync byte (0x47)"
+            );
         }
     }
 
@@ -908,7 +893,11 @@ mod tests {
             let inner = &files[0];
 
             let size = file_size(&p, inner).expect("file_size failed");
-            assert!(size > 1_000_000, "File should be at least 1MB, got {}", size);
+            assert!(
+                size > 1_000_000,
+                "File should be at least 1MB, got {}",
+                size
+            );
         }
     }
 

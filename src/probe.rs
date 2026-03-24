@@ -103,7 +103,9 @@ pub fn probe_iso_file(iso_path: &Path, inner_path: &str) -> Result<MediaInfo> {
         let _ = crate::iso::cat_file(&iso, &inner, &mut stdin);
     });
 
-    let output = child.wait_with_output().context("Failed to wait for ffprobe")?;
+    let output = child
+        .wait_with_output()
+        .context("Failed to wait for ffprobe")?;
     let _ = writer_handle.join();
 
     if !output.status.success() {
