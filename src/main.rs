@@ -64,7 +64,9 @@ fn detect_symbols() -> &'static Symbols {
         libc::setlocale(libc::LC_ALL, b"\0".as_ptr() as *const _);
         let codeset = libc::nl_langinfo(libc::CODESET);
         if !codeset.is_null() {
-            let cs = std::ffi::CStr::from_ptr(codeset).to_string_lossy().to_lowercase();
+            let cs = std::ffi::CStr::from_ptr(codeset)
+                .to_string_lossy()
+                .to_lowercase();
             if cs.contains("utf-8") || cs.contains("utf8") {
                 return &UNICODE_SYMBOLS;
             }
@@ -295,8 +297,12 @@ fn main() -> Result<()> {
 
     // --- Phase 1: Expand disc images into flat work list ---
     // Each entry is (path, optional iso_path, optional inner_path, optional inner_paths)
-    let mut expanded: Vec<(PathBuf, Option<PathBuf>, Option<String>, Option<Vec<String>>)> =
-        Vec::new();
+    let mut expanded: Vec<(
+        PathBuf,
+        Option<PathBuf>,
+        Option<String>,
+        Option<Vec<String>>,
+    )> = Vec::new();
     let mut errors = 0u32;
 
     for file in &files {
@@ -335,8 +341,11 @@ fn main() -> Result<()> {
                 ));
             } else {
                 // Multiple files: use inner_paths for concatenation
-                let paths: Vec<String> =
-                    analysis.main_feature.iter().map(|f| f.path.clone()).collect();
+                let paths: Vec<String> = analysis
+                    .main_feature
+                    .iter()
+                    .map(|f| f.path.clone())
+                    .collect();
                 // Use the first file's path as the representative for probing
                 expanded.push((
                     file.clone(),
@@ -403,22 +412,27 @@ fn main() -> Result<()> {
                     {
                         let out_dir = cli.output_dir.as_deref().or(cfg.output_dir.as_deref());
                         let source_for_output = if let Some(ref inner) = inner_p {
-                            let inner_name = std::path::Path::new(inner)
-                                .file_name()
-                                .unwrap_or_default();
+                            let inner_name =
+                                std::path::Path::new(inner).file_name().unwrap_or_default();
                             file.parent()
                                 .unwrap_or(std::path::Path::new("."))
                                 .join(inner_name)
                         } else {
                             file.clone()
                         };
-                        if let Ok(out_path) =
-                            transcode::output_path(&source_for_output, out_dir, &cfg.target.container)
-                        {
+                        if let Ok(out_path) = transcode::output_path(
+                            &source_for_output,
+                            out_dir,
+                            &cfg.target.container,
+                        ) {
                             if transcode::output_already_valid(&out_path, file, duration_secs) {
                                 if cli.overwrite {
                                     // Adopt: replace original with existing transcoded file
-                                    match transcode::replace_original(file, &out_path, duration_secs) {
+                                    match transcode::replace_original(
+                                        file,
+                                        &out_path,
+                                        duration_secs,
+                                    ) {
                                         Ok(_saved) => {
                                             eprintln!(
                                                 "  Replaced {:?} with existing transcoded copy",
@@ -784,19 +798,11 @@ fn main() -> Result<()> {
                 let item = &to_transcode[idx];
                 let name = if let Some(ref paths) = item.inner_paths {
                     // Multi-file ISO: show "iso_name (N files)"
-                    let iso_name = item
-                        .path
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy();
+                    let iso_name = item.path.file_name().unwrap_or_default().to_string_lossy();
                     format!("{} ({} files)", iso_name, paths.len())
                 } else if let Some(ref inner) = item.inner_path {
                     // Single-file ISO: show "iso_name:inner_name"
-                    let iso_name = item
-                        .path
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy();
+                    let iso_name = item.path.file_name().unwrap_or_default().to_string_lossy();
                     let inner_name = Path::new(inner)
                         .file_name()
                         .unwrap_or_default()
@@ -832,17 +838,19 @@ fn main() -> Result<()> {
                             // Multi-file: use ISO stem as output name
                             item.path.clone()
                         } else if let Some(ref inner) = item.inner_path {
-                            let inner_name = Path::new(inner)
-                                .file_name()
-                                .unwrap_or_default();
-                            item.path.parent().unwrap_or(Path::new(".")).join(inner_name)
+                            let inner_name = Path::new(inner).file_name().unwrap_or_default();
+                            item.path
+                                .parent()
+                                .unwrap_or(Path::new("."))
+                                .join(inner_name)
                         } else {
                             item.path.clone()
                         }
                     } else {
                         item.path.clone()
                     };
-                    match transcode::output_path(&source_for_output, out_dir, &cfg.target.container) {
+                    match transcode::output_path(&source_for_output, out_dir, &cfg.target.container)
+                    {
                         Ok(p) => Some(p),
                         Err(e) => {
                             completed_lines
@@ -931,9 +939,7 @@ fn main() -> Result<()> {
                         let paths = item
                             .inner_paths
                             .clone()
-                            .or_else(|| {
-                                item.inner_path.as_ref().map(|p| vec![p.clone()])
-                            })
+                            .or_else(|| item.inner_path.as_ref().map(|p| vec![p.clone()]))
                             .unwrap_or_default();
                         transcode::transcode_iso(
                             iso,
@@ -1013,7 +1019,8 @@ fn main() -> Result<()> {
                             {
                                 disk_space_retries += 1;
                                 my_slot.disk_wait.store(true, Ordering::Relaxed);
-                                *my_slot.info.lock().unwrap() = Some((short_name.clone(), size_str.clone()));
+                                *my_slot.info.lock().unwrap() =
+                                    Some((short_name.clone(), size_str.clone()));
                                 my_slot.progress.store(0, Ordering::Relaxed);
                                 my_slot.speed.store(0, Ordering::Relaxed);
                                 std::thread::sleep(std::time::Duration::from_secs(5));
@@ -1203,7 +1210,10 @@ mod tests {
     fn test_banner_contains_key_instructions() {
         for use_unicode in [true, false] {
             let banner = embedded_config_banner(use_unicode);
-            assert!(banner.contains("--dump-config"), "banner missing --dump-config");
+            assert!(
+                banner.contains("--dump-config"),
+                "banner missing --dump-config"
+            );
             assert!(banner.contains("--config"), "banner missing --config");
             assert!(banner.contains("--quiet"), "banner missing --quiet");
             assert!(banner.contains("$EDITOR"), "banner missing $EDITOR");
@@ -1233,7 +1243,11 @@ mod tests {
             let widths: Vec<usize> = banner.lines().map(|l| l.chars().count()).collect();
             let first = widths[0];
             for (i, w) in widths.iter().enumerate() {
-                assert_eq!(*w, first, "line {} has width {} but expected {}", i, w, first);
+                assert_eq!(
+                    *w, first,
+                    "line {} has width {} but expected {}",
+                    i, w, first
+                );
             }
         }
     }

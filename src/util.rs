@@ -6,8 +6,7 @@ pub fn available_disk_space(path: &Path) -> Result<u64> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
 
-    let c_path =
-        CString::new(path.as_os_str().as_bytes()).context("Path contains null bytes")?;
+    let c_path = CString::new(path.as_os_str().as_bytes()).context("Path contains null bytes")?;
 
     unsafe {
         let mut stat: libc::statvfs = std::mem::zeroed();

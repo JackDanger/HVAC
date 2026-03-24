@@ -102,7 +102,11 @@ media_extensions:
     fn test_embedded_const_is_valid_yaml() {
         // The EMBEDDED constant must always parse cleanly — it's the shipped defaults.
         let result: Result<Config, _> = serde_yaml::from_str(EMBEDDED);
-        assert!(result.is_ok(), "EMBEDDED config.yaml failed to parse: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "EMBEDDED config.yaml failed to parse: {:?}",
+            result.err()
+        );
     }
 
     #[test]

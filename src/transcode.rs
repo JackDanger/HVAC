@@ -157,7 +157,11 @@ pub fn transcode(
     // Output
     cmd.arg(&final_output);
 
-    log::debug!("Running{}: {:?}", if skip_subs { " (no subs)" } else { "" }, cmd);
+    log::debug!(
+        "Running{}: {:?}",
+        if skip_subs { " (no subs)" } else { "" },
+        cmd
+    );
 
     // Pipe stderr always; pipe stdout only if tracking progress
     cmd.stderr(Stdio::piped());
@@ -350,7 +354,11 @@ pub fn transcode_iso(
     // Output
     cmd.arg(&final_output);
 
-    log::debug!("Running (piped from ISO{}): {:?}", if skip_subs { ", no subs" } else { "" }, cmd);
+    log::debug!(
+        "Running (piped from ISO{}): {:?}",
+        if skip_subs { ", no subs" } else { "" },
+        cmd
+    );
 
     cmd.stderr(Stdio::piped());
     cmd.stdin(Stdio::piped());
@@ -541,14 +549,14 @@ pub fn is_session_limit_error(error_msg: &str) -> bool {
 /// Check if an ffmpeg error is a subtitle mapping/copy issue.
 /// These can be retried by dropping subtitle streams.
 pub fn is_subtitle_error(error_msg: &str) -> bool {
-    error_msg.contains("Subtitle encoding currently only possible from text to text or bitmap to bitmap")
+    error_msg
+        .contains("Subtitle encoding currently only possible from text to text or bitmap to bitmap")
         || error_msg.contains("subtitle codec not supported")
         || error_msg.contains("Error while opening encoder for output stream")
             && error_msg.contains("subtitle")
         || error_msg.contains("Could not find tag for codec")
             && (error_msg.contains("subtitle") || error_msg.contains("hdmv_pgs"))
-        || error_msg.contains("Unknown encoder")
-            && error_msg.contains("subtitle")
+        || error_msg.contains("Unknown encoder") && error_msg.contains("subtitle")
 }
 
 /// Check if an ffmpeg error is a disk space issue.
@@ -630,7 +638,9 @@ mod tests {
     fn test_is_session_limit_error() {
         assert!(is_session_limit_error("Cannot init NVENC encoder"));
         assert!(is_session_limit_error("OpenEncodeSessionEx failed"));
-        assert!(is_session_limit_error("InitializeEncoder failed: out of memory"));
+        assert!(is_session_limit_error(
+            "InitializeEncoder failed: out of memory"
+        ));
         assert!(!is_session_limit_error("some other error"));
         // "Nothing was written" is the common NVENC session exhaustion pattern
         assert!(is_session_limit_error(
