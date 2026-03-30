@@ -426,10 +426,17 @@ fn main() -> Result<()> {
                         info.duration_secs
                     };
 
-                    // Resume / adopt: check if .transcoded output already exists
+                    // Resume / adopt: check if .transcoded output already exists.
+                    // Output path logic must match what the worker thread computes:
+                    //   - multi-file ISO  → use ISO path as stem
+                    //   - single-file ISO → use inner filename as stem
+                    //   - regular file    → use file path as stem
                     {
                         let out_dir = cli.output_dir.as_deref().or(cfg.output_dir.as_deref());
-                        let source_for_output = if let Some(ref inner) = inner_p {
+                        let source_for_output = if inner_ps.is_some() {
+                            // Multi-file ISO: worker uses the ISO path as the output stem.
+                            file.clone()
+                        } else if let Some(ref inner) = inner_p {
                             let inner_name =
                                 std::path::Path::new(inner).file_name().unwrap_or_default();
                             file.parent()
@@ -444,7 +451,10 @@ fn main() -> Result<()> {
                             &cfg.target.container,
                         ) {
                             if transcode::output_already_valid(&out_path, file, duration_secs) {
-                                if cli.overwrite {
+                                // Never rename a .transcoded file back over a disc image —
+                                // the ISO/IMG is the source, not the destination.
+                                let is_disc = iso_p.is_some();
+                                if cli.overwrite && !is_disc {
                                     // Adopt: replace original with existing transcoded file
                                     match transcode::replace_original(
                                         file,
