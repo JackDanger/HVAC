@@ -52,7 +52,7 @@ pub fn probe_file(path: &Path) -> Result<MediaInfo> {
     let output = Command::new("ffprobe")
         .args([
             "-v",
-            "quiet",
+            "error",
             "-print_format",
             "json",
             "-show_streams",
@@ -84,7 +84,7 @@ pub fn probe_iso_file(iso_path: &Path, inner_path: &str) -> Result<MediaInfo> {
     let mut child = Command::new("ffprobe")
         .args([
             "-v",
-            "quiet",
+            "error",
             "-print_format",
             "json",
             "-show_streams",
