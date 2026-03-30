@@ -614,8 +614,18 @@ fn main() -> Result<()> {
                     {
                         let mut stderr = std::io::stderr().lock();
 
+                        // Cursor is on the last viewport line (no trailing \n).
+                        // \r goes to column 0, then move up (viewport-1) to
+                        // reach the first viewport line, then erase to end of
+                        // screen.  Omitting the trailing newline on the progress
+                        // bar prevents the viewport from scrolling into the
+                        // scrollback buffer — which is what causes ghost progress
+                        // lines in the terminal history.
                         if prev_viewport > 0 {
-                            write!(stderr, "\x1b[{}A", prev_viewport).ok();
+                            write!(stderr, "\r").ok();
+                            if prev_viewport > 1 {
+                                write!(stderr, "\x1b[{}A", prev_viewport - 1).ok();
+                            }
                         }
                         write!(stderr, "\x1b[J").ok();
 
@@ -688,7 +698,10 @@ fn main() -> Result<()> {
                         let finished = completed + errs;
                         let elapsed = start.elapsed().as_secs();
 
-                        writeln!(
+                        // No trailing newline — keeps the cursor ON the
+                        // progress bar so the viewport never scrolls into
+                        // the scrollback buffer.
+                        write!(
                             stderr,
                             "  {} {}/{} done  [{:02}:{:02}:{:02}]",
                             progress_bar_str(frac, 40, sym),
@@ -752,7 +765,11 @@ fn main() -> Result<()> {
                     if (completed + errs) as u64 >= file_count || cancelled {
                         let mut stderr = std::io::stderr().lock();
                         if prev_viewport > 0 {
-                            write!(stderr, "\x1b[{}A\x1b[J", prev_viewport).ok();
+                            write!(stderr, "\r").ok();
+                            if prev_viewport > 1 {
+                                write!(stderr, "\x1b[{}A", prev_viewport - 1).ok();
+                            }
+                            write!(stderr, "\x1b[J").ok();
                         }
                         write!(stderr, "\x1b[?25h\x1b[0m").ok();
                         stderr.flush().ok();
@@ -1028,6 +1045,24 @@ fn main() -> Result<()> {
                                 continue;
                             }
 
+                            // Subtitle error: retry without subtitle streams.
+                            // Checked BEFORE session-limit: "Nothing was written" can also
+                            // mean a subtitle codec is incompatible with the container
+                            // (e.g. mov_text → MKV), which silently produces no output.
+                            // Try dropping subs first; if that still fails, session-limit
+                            // detection runs on the next iteration (skip_subs will be true).
+                            let nothing_written =
+                                err_str.contains("Nothing was written into output file");
+                            if (transcode::is_subtitle_error(&err_str) || nothing_written)
+                                && !skip_subs
+                            {
+                                skip_subs = true;
+                                log::info!("{}: retrying without subtitles", short_name);
+                                my_slot.progress.store(0, Ordering::Relaxed);
+                                my_slot.speed.store(0, Ordering::Relaxed);
+                                continue;
+                            }
+
                             if transcode::is_session_limit_error(&err_str)
                                 && session_retries < MAX_SESSION_RETRIES
                             {
@@ -1039,15 +1074,6 @@ fn main() -> Result<()> {
                                 lower_max(&max_encoders, active);
                                 // Hide this slot while retrying
                                 *my_slot.info.lock().unwrap() = None;
-                                my_slot.progress.store(0, Ordering::Relaxed);
-                                my_slot.speed.store(0, Ordering::Relaxed);
-                                continue;
-                            }
-
-                            // Subtitle error: retry without subtitle streams
-                            if transcode::is_subtitle_error(&err_str) && !skip_subs {
-                                skip_subs = true;
-                                log::info!("{}: retrying without subtitles", short_name);
                                 my_slot.progress.store(0, Ordering::Relaxed);
                                 my_slot.speed.store(0, Ordering::Relaxed);
                                 continue;

@@ -63,11 +63,15 @@ pub fn probe_file(path: &Path) -> Result<MediaInfo> {
         .context("Failed to run ffprobe")?;
 
     if !output.status.success() {
-        bail!(
-            "ffprobe failed for {:?}: {}",
-            path,
-            String::from_utf8_lossy(&output.stderr)
-        );
+        // ffprobe writes progress with bare \r; str::lines() handles \r, \n, \r\n.
+        // Take only the last non-empty line so \r-overwritten progress doesn't corrupt terminal.
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let err_msg = stderr
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .last()
+            .unwrap_or("unknown error");
+        bail!("ffprobe failed for {:?}: {}", path, err_msg);
     }
 
     parse_ffprobe_json(&output.stdout)

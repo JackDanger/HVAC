@@ -179,8 +179,16 @@ pub fn transcode(
         let reader = std::io::BufReader::new(stderr);
         let mut buf = String::new();
         for line in reader.lines().map_while(Result::ok) {
-            buf.push_str(&line);
-            buf.push('\n');
+            // io::BufRead::lines() splits on \n/\r\n but NOT bare \r.
+            // ffmpeg writes progress updates with \r; split on those too so
+            // last_n_lines() sees clean individual lines instead of one garbled blob.
+            for part in line.split('\r') {
+                let trimmed = part.trim_end();
+                if !trimmed.is_empty() {
+                    buf.push_str(trimmed);
+                    buf.push('\n');
+                }
+            }
         }
         buf
     });
@@ -386,8 +394,13 @@ pub fn transcode_iso(
         let reader = std::io::BufReader::new(stderr);
         let mut buf = String::new();
         for line in reader.lines().map_while(Result::ok) {
-            buf.push_str(&line);
-            buf.push('\n');
+            for part in line.split('\r') {
+                let trimmed = part.trim_end();
+                if !trimmed.is_empty() {
+                    buf.push_str(trimmed);
+                    buf.push('\n');
+                }
+            }
         }
         buf
     });
@@ -549,14 +562,19 @@ pub fn is_session_limit_error(error_msg: &str) -> bool {
 /// Check if an ffmpeg error is a subtitle mapping/copy issue.
 /// These can be retried by dropping subtitle streams.
 pub fn is_subtitle_error(error_msg: &str) -> bool {
-    error_msg
-        .contains("Subtitle encoding currently only possible from text to text or bitmap to bitmap")
-        || error_msg.contains("subtitle codec not supported")
-        || error_msg.contains("Error while opening encoder for output stream")
-            && error_msg.contains("subtitle")
-        || error_msg.contains("Could not find tag for codec")
-            && (error_msg.contains("subtitle") || error_msg.contains("hdmv_pgs"))
-        || error_msg.contains("Unknown encoder") && error_msg.contains("subtitle")
+    let lower = error_msg.to_lowercase();
+    lower.contains("subtitle encoding currently only possible from text to text or bitmap to bitmap")
+        || lower.contains("subtitle codec not supported")
+        // "Subtitle codec 94213 is not supported." — MKV muxer rejecting mov_text/tx3g
+        || lower.contains("subtitle codec") && lower.contains("is not supported")
+        || lower.contains("error while opening encoder for output stream")
+            && lower.contains("subtitle")
+        || lower.contains("could not find tag for codec")
+            && (lower.contains("subtitle") || lower.contains("hdmv_pgs"))
+        || lower.contains("unknown encoder") && lower.contains("subtitle")
+        // MP4 mov_text/tx3g subtitles cannot be copied to MKV; ffmpeg reports this as a
+        // generic container incompatibility rather than a subtitle-specific error.
+        || lower.contains("codec not currently supported in container")
 }
 
 /// Check if an ffmpeg error is a disk space issue.
@@ -659,6 +677,10 @@ mod tests {
         ));
         assert!(is_subtitle_error(
             "Could not find tag for codec hdmv_pgs_subtitle"
+        ));
+        // mov_text / tx3g subtitles in MP4 → MKV
+        assert!(is_subtitle_error(
+            "Could not find tag for codec mov_text in stream #0:2, codec not currently supported in container"
         ));
         assert!(!is_subtitle_error("some other error"));
     }

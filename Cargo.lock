@@ -558,7 +558,7 @@ dependencies = [
 
 [[package]]
 name = "tdorr"
-version = "0.6.0"
+version = "5.1.0"
 dependencies = [
  "anyhow",
  "clap",
