@@ -30,8 +30,23 @@ fn walk_files(dir: &Path, out: &mut Vec<PathBuf>, visited_dirs: &mut HashSet<Pat
 /// Also picks up .iso and .img disc images.
 /// Deduplicates by canonical path to avoid encoding the same file twice
 /// when symlinks create multiple paths to the same file.
+/// If `root` is a file rather than a directory, it is treated as the sole input.
 pub fn scan(root: &Path, extensions: &[String]) -> Result<Vec<PathBuf>> {
     let ext_lower: Vec<String> = extensions.iter().map(|e| e.to_lowercase()).collect();
+
+    // Single-file mode: path points directly at a media file.
+    if root.is_file() {
+        let passes = iso::is_disc_image(root)
+            || root
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| ext_lower.contains(&e.to_lowercase()))
+                .unwrap_or(false);
+        if passes {
+            return Ok(vec![root.to_path_buf()]);
+        }
+        return Ok(vec![]);
+    }
 
     let mut all_files = Vec::new();
     walk_files(root, &mut all_files, &mut HashSet::new());
@@ -140,6 +155,29 @@ mod tests {
         let files = scan(dir.path(), &exts).unwrap();
         assert_eq!(files.len(), 1);
         assert!(files[0].file_name().unwrap().to_str().unwrap() == "episode.mkv");
+    }
+
+    #[test]
+    fn test_scan_single_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("movie.mkv");
+        fs::write(&file, "fake").unwrap();
+
+        let exts = vec!["mkv".to_string()];
+        let files = scan(&file, &exts).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0], file);
+    }
+
+    #[test]
+    fn test_scan_single_file_wrong_ext() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("document.txt");
+        fs::write(&file, "fake").unwrap();
+
+        let exts = vec!["mkv".to_string()];
+        let files = scan(&file, &exts).unwrap();
+        assert_eq!(files.len(), 0);
     }
 
     #[test]

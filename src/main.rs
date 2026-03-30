@@ -55,6 +55,19 @@ const ASCII_SYMBOLS: Symbols = Symbols {
     arrow: "->",
 };
 
+/// Return the number of columns in the terminal attached to stderr.
+/// Falls back to 80 if unavailable (no tty, piped output, etc.).
+fn terminal_cols() -> usize {
+    unsafe {
+        let mut ws: libc::winsize = std::mem::zeroed();
+        if libc::ioctl(libc::STDERR_FILENO, libc::TIOCGWINSZ, &mut ws) == 0 && ws.ws_col > 0 {
+            ws.ws_col as usize
+        } else {
+            80
+        }
+    }
+}
+
 fn detect_symbols() -> &'static Symbols {
     // Check the actual system locale, not just env vars.
     // LANG=en_US.UTF-8 can be set even when the locale isn't installed,
@@ -268,6 +281,11 @@ fn main() -> Result<()> {
 
     let sym = detect_symbols();
     let use_unicode = std::ptr::eq(sym, &UNICODE_SYMBOLS);
+
+    // Maximum file name display width: reserve enough columns for the widest line
+    // format (disk-wait: ~42 chars overhead) so lines never wrap and cursor-up
+    // repositioning stays accurate.
+    let max_name: usize = terminal_cols().saturating_sub(42).max(20);
 
     // Load config: explicit --config path must exist; omitting it uses embedded defaults.
     let cfg = match &cli.config {
@@ -832,7 +850,7 @@ fn main() -> Result<()> {
                         .to_string_lossy()
                         .to_string()
                 };
-                let short_name = truncate_name(&name, 60, sym);
+                let short_name = truncate_name(&name, max_name, sym);
                 let size_str = format_size(item.source_size);
 
                 // In fixed mode (-j specified), show file immediately.
