@@ -68,6 +68,44 @@ fn terminal_cols() -> usize {
     }
 }
 
+/// Overhead (terminal columns) consumed by the widest rendered line format,
+/// excluding the file name.  This is the disk-wait format:
+///   "  ~           <name> (1000.0GB)  waiting for disk"
+///    2+1+11              +2+8+1      +18  = 43, plus 1 margin = 44
+const LINE_FORMAT_OVERHEAD: usize = 44;
+
+/// Maximum file-name display width for a terminal of `cols` columns.
+/// Keeps every rendered line within `cols` even for worst-case sizes.
+fn max_name_for_cols(cols: usize) -> usize {
+    cols.saturating_sub(LINE_FORMAT_OVERHEAD).max(20)
+}
+
+/// Compute the source path used as the output-file name stem.
+///
+/// This logic is shared between the pre-transcode resume check and the worker
+/// thread.  Both must produce identical results; if they diverge the resume
+/// check looks for the wrong output file and re-transcodes on every run.
+///
+///   multi-file ISO  → ISO path (Bliss.iso  →  Bliss.transcoded.mkv)
+///   single-file ISO → inner filename stem   (VTS_01.VOB → VTS_01.transcoded.mkv)
+///   regular file    → file path itself
+fn output_stem_for_item(
+    file: &std::path::Path,
+    inner_path: Option<&str>,
+    inner_paths: Option<&[String]>,
+) -> std::path::PathBuf {
+    if inner_paths.is_some() {
+        file.to_path_buf()
+    } else if let Some(inner) = inner_path {
+        let inner_name = std::path::Path::new(inner).file_name().unwrap_or_default();
+        file.parent()
+            .unwrap_or(std::path::Path::new("."))
+            .join(inner_name)
+    } else {
+        file.to_path_buf()
+    }
+}
+
 fn detect_symbols() -> &'static Symbols {
     // Check the actual system locale, not just env vars.
     // LANG=en_US.UTF-8 can be set even when the locale isn't installed,
@@ -285,7 +323,7 @@ fn main() -> Result<()> {
     // Maximum file name display width: reserve enough columns for the widest line
     // format (disk-wait: ~42 chars overhead) so lines never wrap and cursor-up
     // repositioning stays accurate.
-    let max_name: usize = terminal_cols().saturating_sub(42).max(20);
+    let max_name: usize = max_name_for_cols(terminal_cols());
 
     // Load config: explicit --config path must exist; omitting it uses embedded defaults.
     let cfg = match &cli.config {
@@ -433,18 +471,11 @@ fn main() -> Result<()> {
                     //   - regular file    → use file path as stem
                     {
                         let out_dir = cli.output_dir.as_deref().or(cfg.output_dir.as_deref());
-                        let source_for_output = if inner_ps.is_some() {
-                            // Multi-file ISO: worker uses the ISO path as the output stem.
-                            file.clone()
-                        } else if let Some(ref inner) = inner_p {
-                            let inner_name =
-                                std::path::Path::new(inner).file_name().unwrap_or_default();
-                            file.parent()
-                                .unwrap_or(std::path::Path::new("."))
-                                .join(inner_name)
-                        } else {
-                            file.clone()
-                        };
+                        let source_for_output = output_stem_for_item(
+                            file,
+                            inner_p.as_deref(),
+                            inner_ps.as_deref(),
+                        );
                         if let Ok(out_path) = transcode::output_path(
                             &source_for_output,
                             out_dir,
@@ -876,24 +907,11 @@ fn main() -> Result<()> {
                     None
                 } else {
                     let out_dir = output_dir.as_deref().or(cfg.output_dir.as_deref());
-                    // For ISO entries: use ISO filename for output (not inner path)
-                    // For multi-file features, the ISO name is the natural output name
-                    let source_for_output = if item.iso_path.is_some() {
-                        if item.inner_paths.is_some() {
-                            // Multi-file: use ISO stem as output name
-                            item.path.clone()
-                        } else if let Some(ref inner) = item.inner_path {
-                            let inner_name = Path::new(inner).file_name().unwrap_or_default();
-                            item.path
-                                .parent()
-                                .unwrap_or(Path::new("."))
-                                .join(inner_name)
-                        } else {
-                            item.path.clone()
-                        }
-                    } else {
-                        item.path.clone()
-                    };
+                    let source_for_output = output_stem_for_item(
+                        &item.path,
+                        item.inner_path.as_deref(),
+                        item.inner_paths.as_deref(),
+                    );
                     match transcode::output_path(&source_for_output, out_dir, &cfg.target.container)
                     {
                         Ok(p) => Some(p),
@@ -1305,4 +1323,130 @@ mod tests {
             }
         }
     }
+
+    // ── Line-length regression tests ─────────────────────────────────────────
+    //
+    // Every format string used in the render loop must produce lines that fit
+    // within the terminal width.  If any format string gains extra characters,
+    // or if LINE_FORMAT_OVERHEAD is reduced below the true maximum overhead,
+    // these tests will catch it before it ships.
+
+    /// Build the worst-case line for each render format and assert they all
+    /// fit within `cols`.  Uses ASCII symbols (byte-length == display-width)
+    /// and the widest realistic size string ("1000.0GB").
+    fn check_line_lengths(cols: usize) {
+        let max_name = max_name_for_cols(cols);
+        let name = "A".repeat(max_name);
+        let size = "1000.0GB";
+
+        // Worker active: "  > XX% X.Xx <name> (<size>)"
+        let worker = format!("  {} {:>2}% {:>4} {} ({})", ">", 99, "9.9x", name, size);
+        assert!(
+            worker.len() <= cols,
+            "worker line ({} chars) exceeds {} cols at max_name={}: {:?}",
+            worker.len(), cols, max_name, worker
+        );
+
+        // Completed: "  + <name> (<src> -> <dst>, -100%)"
+        let completed = format!("  {} {} ({} {} {}, -{}%)", "+", name, size, "->", size, 100);
+        assert!(
+            completed.len() <= cols,
+            "completed line ({} chars) exceeds {} cols at max_name={}: {:?}",
+            completed.len(), cols, max_name, completed
+        );
+
+        // Disk-wait: "  ~           <name> (<size>)  waiting for disk"
+        let diskwait = format!("  {}           {} ({})  waiting for disk", "~", name, size);
+        assert!(
+            diskwait.len() <= cols,
+            "disk-wait line ({} chars) exceeds {} cols at max_name={}: {:?}",
+            diskwait.len(), cols, max_name, diskwait
+        );
+
+        // Queued: "  ~           <name> (<size>)  queued 999/999"
+        let queued = format!("  {}           {} ({})  queued {}/{}", "~", name, size, 999, 999);
+        assert!(
+            queued.len() <= cols,
+            "queued line ({} chars) exceeds {} cols at max_name={}: {:?}",
+            queued.len(), cols, max_name, queued
+        );
+    }
+
+    #[test]
+    fn test_line_lengths_fit_80_cols() {
+        check_line_lengths(80);
+    }
+
+    #[test]
+    fn test_line_lengths_fit_100_cols() {
+        check_line_lengths(100);
+    }
+
+    #[test]
+    fn test_line_lengths_fit_120_cols() {
+        check_line_lengths(120);
+    }
+
+    #[test]
+    fn test_line_lengths_fit_200_cols() {
+        check_line_lengths(200);
+    }
+
+    #[test]
+    fn test_max_name_minimum_is_20() {
+        // Even on a very narrow terminal names should be at least 20 chars.
+        assert_eq!(max_name_for_cols(0), 20);
+        assert_eq!(max_name_for_cols(10), 20);
+        assert_eq!(max_name_for_cols(44), 20); // exactly at the boundary
+    }
+
+    #[test]
+    fn test_max_name_scales_with_width() {
+        assert_eq!(max_name_for_cols(80), 36);
+        assert_eq!(max_name_for_cols(120), 76);
+    }
+
+    // ── ISO output-stem regression tests ─────────────────────────────────────
+    //
+    // The resume check and the worker thread must compute identical output
+    // paths.  Both now call output_stem_for_item(); these tests ensure that
+    // function returns the right path for each case.
+
+    #[test]
+    fn test_output_stem_regular_file() {
+        let file = std::path::Path::new("/media/movie.mkv");
+        let stem = output_stem_for_item(file, None, None);
+        assert_eq!(stem, file);
+    }
+
+    #[test]
+    fn test_output_stem_single_file_iso() {
+        // Single-file ISO: output is named after the inner file, not the ISO.
+        let iso = std::path::Path::new("/media/disc.iso");
+        let inner = "VIDEO_TS/VTS_01_1.VOB";
+        let stem = output_stem_for_item(iso, Some(inner), None);
+        assert_eq!(stem, std::path::Path::new("/media/VTS_01_1.VOB"));
+    }
+
+    #[test]
+    fn test_output_stem_multi_file_iso() {
+        // Multi-file ISO: output is named after the ISO itself, not an inner file.
+        let iso = std::path::Path::new("/media/Bliss (1985) DVD.iso");
+        let inner = "VIDEO_TS/VTS_01_1.VOB";
+        let paths = vec![
+            "VIDEO_TS/VTS_01_1.VOB".to_string(),
+            "VIDEO_TS/VTS_02_1.VOB".to_string(),
+        ];
+        let stem = output_stem_for_item(iso, Some(inner), Some(&paths));
+        assert_eq!(stem, iso);
+        // Regression: the old code used inner_p when inner_ps was Some,
+        // producing a different path than the worker and causing a re-transcode
+        // on every run.
+        let old_stem = output_stem_for_item(iso, Some(inner), None);
+        assert_ne!(
+            stem, old_stem,
+            "multi-file ISO stem must differ from single-file ISO stem"
+        );
+    }
 }
+
