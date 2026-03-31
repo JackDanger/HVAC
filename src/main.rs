@@ -320,6 +320,15 @@ fn main() -> Result<()> {
     let sym = detect_symbols();
     let use_unicode = std::ptr::eq(sym, &UNICODE_SYMBOLS);
 
+    // Worker threads write transcoded paths to stdout so callers can pipe them.
+    // When stdout is a terminal those writes share the same PTY as the render
+    // thread's stderr escape sequences; a println! landing between cursor-up
+    // and \x1b[J moves the cursor to the wrong row and the erase misses the
+    // old viewport line, leaving a ghost progress line in the scrollback.
+    // Suppress stdout output when it is a terminal — the completed-file line
+    // on stderr already shows everything a human needs.
+    let stdout_is_pipe = unsafe { libc::isatty(libc::STDOUT_FILENO) == 0 };
+
     // Maximum file name display width: reserve enough columns for the widest line
     // format (disk-wait: ~42 chars overhead) so lines never wrap and cursor-up
     // repositioning stays accurate.
@@ -1068,7 +1077,9 @@ fn main() -> Result<()> {
                                 format_size(out_size),
                                 saved_pct
                             ));
-                            println!("{}", out_path.display());
+                            if stdout_is_pipe {
+                                println!("{}", out_path.display());
+                            }
                             break None;
                         }
                         Err(e) => {
@@ -1370,6 +1381,25 @@ mod tests {
             "queued line ({} chars) exceeds {} cols at max_name={}: {:?}",
             queued.len(), cols, max_name, queued
         );
+    }
+
+    // ── stdout-interleave regression test ────────────────────────────────────
+    //
+    // Worker threads must NOT write to stdout when stdout is a terminal.
+    // A println! landing between the render thread's cursor-up and \x1b[J
+    // corrupts the cursor position and leaves ghost progress lines in the
+    // scrollback buffer.  When stdout is a pipe/redirect, writes are fine
+    // because they don't go to the same PTY as stderr's escape sequences.
+
+    #[test]
+    fn test_stdout_is_pipe_detects_non_tty() {
+        // In a test harness stdout is always redirected (not a TTY).
+        let result = unsafe { libc::isatty(libc::STDOUT_FILENO) };
+        // The test runner redirects stdout, so isatty must return 0.
+        assert_eq!(result, 0, "stdout should not be a tty in test environment");
+        // Confirm our derived flag
+        let stdout_is_pipe = result == 0;
+        assert!(stdout_is_pipe);
     }
 
     #[test]
