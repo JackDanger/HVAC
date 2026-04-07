@@ -305,15 +305,14 @@ fn main() -> Result<()> {
 
     // Register CTRL-C handler: first press cancels gracefully, second force-exits
     ctrlc::set_handler(move || {
-        // Restore terminal: show cursor, reset attributes, clear to end of screen
-        eprint!("\x1b[?25h\x1b[0m");
+        // Reset attributes and move to a fresh line
+        eprint!("\x1b[0m\r\n");
         if CANCELLED.load(Ordering::Relaxed) {
-            eprintln!();
             cleanup_tmp_dirs();
             std::process::exit(130);
         }
         CANCELLED.store(true, Ordering::Relaxed);
-        eprintln!("\nCancelling after current encodes finish... (Ctrl-C again to force quit)");
+        eprintln!("Cancelling after current encodes finish... (Ctrl-C again to force quit)");
     })
     .ok();
 
@@ -676,8 +675,6 @@ fn main() -> Result<()> {
                 let mut ramp_baseline_speed = 0u64;
                 let mut last_ramp_time = start;
 
-                eprint!("\x1b[?25l");
-
                 loop {
                     {
                         let mut stderr = std::io::stderr().lock();
@@ -839,7 +836,7 @@ fn main() -> Result<()> {
                             }
                             write!(stderr, "\x1b[J").ok();
                         }
-                        write!(stderr, "\x1b[?25h\x1b[0m").ok();
+                        write!(stderr, "\x1b[0m\r\n").ok();
                         stderr.flush().ok();
                         break;
                     }
