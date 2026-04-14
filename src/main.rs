@@ -86,24 +86,17 @@ fn max_name_for_cols(cols: usize) -> usize {
 /// thread.  Both must produce identical results; if they diverge the resume
 /// check looks for the wrong output file and re-transcodes on every run.
 ///
-///   multi-file ISO  → ISO path (Bliss.iso  →  Bliss.transcoded.mkv)
-///   single-file ISO → inner filename stem   (VTS_01.VOB → VTS_01.transcoded.mkv)
-///   regular file    → file path itself
+///   any ISO (single or multi-file) → ISO path  (Movie Title.iso → Movie Title.transcoded.mkv)
+///   regular file                   → file path itself
+///
+/// Inner track names (e.g. "00000.M2TS", "VTS_01_1.VOB") are meaningless
+/// technical identifiers; the ISO itself always carries the meaningful title.
 fn output_stem_for_item(
     file: &std::path::Path,
-    inner_path: Option<&str>,
-    inner_paths: Option<&[String]>,
+    _inner_path: Option<&str>,
+    _inner_paths: Option<&[String]>,
 ) -> std::path::PathBuf {
-    if inner_paths.is_some() {
-        file.to_path_buf()
-    } else if let Some(inner) = inner_path {
-        let inner_name = std::path::Path::new(inner).file_name().unwrap_or_default();
-        file.parent()
-            .unwrap_or(std::path::Path::new("."))
-            .join(inner_name)
-    } else {
-        file.to_path_buf()
-    }
+    file.to_path_buf()
 }
 
 fn detect_symbols() -> &'static Symbols {
@@ -1448,11 +1441,12 @@ mod tests {
 
     #[test]
     fn test_output_stem_single_file_iso() {
-        // Single-file ISO: output is named after the inner file, not the ISO.
-        let iso = std::path::Path::new("/media/disc.iso");
-        let inner = "VIDEO_TS/VTS_01_1.VOB";
+        // Single-file ISO: output uses the ISO filename, not the inner track name.
+        // Inner names like "00000.M2TS" or "VTS_01_1.VOB" are meaningless identifiers.
+        let iso = std::path::Path::new("/media/Pirates of the Caribbean BR-DISK.iso");
+        let inner = "BDMV/STREAM/00000.M2TS";
         let stem = output_stem_for_item(iso, Some(inner), None);
-        assert_eq!(stem, std::path::Path::new("/media/VTS_01_1.VOB"));
+        assert_eq!(stem, iso);
     }
 
     #[test]
@@ -1466,14 +1460,18 @@ mod tests {
         ];
         let stem = output_stem_for_item(iso, Some(inner), Some(&paths));
         assert_eq!(stem, iso);
-        // Regression: the old code used inner_p when inner_ps was Some,
-        // producing a different path than the worker and causing a re-transcode
-        // on every run.
-        let old_stem = output_stem_for_item(iso, Some(inner), None);
-        assert_ne!(
-            stem, old_stem,
-            "multi-file ISO stem must differ from single-file ISO stem"
-        );
+    }
+
+    #[test]
+    fn test_output_stem_iso_consistent() {
+        // Single-file and multi-file ISOs now both use the ISO path,
+        // so resume detection is consistent regardless of file count.
+        let iso = std::path::Path::new("/media/Movie.iso");
+        let inner = "BDMV/STREAM/00000.M2TS";
+        let paths = vec![inner.to_string()];
+        let single = output_stem_for_item(iso, Some(inner), None);
+        let multi = output_stem_for_item(iso, Some(inner), Some(&paths));
+        assert_eq!(single, multi, "single and multi-file ISO stems must match");
     }
 }
 
