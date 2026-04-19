@@ -1,83 +1,234 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 120">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 200" width="800" height="200">
   <defs>
-    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#0f0c29"/>
-      <stop offset="50%" style="stop-color:#302b63"/>
-      <stop offset="100%" style="stop-color:#24243e"/>
+    <radialGradient id="bg" cx="50%" cy="45%" r="70%">
+      <stop offset="0%" stop-color="#1e0a00"/>
+      <stop offset="100%" stop-color="#060100"/>
+    </radialGradient>
+    <linearGradient id="textGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#f7971e"/>
+      <stop offset="100%" stop-color="#ffd200"/>
     </linearGradient>
-    <linearGradient id="text-grad" x1="0%" y1="0%" x2="100%" y2="0%">
-      <stop offset="0%" style="stop-color:#f7971e"/>
-      <stop offset="100%" style="stop-color:#ffd200"/>
+    <linearGradient id="bigFileGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#7a3200"/>
+      <stop offset="100%" stop-color="#3e1600"/>
     </linearGradient>
-    <filter id="glow">
-      <feGaussianBlur stdDeviation="2" result="blur"/>
+    <linearGradient id="smallFileGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#1a5c20"/>
+      <stop offset="100%" stop-color="#0a2e10"/>
+    </linearGradient>
+    <linearGradient id="gpuGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#5c2400"/>
+      <stop offset="100%" stop-color="#200c00"/>
+    </linearGradient>
+    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="3.5" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="softGlow" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="7" result="blur"/>
       <feMerge>
         <feMergeNode in="blur"/>
         <feMergeNode in="SourceGraphic"/>
       </feMerge>
     </filter>
   </defs>
-  <rect width="400" height="120" rx="12" fill="url(#bg)"/>
 
-  <!-- Film strip decoration -->
-  <g opacity="0.3">
-    <rect x="15" y="15" width="12" height="9" rx="1" fill="#ffd200">
-      <animate attributeName="opacity" values="0.2;0.6;0.2" dur="3s" repeatCount="indefinite"/>
-    </rect>
-    <rect x="15" y="30" width="12" height="9" rx="1" fill="#ffd200">
-      <animate attributeName="opacity" values="0.6;0.2;0.6" dur="3s" repeatCount="indefinite"/>
-    </rect>
-    <rect x="15" y="45" width="12" height="9" rx="1" fill="#ffd200">
-      <animate attributeName="opacity" values="0.2;0.6;0.2" dur="3s" repeatCount="indefinite" begin="0.5s"/>
-    </rect>
-    <rect x="15" y="60" width="12" height="9" rx="1" fill="#ffd200">
-      <animate attributeName="opacity" values="0.6;0.2;0.6" dur="3s" repeatCount="indefinite" begin="0.5s"/>
-    </rect>
-    <rect x="15" y="75" width="12" height="9" rx="1" fill="#ffd200">
-      <animate attributeName="opacity" values="0.2;0.6;0.2" dur="3s" repeatCount="indefinite" begin="1s"/>
-    </rect>
-    <rect x="15" y="90" width="12" height="9" rx="1" fill="#ffd200">
-      <animate attributeName="opacity" values="0.6;0.2;0.6" dur="3s" repeatCount="indefinite" begin="1s"/>
-    </rect>
-  </g>
+  <style>
+    @keyframes flowRight {
+      to { stroke-dashoffset: -10; }
+    }
+    @keyframes gpuPulse {
+      0%, 100% { opacity: 0.75; }
+      50%       { opacity: 1;    }
+    }
+    @keyframes scanline {
+      0%   { x: -10px; opacity: 0;    }
+      8%   { opacity: 0.18; }
+      92%  { opacity: 0.18; }
+      100% { x: 810px; opacity: 0;    }
+    }
+    @keyframes titleFlicker {
+      0%, 100% { opacity: 1;   }
+      48%      { opacity: 1;   }
+      50%      { opacity: 0.82;}
+      52%      { opacity: 1;   }
+    }
+    @keyframes sprocketA {
+      0%, 100% { opacity: 0.18; }
+      50%      { opacity: 0.55; }
+    }
+    @keyframes sprocketB {
+      0%, 100% { opacity: 0.55; }
+      50%      { opacity: 0.18; }
+    }
+    .flow-a { stroke-dasharray: 6 4; animation: flowRight 0.55s linear infinite; }
+    .flow-b { stroke-dasharray: 6 4; animation: flowRight 0.55s linear infinite 0.28s; }
+    .gpu    { animation: gpuPulse 2.2s ease-in-out infinite; }
+    .sa     { animation: sprocketA 2.4s ease-in-out infinite; }
+    .sb     { animation: sprocketB 2.4s ease-in-out infinite; }
+  </style>
 
-  <!-- Main title -->
-  <text x="200" y="58" text-anchor="middle" font-family="monospace, Courier" font-size="48" font-weight="bold" fill="url(#text-grad)" filter="url(#glow)">
-    tdorr
-  </text>
+  <!-- Background -->
+  <rect width="800" height="200" fill="url(#bg)"/>
 
-  <!-- Subtitle -->
-  <text x="200" y="82" text-anchor="middle" font-family="monospace, Courier" font-size="13" fill="#aaa">
-    media transcoding that I could figure out
-  </text>
+  <!-- Film strip bands -->
+  <rect x="0" y="0"   width="800" height="20" fill="#0b0300" opacity="0.95"/>
+  <rect x="0" y="180" width="800" height="20" fill="#0b0300" opacity="0.95"/>
+  <line x1="0" y1="20"  x2="800" y2="20"  stroke="#3a1400" stroke-width="0.8"/>
+  <line x1="0" y1="180" x2="800" y2="180" stroke="#3a1400" stroke-width="0.8"/>
 
-  <!-- Scanning line animation -->
-  <line x1="40" y1="0" x2="40" y2="120" stroke="#ffd200" stroke-width="1" opacity="0.15">
-    <animate attributeName="x1" values="40;380;40" dur="4s" repeatCount="indefinite"/>
-    <animate attributeName="x2" values="40;380;40" dur="4s" repeatCount="indefinite"/>
-    <animate attributeName="opacity" values="0;0.25;0" dur="4s" repeatCount="indefinite"/>
-  </line>
+  <!-- Top sprocket holes (x = 8, 48, 88 ... step 40) -->
+  <rect class="sa" x="8"   y="5" width="16" height="10" rx="2" fill="#ffd200"/>
+  <rect class="sb" x="48"  y="5" width="16" height="10" rx="2" fill="#ffd200"/>
+  <rect class="sa" x="88"  y="5" width="16" height="10" rx="2" fill="#ffd200"/>
+  <rect class="sb" x="128" y="5" width="16" height="10" rx="2" fill="#ffd200"/>
+  <rect class="sa" x="168" y="5" width="16" height="10" rx="2" fill="#ffd200"/>
+  <rect class="sb" x="208" y="5" width="16" height="10" rx="2" fill="#ffd200"/>
+  <rect class="sa" x="248" y="5" width="16" height="10" rx="2" fill="#ffd200"/>
+  <rect class="sb" x="288" y="5" width="16" height="10" rx="2" fill="#ffd200"/>
+  <rect class="sa" x="328" y="5" width="16" height="10" rx="2" fill="#ffd200"/>
+  <rect class="sb" x="368" y="5" width="16" height="10" rx="2" fill="#ffd200"/>
+  <rect class="sa" x="408" y="5" width="16" height="10" rx="2" fill="#ffd200"/>
+  <rect class="sb" x="448" y="5" width="16" height="10" rx="2" fill="#ffd200"/>
+  <rect class="sa" x="488" y="5" width="16" height="10" rx="2" fill="#ffd200"/>
+  <rect class="sb" x="528" y="5" width="16" height="10" rx="2" fill="#ffd200"/>
+  <rect class="sa" x="568" y="5" width="16" height="10" rx="2" fill="#ffd200"/>
+  <rect class="sb" x="608" y="5" width="16" height="10" rx="2" fill="#ffd200"/>
+  <rect class="sa" x="648" y="5" width="16" height="10" rx="2" fill="#ffd200"/>
+  <rect class="sb" x="688" y="5" width="16" height="10" rx="2" fill="#ffd200"/>
+  <rect class="sa" x="728" y="5" width="16" height="10" rx="2" fill="#ffd200"/>
+  <rect class="sb" x="768" y="5" width="16" height="10" rx="2" fill="#ffd200"/>
 
-  <!-- GPU chip icon -->
-  <g transform="translate(340, 20)" opacity="0.5">
-    <rect x="0" y="0" width="24" height="24" rx="3" fill="none" stroke="#ffd200" stroke-width="1.5">
-      <animate attributeName="stroke-opacity" values="0.3;0.8;0.3" dur="2s" repeatCount="indefinite"/>
-    </rect>
-    <rect x="6" y="6" width="12" height="12" rx="1" fill="#ffd200" opacity="0.4">
-      <animate attributeName="opacity" values="0.2;0.6;0.2" dur="2s" repeatCount="indefinite"/>
-    </rect>
-    <!-- pins -->
-    <line x1="4" y1="-3" x2="4" y2="0" stroke="#ffd200" stroke-width="1.5" opacity="0.6"/>
-    <line x1="12" y1="-3" x2="12" y2="0" stroke="#ffd200" stroke-width="1.5" opacity="0.6"/>
-    <line x1="20" y1="-3" x2="20" y2="0" stroke="#ffd200" stroke-width="1.5" opacity="0.6"/>
-    <line x1="4" y1="24" x2="4" y2="27" stroke="#ffd200" stroke-width="1.5" opacity="0.6"/>
-    <line x1="12" y1="24" x2="12" y2="27" stroke="#ffd200" stroke-width="1.5" opacity="0.6"/>
-    <line x1="20" y1="24" x2="20" y2="27" stroke="#ffd200" stroke-width="1.5" opacity="0.6"/>
-  </g>
+  <!-- Bottom sprocket holes -->
+  <rect class="sb" x="8"   y="185" width="16" height="10" rx="2" fill="#ffd200"/>
+  <rect class="sa" x="48"  y="185" width="16" height="10" rx="2" fill="#ffd200"/>
+  <rect class="sb" x="88"  y="185" width="16" height="10" rx="2" fill="#ffd200"/>
+  <rect class="sa" x="128" y="185" width="16" height="10" rx="2" fill="#ffd200"/>
+  <rect class="sb" x="168" y="185" width="16" height="10" rx="2" fill="#ffd200"/>
+  <rect class="sa" x="208" y="185" width="16" height="10" rx="2" fill="#ffd200"/>
+  <rect class="sb" x="248" y="185" width="16" height="10" rx="2" fill="#ffd200"/>
+  <rect class="sa" x="288" y="185" width="16" height="10" rx="2" fill="#ffd200"/>
+  <rect class="sb" x="328" y="185" width="16" height="10" rx="2" fill="#ffd200"/>
+  <rect class="sa" x="368" y="185" width="16" height="10" rx="2" fill="#ffd200"/>
+  <rect class="sb" x="408" y="185" width="16" height="10" rx="2" fill="#ffd200"/>
+  <rect class="sa" x="448" y="185" width="16" height="10" rx="2" fill="#ffd200"/>
+  <rect class="sb" x="488" y="185" width="16" height="10" rx="2" fill="#ffd200"/>
+  <rect class="sa" x="528" y="185" width="16" height="10" rx="2" fill="#ffd200"/>
+  <rect class="sb" x="568" y="185" width="16" height="10" rx="2" fill="#ffd200"/>
+  <rect class="sa" x="608" y="185" width="16" height="10" rx="2" fill="#ffd200"/>
+  <rect class="sb" x="648" y="185" width="16" height="10" rx="2" fill="#ffd200"/>
+  <rect class="sa" x="688" y="185" width="16" height="10" rx="2" fill="#ffd200"/>
+  <rect class="sb" x="728" y="185" width="16" height="10" rx="2" fill="#ffd200"/>
+  <rect class="sa" x="768" y="185" width="16" height="10" rx="2" fill="#ffd200"/>
 
-  <!-- Progress bar animation -->
-  <rect x="40" y="98" width="320" height="4" rx="2" fill="#1a1a2e"/>
-  <rect x="40" y="98" width="0" height="4" rx="2" fill="url(#text-grad)">
-    <animate attributeName="width" values="0;320;320;0" dur="6s" keyTimes="0;0.6;0.9;1" repeatCount="indefinite"/>
+  <!-- Scanline sweep -->
+  <rect y="20" width="4" height="160" fill="#ffd200" opacity="0">
+    <animate attributeName="x" values="-10;810" dur="5s" ease="ease-in-out" repeatCount="indefinite"/>
+    <animate attributeName="opacity" values="0;0;0.16;0.16;0" keyTimes="0;0.04;0.08;0.92;1" dur="5s" repeatCount="indefinite"/>
   </rect>
+
+  <!-- ── Title ── -->
+  <text x="400" y="58"
+        text-anchor="middle"
+        font-family="'Courier New', Courier, monospace"
+        font-size="44" font-weight="bold"
+        fill="url(#textGrad)" filter="url(#glow)">
+    tdorr
+    <animate attributeName="opacity" values="1;1;0.82;1;1" keyTimes="0;0.45;0.5;0.55;1" dur="6s" repeatCount="indefinite"/>
+  </text>
+  <text x="400" y="73"
+        text-anchor="middle"
+        font-family="'Courier New', Courier, monospace"
+        font-size="10" letter-spacing="3" fill="#5c2808">
+    GPU-ACCELERATED H265 TRANSCODING
+  </text>
+
+  <!-- ── Compression visualization ── -->
+
+  <!-- BIG FILE (source) -->
+  <text x="118" y="88" text-anchor="middle"
+        font-family="monospace" font-size="11" fill="#d04810">27.2 GB</text>
+  <rect x="72" y="92" width="92" height="66" rx="4"
+        fill="url(#bigFileGrad)" stroke="#b04010" stroke-width="1.5">
+    <animate attributeName="stroke-opacity" values="0.5;1;0.5" dur="3s" repeatCount="indefinite"/>
+  </rect>
+  <!-- Document lines -->
+  <line x1="84" y1="106" x2="152" y2="106" stroke="#c05818" stroke-width="1" opacity="0.35"/>
+  <line x1="84" y1="114" x2="152" y2="114" stroke="#c05818" stroke-width="1" opacity="0.35"/>
+  <line x1="84" y1="122" x2="152" y2="122" stroke="#c05818" stroke-width="1" opacity="0.35"/>
+  <line x1="84" y1="130" x2="140" y2="130" stroke="#c05818" stroke-width="1" opacity="0.35"/>
+  <line x1="84" y1="138" x2="148" y2="138" stroke="#c05818" stroke-width="1" opacity="0.35"/>
+  <line x1="84" y1="146" x2="130" y2="146" stroke="#c05818" stroke-width="1" opacity="0.35"/>
+  <text x="118" y="135" text-anchor="middle"
+        font-family="monospace" font-size="10" fill="#e06828" opacity="0.8">h264</text>
+
+  <!-- Flow: source → GPU -->
+  <line x1="164" y1="125" x2="370" y2="125"
+        class="flow-a" stroke="#e8640a" stroke-width="1.5" opacity="0.75"/>
+  <line x1="164" y1="132" x2="370" y2="132"
+        class="flow-b" stroke="#f5a020" stroke-width="1"   opacity="0.45"/>
+
+  <!-- GPU CHIP -->
+  <g class="gpu">
+    <rect x="370" y="100" width="60" height="52" rx="4"
+          fill="url(#gpuGrad)" stroke="#e8640a" stroke-width="1.5"/>
+    <!-- Die -->
+    <rect x="382" y="112" width="36" height="28" rx="2" fill="#e8640a" opacity="0.18">
+      <animate attributeName="opacity" values="0.10;0.28;0.10" dur="1.5s" repeatCount="indefinite"/>
+    </rect>
+    <!-- Grid -->
+    <line x1="394" y1="112" x2="394" y2="140" stroke="#e8640a" stroke-width="0.6" opacity="0.3"/>
+    <line x1="406" y1="112" x2="406" y2="140" stroke="#e8640a" stroke-width="0.6" opacity="0.3"/>
+    <line x1="382" y1="124" x2="418" y2="124" stroke="#e8640a" stroke-width="0.6" opacity="0.3"/>
+    <line x1="382" y1="133" x2="418" y2="133" stroke="#e8640a" stroke-width="0.6" opacity="0.3"/>
+    <!-- Pins top -->
+    <line x1="384" y1="96"  x2="384" y2="100" stroke="#e8640a" stroke-width="2" opacity="0.65"/>
+    <line x1="396" y1="96"  x2="396" y2="100" stroke="#e8640a" stroke-width="2" opacity="0.65"/>
+    <line x1="408" y1="96"  x2="408" y2="100" stroke="#e8640a" stroke-width="2" opacity="0.65"/>
+    <line x1="420" y1="96"  x2="420" y2="100" stroke="#e8640a" stroke-width="2" opacity="0.65"/>
+    <!-- Pins bottom -->
+    <line x1="384" y1="152" x2="384" y2="156" stroke="#e8640a" stroke-width="2" opacity="0.65"/>
+    <line x1="396" y1="152" x2="396" y2="156" stroke="#e8640a" stroke-width="2" opacity="0.65"/>
+    <line x1="408" y1="152" x2="408" y2="156" stroke="#e8640a" stroke-width="2" opacity="0.65"/>
+    <line x1="420" y1="152" x2="420" y2="156" stroke="#e8640a" stroke-width="2" opacity="0.65"/>
+    <!-- Labels -->
+    <text x="400" y="130" text-anchor="middle"
+          font-family="monospace" font-size="9" fill="#ffd200" font-weight="bold">GPU</text>
+    <text x="400" y="141" text-anchor="middle"
+          font-family="monospace" font-size="6.5" fill="#e8a040">hevc_nvenc</text>
+  </g>
+
+  <!-- Flow: GPU → output -->
+  <line x1="430" y1="125" x2="618" y2="125"
+        class="flow-a" stroke="#28c840" stroke-width="1.5" opacity="0.8"/>
+  <line x1="430" y1="132" x2="618" y2="132"
+        class="flow-b" stroke="#40e858" stroke-width="1"   opacity="0.45"/>
+
+  <!-- SMALL FILE (output — width ≈ 15% of source, reflecting ~85% reduction) -->
+  <text x="631" y="88" text-anchor="middle"
+        font-family="monospace" font-size="11" fill="#28c840">4.1 GB</text>
+  <rect x="618" y="92" width="26" height="66" rx="3"
+        fill="url(#smallFileGrad)" stroke="#28c840" stroke-width="1.5">
+    <animate attributeName="stroke-opacity" values="0.5;1;0.5" dur="3s" repeatCount="indefinite" begin="0.7s"/>
+  </rect>
+  <text x="631" y="130" text-anchor="middle"
+        font-family="monospace" font-size="8" fill="#30d848" opacity="0.9">h265</text>
+
+  <!-- Reduction badge -->
+  <text x="662" y="122"
+        font-family="'Courier New', Courier, monospace"
+        font-size="18" font-weight="bold"
+        fill="#28c840" filter="url(#glow)">-84%</text>
+  <text x="662" y="137"
+        font-family="monospace" font-size="9" fill="#1a6a28">avg savings</text>
+
+  <!-- Bottom tagline -->
+  <text x="400" y="172" text-anchor="middle"
+        font-family="'Courier New', Courier, monospace"
+        font-size="9.5" fill="#3a1808" letter-spacing="1">
+    safe by default  ·  skips already-efficient files  ·  ISO / disc image support
+  </text>
 </svg>
