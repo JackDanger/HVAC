@@ -1,7 +1,7 @@
 use opentelemetry::{global, trace::Span, trace::Tracer, KeyValue};
 use opentelemetry_otlp::{WithExportConfig, WithHttpConfig};
 use opentelemetry_sdk::{
-    trace::{SdkTracerProvider, SimpleSpanProcessor},
+    trace::{TracerProvider, SimpleSpanProcessor},
     Resource,
 };
 use std::collections::HashMap;
@@ -43,7 +43,7 @@ impl Drop for OtelSpan {
 /// Enabled when LAUNCHDARKLY_SDK_KEY is set (same key used for feature flags).
 /// Sends traces to the LD OTLP endpoint via HTTP/proto with Bearer auth.
 pub struct Telemetry {
-    provider: Option<SdkTracerProvider>,
+    provider: Option<TracerProvider>,
 }
 
 impl Telemetry {
@@ -68,7 +68,7 @@ impl Telemetry {
         }
     }
 
-    fn build(sdk_key: &str) -> anyhow::Result<SdkTracerProvider> {
+    fn build(sdk_key: &str) -> anyhow::Result<TracerProvider> {
         let mut headers = HashMap::new();
         headers.insert(
             "Authorization".to_string(),
@@ -87,8 +87,8 @@ impl Telemetry {
             KeyValue::new("service.version", env!("CARGO_PKG_VERSION")),
         ]);
 
-        let provider = SdkTracerProvider::builder()
-            .with_span_processor(SimpleSpanProcessor::new(exporter))
+        let provider = TracerProvider::builder()
+            .with_span_processor(SimpleSpanProcessor::new(Box::new(exporter)))
             .with_resource(resource)
             .build();
 

@@ -501,8 +501,9 @@ impl Flags {
             Some(c) => {
                 let ctx = self.make_context();
                 let detail = c.bool_variation_detail(&ctx, key, default);
-                log::debug!("flag {key:?} = {} ({:?})", detail.value, detail.reason);
-                detail.value
+                let value = detail.value.unwrap_or(default);
+                log::debug!("flag {key:?} = {value:?} ({:?})", detail.reason);
+                value
             }
         }
     }
