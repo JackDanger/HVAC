@@ -1,9 +1,12 @@
 use opentelemetry::{global, trace::Span, trace::Tracer, KeyValue};
-use opentelemetry_otlp::WithExportConfig;
+use opentelemetry_otlp::{WithExportConfig, WithHttpConfig};
 use opentelemetry_sdk::{
     trace::{SdkTracerProvider, SimpleSpanProcessor},
     Resource,
 };
+use std::collections::HashMap;
+
+const OTLP_ENDPOINT: &str = "https://otel.observability.app.launchdarkly.com:4318";
 
 /// RAII span — ends automatically on drop.
 pub struct OtelSpan {
@@ -36,43 +39,50 @@ impl Drop for OtelSpan {
     }
 }
 
-/// OpenTelemetry → Highlight bridge.
-/// No-op when HIGHLIGHT_PROJECT_ID is unset.
+/// OpenTelemetry → LaunchDarkly Observability bridge.
+/// Enabled when LAUNCHDARKLY_SDK_KEY is set (same key used for feature flags).
+/// Sends traces to the LD OTLP endpoint via HTTP/proto with Bearer auth.
 pub struct Telemetry {
     provider: Option<SdkTracerProvider>,
 }
 
 impl Telemetry {
     pub fn new() -> Self {
-        let project_id = match std::env::var("HIGHLIGHT_PROJECT_ID") {
+        let sdk_key = match std::env::var("LAUNCHDARKLY_SDK_KEY") {
             Ok(v) if !v.is_empty() => v,
             _ => return Telemetry { provider: None },
         };
 
-        match Self::build(&project_id) {
+        match Self::build(&sdk_key) {
             Ok(provider) => {
                 global::set_tracer_provider(provider.clone());
-                log::info!("Highlight: connected (project {})", project_id);
+                log::info!("LD Observability: tracing enabled → {}", OTLP_ENDPOINT);
                 Telemetry {
                     provider: Some(provider),
                 }
             }
             Err(e) => {
-                log::warn!("Highlight init error: {e}");
+                log::warn!("LD Observability init error: {e}");
                 Telemetry { provider: None }
             }
         }
     }
 
-    fn build(project_id: &str) -> anyhow::Result<SdkTracerProvider> {
+    fn build(sdk_key: &str) -> anyhow::Result<SdkTracerProvider> {
+        let mut headers = HashMap::new();
+        headers.insert(
+            "Authorization".to_string(),
+            format!("Bearer {}", sdk_key),
+        );
+
         let exporter = opentelemetry_otlp::SpanExporter::builder()
             .with_http()
-            .with_endpoint("https://otel.highlight.io:4318")
+            .with_endpoint(format!("{}/v1/traces", OTLP_ENDPOINT))
+            .with_headers(headers)
             .build()
             .map_err(|e| anyhow::anyhow!("OTel exporter: {e}"))?;
 
         let resource = Resource::new([
-            KeyValue::new("highlight.project_id", project_id.to_string()),
             KeyValue::new("service.name", "tdorr"),
             KeyValue::new("service.version", env!("CARGO_PKG_VERSION")),
         ]);
