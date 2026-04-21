@@ -16,9 +16,9 @@
 
 ## Why?
 
-I spent an entire evening trying to get [Tdarr](https://github.com/HaveAGitGat/Tdarr) working. Nodes, servers, web UIs, plugins, databases... I just wanted to convert my media library to h265. So I wrote tdorr instead.
+I spent an evening trying to get [Tdarr](https://github.com/HaveAGitGat/Tdarr) working and failed. I just wanted to compress my media library to h265. So I wrote tdorr instead.
 
-**tdorr** is a single binary. Point it at a directory. It finds video files, skips the ones that are already fine, and GPU-transcodes the rest to h265. That's it.
+**tdorr** is a single binary you can point at a directory. It finds video files, skips the ones that are already fine, and GPU-transcodes the rest to h265. It can reach inside .iso files and .img files and extract + convert the stuff it finds with correct names.
 
 ---
 
