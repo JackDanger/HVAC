@@ -1,4 +1,5 @@
 mod config;
+mod flags;
 mod gpu;
 mod iso;
 mod probe;
@@ -16,7 +17,6 @@ use std::time::Instant;
 
 use util::format_size;
 
-const MAX_SESSION_RETRIES: u32 = 5;
 
 /// Display symbols — ASCII fallbacks when locale doesn't support UTF-8.
 struct Symbols {
@@ -286,6 +286,7 @@ fn embedded_config_banner(use_unicode: bool) -> String {
 fn main() -> Result<()> {
     env_logger::init();
     let cli = Cli::parse();
+    let mut flags = flags::Flags::new();
 
     // --dump-config: print embedded defaults to stdout and exit (no GPU or path needed)
     if cli.dump_config {
@@ -327,7 +328,7 @@ fn main() -> Result<()> {
     let max_name: usize = max_name_for_cols(terminal_cols());
 
     // Load config: explicit --config path must exist; omitting it uses embedded defaults.
-    let cfg = match &cli.config {
+    let mut cfg = match &cli.config {
         Some(p) => config::Config::load(p)
             .with_context(|| format!("Failed to load config from {:?}", p))?,
         None => {
@@ -338,17 +339,50 @@ fn main() -> Result<()> {
         }
     };
 
-    let gpu = gpu::detect_gpu()?;
+    let mut gpu = gpu::detect_gpu()?;
+    flags.set_gpu(&gpu.name, &gpu.encoder, &format!("{:?}", gpu.kind));
+    flags.track_gpu_detected(
+        &gpu.name,
+        &gpu.encoder,
+        &format!("{:?}", gpu.kind),
+        gpu::max_encode_sessions(&gpu),
+    );
+    if let Some(enc) = flags.gpu_encoder_override() {
+        gpu.encoder = enc;
+    }
     eprintln!("GPU: {} ({})", gpu.name, gpu.encoder);
+
+    if !flags.enable_transcoding() {
+        eprintln!("Transcoding disabled by feature flag.");
+        flags.close();
+        return Ok(());
+    }
 
     if let Ok(avail) = util::available_disk_space(path) {
         eprintln!("Disk: {} available", format_size(avail));
     }
 
+    // Apply flag overrides to config before freezing it in Arc.
+    if let Some(preset) = flags.transcode_preset_override() {
+        cfg.target.preset = preset;
+    }
+    if let Some(bitrate) = flags.max_bitrate_kbps_override() {
+        cfg.target.max_bitrate_kbps = bitrate;
+    }
+
     let files = scanner::scan(path, &cfg.media_extensions)?;
+    flags.track_scan_completed(
+        files.len(),
+        files
+            .iter()
+            .filter_map(|f| std::fs::metadata(f).ok())
+            .map(|m| m.len())
+            .sum(),
+    );
 
     if files.is_empty() {
         eprintln!("No media files found in {:?}", path);
+        flags.close();
         return Ok(());
     }
 
@@ -366,6 +400,11 @@ fn main() -> Result<()> {
         if iso::is_disc_image(file) {
             let iso_name = file.file_name().unwrap_or_default().to_string_lossy();
 
+            if !flags.enable_iso_support() {
+                eprintln!("  skip: {}: ISO support disabled by feature flag", iso_name);
+                continue;
+            }
+
             let analysis = match iso::analyze_disc(file) {
                 Ok(a) => a,
                 Err(e) => {
@@ -380,6 +419,12 @@ fn main() -> Result<()> {
                 continue;
             }
 
+            flags.track_iso_analyzed(
+                &iso_name,
+                &format!("{:?}", analysis.disc_type),
+                analysis.main_feature.len(),
+                analysis.extras.len(),
+            );
             eprintln!(
                 "  iso: {} ({:?}, {} main feature files, {} extras)",
                 iso_name,
@@ -434,6 +479,11 @@ fn main() -> Result<()> {
             Ok(info) => {
                 if probe::meets_target(&info, &cfg.target) {
                     skipped += 1;
+                    flags.track_probe_skipped(
+                        &file.file_name().unwrap_or_default().to_string_lossy(),
+                        &info.codec,
+                        info.bitrate_kbps,
+                    );
                 } else {
                     let source_size = if let Some(ref ip) = iso_p {
                         // For ISO entries with multiple files, sum all file sizes
@@ -498,6 +548,9 @@ fn main() -> Result<()> {
                                                 "  Replaced {:?} with existing transcoded copy",
                                                 file.file_name().unwrap_or_default()
                                             );
+                                            flags.track_probe_resumed(
+                                                &file.file_name().unwrap_or_default().to_string_lossy(),
+                                            );
                                             resumed += 1;
                                             continue;
                                         }
@@ -511,6 +564,9 @@ fn main() -> Result<()> {
                                         }
                                     }
                                 } else {
+                                    flags.track_probe_resumed(
+                                        &file.file_name().unwrap_or_default().to_string_lossy(),
+                                    );
                                     resumed += 1;
                                     continue;
                                 }
@@ -546,16 +602,22 @@ fn main() -> Result<()> {
         } else {
             eprintln!("All {} files already meet target.", expanded.len());
         }
+        flags.close();
         return Ok(());
     }
 
-    let jobs_specified = cli.jobs.is_some();
+    let flag_jobs = flags.max_parallel_jobs();
+    let jobs_specified = cli.jobs.is_some() || flag_jobs > 0;
     // Auto mode: spawn extra threads to probe beyond the theoretical limit
-    let jobs = cli
-        .jobs
-        .unwrap_or_else(|| gpu::max_encode_sessions(&gpu) + 3)
-        .max(1);
-    let auto_ramp = !jobs_specified;
+    let jobs = if flag_jobs > 0 {
+        flag_jobs
+    } else {
+        cli.jobs
+            .unwrap_or_else(|| gpu::max_encode_sessions(&gpu) + 3)
+    }
+    .max(1);
+    let auto_ramp = !jobs_specified && flags.enable_auto_ramp();
+    let max_session_retries = flags.max_session_retries();
 
     eprintln!(
         "{} to transcode, {} already HEVC{}, {}",
@@ -573,7 +635,7 @@ fn main() -> Result<()> {
         },
     );
 
-    if cli.dry_run {
+    if cli.dry_run || flags.dry_run() {
         for item in &to_transcode {
             let name = item.path.file_name().unwrap_or_default().to_string_lossy();
             eprintln!(
@@ -589,6 +651,7 @@ fn main() -> Result<()> {
             to_transcode.len(),
             format_size(total_size)
         );
+        flags.close();
         return Ok(());
     }
 
@@ -633,9 +696,10 @@ fn main() -> Result<()> {
 
     // Disk space limiter: tracks estimated bytes reserved by in-flight encodes.
     // We estimate output at source_size/2 (conservative for HEVC compression).
-    // 2GB margin prevents filesystem from getting dangerously full.
+    // 2GB base margin + optional extra from feature flag.
     let disk_reserved = Arc::new(AtomicU64::new(0));
-    const DISK_MARGIN: u64 = 2 * 1024 * 1024 * 1024;
+    let disk_margin: u64 = 2 * 1024 * 1024 * 1024
+        + (flags.disk_headroom_extra_gb() * 1024.0 * 1024.0 * 1024.0) as u64;
 
     let transcoded = Arc::new(AtomicU32::new(0));
     let error_count = Arc::new(AtomicU32::new(errors));
@@ -646,6 +710,7 @@ fn main() -> Result<()> {
     let next_idx = Arc::new(AtomicU32::new(0));
     let cfg = Arc::new(cfg);
     let gpu = Arc::new(gpu);
+    let flags = Arc::new(flags);
     let overwrite = cli.overwrite;
     let output_dir = cli.output_dir.clone();
 
@@ -659,6 +724,7 @@ fn main() -> Result<()> {
             let render_errors = Arc::clone(&error_count);
             let render_max = Arc::clone(&max_encoders);
             let render_ramping = Arc::clone(&ramping);
+            let render_flags = Arc::clone(&flags);
 
             s.spawn(move || {
                 let start = Instant::now();
@@ -800,18 +866,28 @@ fn main() -> Result<()> {
                                 // First measurement: record baseline and ramp
                                 ramp_baseline_speed = total_speed;
                                 render_max.store(current_max + 1, Ordering::SeqCst);
+                                render_flags.track_auto_ramp_increased(
+                                    current_max, current_max + 1, total_speed,
+                                );
                                 last_ramp_time = Instant::now();
                             } else if total_speed > ramp_baseline_speed {
                                 // Total throughput improved: keep ramping
                                 ramp_baseline_speed = total_speed;
                                 render_max.store(current_max + 1, Ordering::SeqCst);
+                                render_flags.track_auto_ramp_increased(
+                                    current_max, current_max + 1, total_speed,
+                                );
                                 last_ramp_time = Instant::now();
                             } else {
                                 // Throughput stalled or dropped: stop ramping
                                 render_ramping.store(false, Ordering::SeqCst);
                                 if total_speed < ramp_baseline_speed * 85 / 100 {
                                     // Significant drop: revert last ramp
-                                    lower_max(&render_max, current_max.saturating_sub(1).max(1));
+                                    let reverted_to = current_max.saturating_sub(1).max(1);
+                                    lower_max(&render_max, reverted_to);
+                                    render_flags.track_auto_ramp_stopped(reverted_to, true);
+                                } else {
+                                    render_flags.track_auto_ramp_stopped(current_max, false);
                                 }
                             }
                         }
@@ -859,6 +935,7 @@ fn main() -> Result<()> {
             let ramping = Arc::clone(&ramping);
             let worker_count = Arc::clone(&worker_count);
             let disk_reserved = Arc::clone(&disk_reserved);
+            let worker_flags = Arc::clone(&flags);
 
             s.spawn(move || 'outer: loop {
                 if CANCELLED.load(Ordering::Relaxed) {
@@ -934,6 +1011,8 @@ fn main() -> Result<()> {
                 let mut session_retries = 0u32;
                 let mut disk_space_retries = 0u32;
                 let mut skip_subs = false;
+                let mut transcode_started_tracked = false;
+                let mut disk_wait_tracked = false;
 
                 let last_err: Option<anyhow::Error> = loop {
                     if CANCELLED.load(Ordering::Relaxed) {
@@ -951,12 +1030,20 @@ fn main() -> Result<()> {
                         let reserved = disk_reserved.load(Ordering::SeqCst);
                         let effective = avail.saturating_sub(reserved);
                         // Always allow at least 1 encode (avoid deadlock when disk is tight)
-                        reserved == 0 || effective >= disk_estimate + DISK_MARGIN
+                        reserved == 0 || effective >= disk_estimate + disk_margin
                     } else {
                         true // Can't check? Proceed optimistically
                     };
 
                     if !has_disk {
+                        // Emit disk-wait event once per file (not on every 2-s poll).
+                        if !disk_wait_tracked {
+                            let avail_gb = util::available_disk_space(check_dir)
+                                .map(|b| b as f64 / (1024.0 * 1024.0 * 1024.0))
+                                .unwrap_or(0.0);
+                            worker_flags.track_disk_wait(&short_name, avail_gb);
+                            disk_wait_tracked = true;
+                        }
                         // Show disk wait status
                         my_slot.disk_wait.store(true, Ordering::Relaxed);
                         if !auto_ramp {
@@ -990,6 +1077,17 @@ fn main() -> Result<()> {
                         *info = Some((short_name.clone(), size_str.clone()));
                         my_slot.progress.store(0, Ordering::Relaxed);
                         my_slot.speed.store(0, Ordering::Relaxed);
+                    }
+
+                    if !transcode_started_tracked {
+                        worker_flags.track_transcode_started(
+                            &short_name,
+                            item.bitrate_kbps,
+                            item.duration_secs,
+                            item.source_size,
+                            &item.pix_fmt,
+                        );
+                        transcode_started_tracked = true;
                     }
 
                     let encode_result = if let Some(ref iso) = item.iso_path {
@@ -1052,6 +1150,13 @@ fn main() -> Result<()> {
                                 0
                             };
 
+                            worker_flags.track_transcode_completed(
+                                &short_name,
+                                item.source_size,
+                                out_size,
+                                saved_pct,
+                            );
+
                             // Deactivate slot BEFORE pushing completed line to avoid
                             // render thread showing both the active slot and the ✓ line.
                             *my_slot.info.lock().unwrap() = None;
@@ -1079,9 +1184,16 @@ fn main() -> Result<()> {
 
                             // Disk space error: wait for other encodes to free space, then retry
                             if transcode::is_disk_space_error(&err_str)
-                                && disk_space_retries < MAX_SESSION_RETRIES
+                                && disk_space_retries < max_session_retries
                             {
                                 disk_space_retries += 1;
+                                if !disk_wait_tracked {
+                                    let avail_gb = util::available_disk_space(check_dir)
+                                        .map(|b| b as f64 / (1024.0 * 1024.0 * 1024.0))
+                                        .unwrap_or(0.0);
+                                    worker_flags.track_disk_wait(&short_name, avail_gb);
+                                    disk_wait_tracked = true;
+                                }
                                 my_slot.disk_wait.store(true, Ordering::Relaxed);
                                 *my_slot.info.lock().unwrap() =
                                     Some((short_name.clone(), size_str.clone()));
@@ -1102,7 +1214,9 @@ fn main() -> Result<()> {
                                 err_str.contains("Nothing was written into output file");
                             if (transcode::is_subtitle_error(&err_str) || nothing_written)
                                 && !skip_subs
+                                && worker_flags.enable_subtitle_retry()
                             {
+                                worker_flags.track_subtitle_retry(&short_name);
                                 skip_subs = true;
                                 log::info!("{}: retrying without subtitles", short_name);
                                 my_slot.progress.store(0, Ordering::Relaxed);
@@ -1111,9 +1225,12 @@ fn main() -> Result<()> {
                             }
 
                             if transcode::is_session_limit_error(&err_str)
-                                && session_retries < MAX_SESSION_RETRIES
+                                && session_retries < max_session_retries
                             {
                                 session_retries += 1;
+                                worker_flags.track_session_limit_hit(
+                                    active_encoders.load(Ordering::SeqCst),
+                                );
                                 // Stop ramping — we found the GPU's limit
                                 ramping.store(false, Ordering::SeqCst);
                                 // Lower the discovered max to current active count
@@ -1140,6 +1257,17 @@ fn main() -> Result<()> {
                 my_slot.disk_wait.store(false, Ordering::Relaxed);
 
                 if let Some(e) = last_err {
+                    let err_str = e.to_string();
+                    let error_type = if transcode::is_disk_space_error(&err_str) {
+                        "disk_space"
+                    } else if transcode::is_session_limit_error(&err_str) {
+                        "session_limit"
+                    } else if transcode::is_subtitle_error(&err_str) {
+                        "subtitle"
+                    } else {
+                        "ffmpeg"
+                    };
+                    worker_flags.track_transcode_failed(&short_name, error_type);
                     completed_lines
                         .lock()
                         .unwrap()
@@ -1216,6 +1344,7 @@ fn main() -> Result<()> {
             }
         }
         if replaced > 0 {
+            flags.track_originals_replaced(replaced, replace_saved);
             eprintln!(
                 "Replaced {} originals (saved {})",
                 replaced,
@@ -1229,6 +1358,16 @@ fn main() -> Result<()> {
     let total_saved = bytes_saved.load(Ordering::Relaxed);
     let total_input = bytes_input.load(Ordering::Relaxed);
     let total_output = bytes_output.load(Ordering::Relaxed);
+
+    flags.track_run_completed(
+        final_transcoded,
+        skipped,
+        final_errors,
+        total_saved,
+        total_input,
+        total_output,
+    );
+    flags.close();
 
     eprintln!(
         "\nDone: {} transcoded, {} skipped, {} errors",
