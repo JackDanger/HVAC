@@ -72,6 +72,11 @@ impl Flags {
         self.bool_flag("dry-run", false)
     }
 
+    /// Pause all encoding. Workers spin until this goes false; in-flight jobs finish.
+    pub fn pause_transcoding(&self) -> bool {
+        self.bool_flag("pause-transcoding", false)
+    }
+
     // ── String flags ──────────────────────────────────────────────────────────
 
     /// Override the detected GPU encoder (e.g. "hevc_nvenc"). Empty = use detected.
@@ -269,6 +274,127 @@ impl Flags {
                 "old_max": old_max as i64,
                 "new_max": new_max as i64,
                 "total_speed": total_speed as i64,
+            }),
+        );
+    }
+
+    // ── Pause / resume ────────────────────────────────────────────────────────
+
+    pub fn track_transcoding_paused(&self, filename: &str) {
+        self.emit("transcoding-paused", serde_json::json!({ "filename": filename }));
+    }
+
+    pub fn track_transcoding_resumed(&self, filename: &str) {
+        self.emit("transcoding-resumed", serde_json::json!({ "filename": filename }));
+    }
+
+    // ── Probe events ──────────────────────────────────────────────────────────
+
+    pub fn track_probe_started(&self, filename: &str, size_bytes: u64) {
+        self.emit(
+            "probe-started",
+            serde_json::json!({
+                "filename": filename,
+                "size_bytes": size_bytes as i64,
+            }),
+        );
+    }
+
+    pub fn track_probe_completed(
+        &self,
+        filename: &str,
+        codec: &str,
+        width: u32,
+        height: u32,
+        bitrate_kbps: u32,
+        duration_secs: f64,
+        has_audio: bool,
+        has_subtitles: bool,
+    ) {
+        self.emit(
+            "probe-completed",
+            serde_json::json!({
+                "filename": filename,
+                "codec": codec,
+                "width": width as i64,
+                "height": height as i64,
+                "bitrate_kbps": bitrate_kbps as i64,
+                "duration_secs": duration_secs,
+                "has_audio": has_audio,
+                "has_subtitles": has_subtitles,
+            }),
+        );
+    }
+
+    pub fn track_probe_failed(&self, filename: &str, error: &str) {
+        self.emit(
+            "probe-failed",
+            serde_json::json!({
+                "filename": filename,
+                "error": error,
+            }),
+        );
+    }
+
+    // ── Phase lifecycle ───────────────────────────────────────────────────────
+
+    pub fn track_phase_started(&self, phase: &str, count: usize) {
+        self.emit(
+            "phase-started",
+            serde_json::json!({
+                "phase": phase,
+                "item_count": count as i64,
+            }),
+        );
+    }
+
+    pub fn track_phase_completed(&self, phase: &str, elapsed_secs: f64, count: usize) {
+        self.emit_metric(
+            "phase-completed",
+            elapsed_secs,
+            serde_json::json!({
+                "phase": phase,
+                "elapsed_secs": elapsed_secs,
+                "item_count": count as i64,
+            }),
+        );
+    }
+
+    // ── Run start ─────────────────────────────────────────────────────────────
+
+    pub fn track_run_started(&self, total_files: usize, total_bytes: u64, jobs: usize, auto_ramp: bool) {
+        self.emit_metric(
+            "run-started",
+            total_files as f64,
+            serde_json::json!({
+                "total_files": total_files as i64,
+                "total_bytes": total_bytes as i64,
+                "jobs": jobs as i64,
+                "auto_ramp": auto_ramp,
+            }),
+        );
+    }
+
+    // ── Transcode queue / retry ───────────────────────────────────────────────
+
+    pub fn track_transcode_queued(&self, filename: &str, position: usize, max: u32) {
+        self.emit(
+            "transcode-queued",
+            serde_json::json!({
+                "filename": filename,
+                "queue_position": position as i64,
+                "max_parallel": max as i64,
+            }),
+        );
+    }
+
+    pub fn track_transcode_retry(&self, filename: &str, attempt: u32, reason: &str) {
+        self.emit(
+            "transcode-retry",
+            serde_json::json!({
+                "filename": filename,
+                "attempt": attempt as i64,
+                "reason": reason,
             }),
         );
     }

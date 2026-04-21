@@ -4,6 +4,7 @@ mod gpu;
 mod iso;
 mod probe;
 mod scanner;
+mod telemetry;
 mod transcode;
 mod util;
 
@@ -25,6 +26,7 @@ struct Symbols {
     bar_head: &'static str,
     bar_empty: &'static str,
     hourglass: &'static str,
+    pause: &'static str,
     play: &'static str,
     check: &'static str,
     cross: &'static str,
@@ -37,6 +39,7 @@ const UNICODE_SYMBOLS: Symbols = Symbols {
     bar_head: "\u{2578}",
     bar_empty: "\u{2500}",
     hourglass: "\u{23f3}",
+    pause: "\u{23f8}",
     play: "\u{25b6}",
     check: "\u{2713}",
     cross: "\u{2717}",
@@ -49,6 +52,7 @@ const ASCII_SYMBOLS: Symbols = Symbols {
     bar_head: ">",
     bar_empty: "-",
     hourglass: "~",
+    pause: "||",
     play: ">",
     check: "+",
     cross: "x",
@@ -187,6 +191,7 @@ struct WorkerSlot {
     speed: AtomicU64,
     queued: AtomicBool,
     disk_wait: AtomicBool,
+    paused: AtomicBool,
 }
 
 fn truncate_name(name: &str, max_len: usize, sym: &Symbols) -> String {
@@ -287,6 +292,7 @@ fn main() -> Result<()> {
     env_logger::init();
     let cli = Cli::parse();
     let mut flags = flags::Flags::new();
+    let telemetry = std::sync::Arc::new(telemetry::Telemetry::new());
 
     // --dump-config: print embedded defaults to stdout and exit (no GPU or path needed)
     if cli.dump_config {
@@ -396,6 +402,15 @@ fn main() -> Result<()> {
     )> = Vec::new();
     let mut errors = 0u32;
 
+    flags.track_phase_started("iso_expand", files.len());
+    let phase1_start = Instant::now();
+    let iso_files: Vec<_> = files.iter().filter(|f| iso::is_disc_image(f)).collect();
+    {
+        let mut ph = telemetry.span("phase:iso_expand");
+        ph.int_attr("file_count", files.len() as i64);
+        ph.int_attr("iso_count", iso_files.len() as i64);
+    }
+
     for file in &files {
         if iso::is_disc_image(file) {
             let iso_name = file.file_name().unwrap_or_default().to_string_lossy();
@@ -462,13 +477,30 @@ fn main() -> Result<()> {
         expanded.push((file.clone(), None, None, None));
     }
 
+    flags.track_phase_completed("iso_expand", phase1_start.elapsed().as_secs_f64(), expanded.len());
+
     // --- Phase 2: Probe all files to partition skip vs. transcode ---
     eprintln!("Scanning {} files...", expanded.len());
+    flags.track_phase_started("probe", expanded.len());
+    let phase2_start = Instant::now();
+    {
+        let mut ph = telemetry.span("phase:probe");
+        ph.int_attr("file_count", expanded.len() as i64);
+    }
     let mut to_transcode: Vec<WorkItem> = Vec::new();
     let mut skipped = 0u32;
     let mut resumed = 0u32;
 
     for (file, iso_p, inner_p, inner_ps) in &expanded {
+        let fname = file.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let fsize = std::fs::metadata(file).map(|m| m.len()).unwrap_or(0);
+        flags.track_probe_started(&fname, fsize);
+        {
+            let mut sp = telemetry.span("probe");
+            sp.str_attr("filename", &fname);
+            sp.int_attr("size_bytes", fsize as i64);
+        }
+
         let probe_result = if let (Some(ip), Some(inner)) = (iso_p, inner_p) {
             probe::probe_iso_file(ip, inner)
         } else {
@@ -477,10 +509,20 @@ fn main() -> Result<()> {
 
         match probe_result {
             Ok(info) => {
+                flags.track_probe_completed(
+                    &fname,
+                    &info.codec,
+                    info.width,
+                    info.height,
+                    info.bitrate_kbps,
+                    info.duration_secs,
+                    info.has_audio,
+                    info.has_subtitles,
+                );
                 if probe::meets_target(&info, &cfg.target) {
                     skipped += 1;
                     flags.track_probe_skipped(
-                        &file.file_name().unwrap_or_default().to_string_lossy(),
+                        &fname,
                         &info.codec,
                         info.bitrate_kbps,
                     );
@@ -587,11 +629,14 @@ fn main() -> Result<()> {
                 }
             }
             Err(e) => {
+                flags.track_probe_failed(&fname, &e.to_string());
                 eprintln!("  skip: {:?}: {}", file.file_name().unwrap_or_default(), e);
                 errors += 1;
             }
         }
     }
+
+    flags.track_phase_completed("probe", phase2_start.elapsed().as_secs_f64(), expanded.len());
 
     if to_transcode.is_empty() {
         if resumed > 0 {
@@ -608,6 +653,7 @@ fn main() -> Result<()> {
 
     let flag_jobs = flags.max_parallel_jobs();
     let jobs_specified = cli.jobs.is_some() || flag_jobs > 0;
+    let total_input_bytes: u64 = to_transcode.iter().map(|i| i.source_size).sum();
     // Auto mode: spawn extra threads to probe beyond the theoretical limit
     let jobs = if flag_jobs > 0 {
         flag_jobs
@@ -634,6 +680,8 @@ fn main() -> Result<()> {
             format!("{} jobs", jobs)
         },
     );
+
+    flags.track_run_started(to_transcode.len(), total_input_bytes, jobs, auto_ramp);
 
     if cli.dry_run || flags.dry_run() {
         for item in &to_transcode {
@@ -679,6 +727,7 @@ fn main() -> Result<()> {
                 speed: AtomicU64::new(0),
                 queued: AtomicBool::new(false),
                 disk_wait: AtomicBool::new(false),
+                paused: AtomicBool::new(false),
             })
         })
         .collect();
@@ -714,6 +763,16 @@ fn main() -> Result<()> {
     let overwrite = cli.overwrite;
     let output_dir = cli.output_dir.clone();
 
+    flags.track_phase_started("transcode", to_transcode.len());
+    let phase3_start = Instant::now();
+    {
+        let mut ph = telemetry.span("phase:transcode");
+        ph.int_attr("file_count", to_transcode.len() as i64);
+        ph.int_attr("total_bytes", total_input_bytes as i64);
+        ph.int_attr("jobs", jobs as i64);
+        ph.str_attr("auto_ramp", if auto_ramp { "true" } else { "false" });
+    }
+
     std::thread::scope(|s| {
         // Render thread (also controls auto-ramp)
         {
@@ -725,6 +784,7 @@ fn main() -> Result<()> {
             let render_max = Arc::clone(&max_encoders);
             let render_ramping = Arc::clone(&ramping);
             let render_flags = Arc::clone(&flags);
+            let _render_telemetry = Arc::clone(&telemetry);
 
             s.spawn(move || {
                 let start = Instant::now();
@@ -767,7 +827,14 @@ fn main() -> Result<()> {
                             let info = slot.info.lock().unwrap();
                             if let Some((ref name, ref size)) = *info {
                                 let is_excess = (slot_idx + 1) as u32 > max;
-                                if slot.disk_wait.load(Ordering::Relaxed) {
+                                if slot.paused.load(Ordering::Relaxed) {
+                                    writeln!(
+                                        stderr,
+                                        "  {}           {} ({})  paused",
+                                        sym.pause, name, size,
+                                    )
+                                    .ok();
+                                } else if slot.disk_wait.load(Ordering::Relaxed) {
                                     writeln!(
                                         stderr,
                                         "  {}           {} ({})  waiting for disk",
@@ -936,6 +1003,7 @@ fn main() -> Result<()> {
             let worker_count = Arc::clone(&worker_count);
             let disk_reserved = Arc::clone(&disk_reserved);
             let worker_flags = Arc::clone(&flags);
+            let worker_telemetry = Arc::clone(&telemetry);
 
             s.spawn(move || 'outer: loop {
                 if CANCELLED.load(Ordering::Relaxed) {
@@ -1013,10 +1081,37 @@ fn main() -> Result<()> {
                 let mut skip_subs = false;
                 let mut transcode_started_tracked = false;
                 let mut disk_wait_tracked = false;
+                let mut queue_tracked = false;
+                let mut was_paused = false;
+                let mut otel_span = worker_telemetry.span("transcode");
+                otel_span.str_attr("filename", &short_name);
+                otel_span.int_attr("source_size_bytes", item.source_size as i64);
+                otel_span.int_attr("bitrate_kbps", item.bitrate_kbps as i64);
+                otel_span.float_attr("duration_secs", item.duration_secs);
 
                 let last_err: Option<anyhow::Error> = loop {
                     if CANCELLED.load(Ordering::Relaxed) {
                         break None;
+                    }
+
+                    // Pause check: spin here while pause-transcoding flag is true.
+                    if worker_flags.pause_transcoding() {
+                        if !was_paused {
+                            worker_flags.track_transcoding_paused(&short_name);
+                            was_paused = true;
+                            my_slot.paused.store(true, Ordering::Relaxed);
+                            if !auto_ramp {
+                                let mut info = my_slot.info.lock().unwrap();
+                                *info = Some((short_name.clone(), size_str.clone()));
+                            }
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(2000));
+                        continue;
+                    }
+                    if was_paused {
+                        worker_flags.track_transcoding_resumed(&short_name);
+                        was_paused = false;
+                        my_slot.paused.store(false, Ordering::Relaxed);
                     }
 
                     // Check disk space before acquiring GPU slot.
@@ -1059,6 +1154,14 @@ fn main() -> Result<()> {
                     if !try_acquire(&active_encoders, &max_encoders) {
                         // In fixed mode, show queued status for excess workers
                         if !auto_ramp {
+                            if !queue_tracked {
+                                worker_flags.track_transcode_queued(
+                                    &short_name,
+                                    worker_id,
+                                    max_encoders.load(Ordering::Relaxed),
+                                );
+                                queue_tracked = true;
+                            }
                             my_slot.queued.store(true, Ordering::Relaxed);
                             my_slot.progress.store(0, Ordering::Relaxed);
                             my_slot.speed.store(0, Ordering::Relaxed);
@@ -1150,6 +1253,10 @@ fn main() -> Result<()> {
                                 0
                             };
 
+                            otel_span.int_attr("output_size_bytes", out_size as i64);
+                            otel_span.int_attr("saved_pct", saved_pct as i64);
+                            otel_span.str_attr("status", "ok");
+
                             worker_flags.track_transcode_completed(
                                 &short_name,
                                 item.source_size,
@@ -1187,6 +1294,7 @@ fn main() -> Result<()> {
                                 && disk_space_retries < max_session_retries
                             {
                                 disk_space_retries += 1;
+                                worker_flags.track_transcode_retry(&short_name, disk_space_retries, "disk_space");
                                 if !disk_wait_tracked {
                                     let avail_gb = util::available_disk_space(check_dir)
                                         .map(|b| b as f64 / (1024.0 * 1024.0 * 1024.0))
@@ -1228,6 +1336,7 @@ fn main() -> Result<()> {
                                 && session_retries < max_session_retries
                             {
                                 session_retries += 1;
+                                worker_flags.track_transcode_retry(&short_name, session_retries, "session_limit");
                                 worker_flags.track_session_limit_hit(
                                     active_encoders.load(Ordering::SeqCst),
                                 );
@@ -1255,6 +1364,7 @@ fn main() -> Result<()> {
                 my_slot.speed.store(0, Ordering::Relaxed);
                 my_slot.queued.store(false, Ordering::Relaxed);
                 my_slot.disk_wait.store(false, Ordering::Relaxed);
+                my_slot.paused.store(false, Ordering::Relaxed);
 
                 if let Some(e) = last_err {
                     let err_str = e.to_string();
@@ -1267,6 +1377,9 @@ fn main() -> Result<()> {
                     } else {
                         "ffmpeg"
                     };
+                    otel_span.str_attr("status", "error");
+                    otel_span.str_attr("error_type", error_type);
+                    otel_span.error(&err_str);
                     worker_flags.track_transcode_failed(&short_name, error_type);
                     completed_lines
                         .lock()
@@ -1294,6 +1407,8 @@ fn main() -> Result<()> {
         }
     });
 
+    flags.track_phase_completed("transcode", phase3_start.elapsed().as_secs_f64(), transcoded.load(Ordering::Relaxed) as usize);
+
     // Drain any completed lines the render thread didn't get to (skip on cancel)
     if !CANCELLED.load(Ordering::Relaxed) {
         let lines = completed_lines.lock().unwrap();
@@ -1320,6 +1435,12 @@ fn main() -> Result<()> {
     let mut replace_saved: u64 = 0;
 
     if cli.replace && !overwrite {
+        flags.track_phase_started("replace", to_transcode.len());
+        let phase4_start = Instant::now();
+        {
+            let mut ph = telemetry.span("phase:replace");
+            ph.int_attr("file_count", to_transcode.len() as i64);
+        }
         eprintln!("Replacing originals with transcoded copies...");
         for item in to_transcode.iter() {
             let out_dir = cli.output_dir.as_deref().or(cfg.output_dir.as_deref());
@@ -1351,6 +1472,7 @@ fn main() -> Result<()> {
                 format_size(replace_saved)
             );
         }
+        flags.track_phase_completed("replace", phase4_start.elapsed().as_secs_f64(), replaced as usize);
     }
 
     let final_transcoded = transcoded.load(Ordering::Relaxed);
@@ -1368,6 +1490,10 @@ fn main() -> Result<()> {
         total_output,
     );
     flags.close();
+
+    if let Ok(t) = std::sync::Arc::try_unwrap(telemetry) {
+        t.shutdown();
+    }
 
     eprintln!(
         "\nDone: {} transcoded, {} skipped, {} errors",
