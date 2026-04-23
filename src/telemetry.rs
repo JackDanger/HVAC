@@ -1,7 +1,7 @@
 use opentelemetry::{global, trace::Span, trace::Tracer, KeyValue};
 use opentelemetry_otlp::{WithExportConfig, WithHttpConfig};
 use opentelemetry_sdk::{
-    trace::{TracerProvider, SimpleSpanProcessor},
+    trace::{SimpleSpanProcessor, TracerProvider},
     Resource,
 };
 use std::collections::HashMap;
@@ -20,11 +20,13 @@ impl OtelSpan {
     }
 
     pub fn int_attr(&mut self, key: &str, val: i64) {
-        self.inner.set_attribute(KeyValue::new(key.to_string(), val));
+        self.inner
+            .set_attribute(KeyValue::new(key.to_string(), val));
     }
 
     pub fn float_attr(&mut self, key: &str, val: f64) {
-        self.inner.set_attribute(KeyValue::new(key.to_string(), val));
+        self.inner
+            .set_attribute(KeyValue::new(key.to_string(), val));
     }
 
     pub fn error(&mut self, msg: &str) {
@@ -70,10 +72,7 @@ impl Telemetry {
 
     fn build(sdk_key: &str) -> anyhow::Result<TracerProvider> {
         let mut headers = HashMap::new();
-        headers.insert(
-            "Authorization".to_string(),
-            format!("Bearer {}", sdk_key),
-        );
+        headers.insert("Authorization".to_string(), format!("Bearer {}", sdk_key));
 
         let exporter = opentelemetry_otlp::SpanExporter::builder()
             .with_http()
@@ -93,10 +92,6 @@ impl Telemetry {
             .build();
 
         Ok(provider)
-    }
-
-    pub fn is_connected(&self) -> bool {
-        self.provider.is_some()
     }
 
     /// Start a named span. Safe to call when not connected (returns no-op span).

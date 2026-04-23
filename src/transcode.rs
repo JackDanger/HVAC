@@ -73,6 +73,7 @@ pub fn transcode(
     speed: Option<&AtomicU64>,
     skip_subs: bool,
     pid_slot: Option<&AtomicI32>,
+    extra_args: &[String],
 ) -> Result<PathBuf> {
     let final_output = match output {
         Some(p) => p.to_path_buf(),
@@ -156,6 +157,11 @@ pub fn transcode(
     cmd.args(["-map", "0:a?"]);
     if !skip_subs {
         cmd.args(["-map", "0:s?"]);
+    }
+
+    // Extra args from feature flag (appended before output so they apply globally)
+    if !extra_args.is_empty() {
+        cmd.args(extra_args);
     }
 
     // Progress reporting via stdout if caller wants it
@@ -297,6 +303,7 @@ pub fn transcode_iso(
     speed: Option<&AtomicU64>,
     skip_subs: bool,
     pid_slot: Option<&AtomicI32>,
+    extra_args: &[String],
 ) -> Result<PathBuf> {
     let final_output = output.to_path_buf();
 
@@ -367,6 +374,10 @@ pub fn transcode_iso(
     cmd.args(["-map", "0:a?"]);
     if !skip_subs {
         cmd.args(["-map", "0:s?"]);
+    }
+
+    if !extra_args.is_empty() {
+        cmd.args(extra_args);
     }
 
     // Progress reporting

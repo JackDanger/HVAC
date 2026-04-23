@@ -41,10 +41,6 @@ impl Flags {
         self.gpu_kind = Some(kind.to_string());
     }
 
-    pub fn is_connected(&self) -> bool {
-        self.client.as_ref().map_or(false, |c| c.initialized())
-    }
-
     // ── Boolean flags ─────────────────────────────────────────────────────────
 
     /// Master kill-switch: set false to disable all transcoding.
@@ -82,13 +78,21 @@ impl Flags {
     /// Override the detected GPU encoder (e.g. "hevc_nvenc"). Empty = use detected.
     pub fn gpu_encoder_override(&self) -> Option<String> {
         let v = self.str_flag("gpu-encoder-override", String::new());
-        if v.is_empty() { None } else { Some(v) }
+        if v.is_empty() {
+            None
+        } else {
+            Some(v)
+        }
     }
 
     /// Override the ffmpeg quality preset (e.g. "medium"). Empty = use config.
     pub fn transcode_preset_override(&self) -> Option<String> {
         let v = self.str_flag("transcode-preset", String::new());
-        if v.is_empty() { None } else { Some(v) }
+        if v.is_empty() {
+            None
+        } else {
+            Some(v)
+        }
     }
 
     // ── Integer flags ─────────────────────────────────────────────────────────
@@ -101,7 +105,11 @@ impl Flags {
     /// Override config max_bitrate_kbps. 0 = use config value.
     pub fn max_bitrate_kbps_override(&self) -> Option<u32> {
         let v = self.int_flag("max-bitrate-kbps", 0);
-        if v <= 0 { None } else { Some(v as u32) }
+        if v <= 0 {
+            None
+        } else {
+            Some(v as u32)
+        }
     }
 
     /// Max retries on NVENC session-limit errors. Default: 5.
@@ -120,10 +128,7 @@ impl Flags {
 
     /// Extra ffmpeg args appended to every encode command (JSON array of strings).
     pub fn extra_ffmpeg_args(&self) -> Vec<String> {
-        let val = self.json_flag(
-            "extra-ffmpeg-args",
-            serde_json::Value::Array(vec![]),
-        );
+        let val = self.json_flag("extra-ffmpeg-args", serde_json::Value::Array(vec![]));
         match val {
             serde_json::Value::Array(arr) => arr
                 .iter()
@@ -263,7 +268,10 @@ impl Flags {
     }
 
     pub fn track_subtitle_retry(&self, filename: &str) {
-        self.emit("subtitle-retry", serde_json::json!({ "filename": filename }));
+        self.emit(
+            "subtitle-retry",
+            serde_json::json!({ "filename": filename }),
+        );
     }
 
     pub fn track_auto_ramp_increased(&self, old_max: u32, new_max: u32, total_speed: u64) {
@@ -281,11 +289,17 @@ impl Flags {
     // ── Pause / resume ────────────────────────────────────────────────────────
 
     pub fn track_transcoding_paused(&self, active_workers: usize) {
-        self.emit("transcoding-paused", serde_json::json!({ "active_workers": active_workers as i64 }));
+        self.emit(
+            "transcoding-paused",
+            serde_json::json!({ "active_workers": active_workers as i64 }),
+        );
     }
 
     pub fn track_transcoding_resumed(&self, active_workers: usize) {
-        self.emit("transcoding-resumed", serde_json::json!({ "active_workers": active_workers as i64 }));
+        self.emit(
+            "transcoding-resumed",
+            serde_json::json!({ "active_workers": active_workers as i64 }),
+        );
     }
 
     // ── Probe events ──────────────────────────────────────────────────────────
@@ -300,6 +314,7 @@ impl Flags {
         );
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn track_probe_completed(
         &self,
         filename: &str,
@@ -362,7 +377,13 @@ impl Flags {
 
     // ── Run start ─────────────────────────────────────────────────────────────
 
-    pub fn track_run_started(&self, total_files: usize, total_bytes: u64, jobs: usize, auto_ramp: bool) {
+    pub fn track_run_started(
+        &self,
+        total_files: usize,
+        total_bytes: u64,
+        jobs: usize,
+        auto_ramp: bool,
+    ) {
         self.emit_metric(
             "run-started",
             total_files as f64,

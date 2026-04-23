@@ -19,7 +19,6 @@ use std::time::Instant;
 
 use util::format_size;
 
-
 /// Display symbols — ASCII fallbacks when locale doesn't support UTF-8.
 struct Symbols {
     ellipsis: &'static str,
@@ -110,7 +109,7 @@ fn detect_symbols() -> &'static Symbols {
     // causing the C library to fall back to ASCII.
     unsafe {
         // Initialize locale from environment (required before nl_langinfo)
-        libc::setlocale(libc::LC_ALL, b"\0".as_ptr() as *const _);
+        libc::setlocale(libc::LC_ALL, c"".as_ptr());
         let codeset = libc::nl_langinfo(libc::CODESET);
         if !codeset.is_null() {
             let cs = std::ffi::CStr::from_ptr(codeset)
@@ -408,6 +407,7 @@ fn main() -> Result<()> {
 
     // --- Phase 1: Expand disc images into flat work list ---
     // Each entry is (path, optional iso_path, optional inner_path, optional inner_paths)
+    #[allow(clippy::type_complexity)]
     let mut expanded: Vec<(
         PathBuf,
         Option<PathBuf>,
@@ -491,7 +491,11 @@ fn main() -> Result<()> {
         expanded.push((file.clone(), None, None, None));
     }
 
-    flags.track_phase_completed("iso_expand", phase1_start.elapsed().as_secs_f64(), expanded.len());
+    flags.track_phase_completed(
+        "iso_expand",
+        phase1_start.elapsed().as_secs_f64(),
+        expanded.len(),
+    );
 
     // --- Phase 2: Probe all files to partition skip vs. transcode ---
     eprintln!("Scanning {} files...", expanded.len());
@@ -506,7 +510,11 @@ fn main() -> Result<()> {
     let mut resumed = 0u32;
 
     for (file, iso_p, inner_p, inner_ps) in &expanded {
-        let fname = file.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let fname = file
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
         let fsize = std::fs::metadata(file).map(|m| m.len()).unwrap_or(0);
         flags.track_probe_started(&fname, fsize);
         {
@@ -535,11 +543,7 @@ fn main() -> Result<()> {
                 );
                 if probe::meets_target(&info, &cfg.target) {
                     skipped += 1;
-                    flags.track_probe_skipped(
-                        &fname,
-                        &info.codec,
-                        info.bitrate_kbps,
-                    );
+                    flags.track_probe_skipped(&fname, &info.codec, info.bitrate_kbps);
                 } else {
                     let source_size = if let Some(ref ip) = iso_p {
                         // For ISO entries with multiple files, sum all file sizes
@@ -578,11 +582,8 @@ fn main() -> Result<()> {
                     //   - regular file    → use file path as stem
                     {
                         let out_dir = cli.output_dir.as_deref().or(cfg.output_dir.as_deref());
-                        let source_for_output = output_stem_for_item(
-                            file,
-                            inner_p.as_deref(),
-                            inner_ps.as_deref(),
-                        );
+                        let source_for_output =
+                            output_stem_for_item(file, inner_p.as_deref(), inner_ps.as_deref());
                         if let Ok(out_path) = transcode::output_path(
                             &source_for_output,
                             out_dir,
@@ -605,7 +606,10 @@ fn main() -> Result<()> {
                                                 file.file_name().unwrap_or_default()
                                             );
                                             flags.track_probe_resumed(
-                                                &file.file_name().unwrap_or_default().to_string_lossy(),
+                                                &file
+                                                    .file_name()
+                                                    .unwrap_or_default()
+                                                    .to_string_lossy(),
                                             );
                                             resumed += 1;
                                             continue;
@@ -650,7 +654,11 @@ fn main() -> Result<()> {
         }
     }
 
-    flags.track_phase_completed("probe", phase2_start.elapsed().as_secs_f64(), expanded.len());
+    flags.track_phase_completed(
+        "probe",
+        phase2_start.elapsed().as_secs_f64(),
+        expanded.len(),
+    );
 
     if to_transcode.is_empty() {
         if resumed > 0 {
@@ -762,8 +770,8 @@ fn main() -> Result<()> {
     // We estimate output at source_size/2 (conservative for HEVC compression).
     // 2GB base margin + optional extra from feature flag.
     let disk_reserved = Arc::new(AtomicU64::new(0));
-    let disk_margin: u64 = 2 * 1024 * 1024 * 1024
-        + (flags.disk_headroom_extra_gb() * 1024.0 * 1024.0 * 1024.0) as u64;
+    let disk_margin: u64 =
+        2 * 1024 * 1024 * 1024 + (flags.disk_headroom_extra_gb() * 1024.0 * 1024.0 * 1024.0) as u64;
 
     let transcoded = Arc::new(AtomicU32::new(0));
     let error_count = Arc::new(AtomicU32::new(errors));
@@ -935,7 +943,9 @@ fn main() -> Result<()> {
                             .collect();
                         if now_paused {
                             for &pid in &pids {
-                                unsafe { libc::kill(pid, libc::SIGSTOP); }
+                                unsafe {
+                                    libc::kill(pid, libc::SIGSTOP);
+                                }
                             }
                             for slot in &render_slots {
                                 slot.paused.store(true, Ordering::Relaxed);
@@ -943,7 +953,9 @@ fn main() -> Result<()> {
                             render_flags.track_transcoding_paused(pids.len());
                         } else {
                             for &pid in &pids {
-                                unsafe { libc::kill(pid, libc::SIGCONT); }
+                                unsafe {
+                                    libc::kill(pid, libc::SIGCONT);
+                                }
                             }
                             for slot in &render_slots {
                                 slot.paused.store(false, Ordering::Relaxed);
@@ -978,7 +990,9 @@ fn main() -> Result<()> {
                                 ramp_baseline_speed = total_speed;
                                 render_max.store(current_max + 1, Ordering::SeqCst);
                                 render_flags.track_auto_ramp_increased(
-                                    current_max, current_max + 1, total_speed,
+                                    current_max,
+                                    current_max + 1,
+                                    total_speed,
                                 );
                                 last_ramp_time = Instant::now();
                             } else if total_speed > ramp_baseline_speed {
@@ -986,7 +1000,9 @@ fn main() -> Result<()> {
                                 ramp_baseline_speed = total_speed;
                                 render_max.store(current_max + 1, Ordering::SeqCst);
                                 render_flags.track_auto_ramp_increased(
-                                    current_max, current_max + 1, total_speed,
+                                    current_max,
+                                    current_max + 1,
+                                    total_speed,
                                 );
                                 last_ramp_time = Instant::now();
                             } else {
@@ -1027,6 +1043,7 @@ fn main() -> Result<()> {
         }
 
         // Worker threads
+        #[allow(clippy::needless_range_loop)]
         for worker_id in 0..jobs {
             let to_transcode = Arc::clone(&to_transcode);
             let next_idx = Arc::clone(&next_idx);
@@ -1057,7 +1074,9 @@ fn main() -> Result<()> {
                 // Don't start a new file while paused; in-progress jobs are frozen
                 // by SIGSTOP from the render thread and will resume via SIGCONT.
                 while worker_flags.pause_transcoding() {
-                    if CANCELLED.load(Ordering::Relaxed) { break 'outer; }
+                    if CANCELLED.load(Ordering::Relaxed) {
+                        break 'outer;
+                    }
                     std::thread::sleep(std::time::Duration::from_secs(1));
                 }
 
@@ -1223,6 +1242,7 @@ fn main() -> Result<()> {
                         transcode_started_tracked = true;
                     }
 
+                    let extra_args = worker_flags.extra_ffmpeg_args();
                     let encode_result = if let Some(ref iso) = item.iso_path {
                         // ISO entry: stream from disc image to ffmpeg
                         let out = output_path
@@ -1247,6 +1267,7 @@ fn main() -> Result<()> {
                             Some(&my_slot.speed),
                             skip_subs,
                             Some(&my_slot.ffmpeg_pid),
+                            &extra_args,
                         )
                     } else {
                         transcode::transcode(
@@ -1261,6 +1282,7 @@ fn main() -> Result<()> {
                             Some(&my_slot.speed),
                             skip_subs,
                             Some(&my_slot.ffmpeg_pid),
+                            &extra_args,
                         )
                     };
 
@@ -1326,7 +1348,11 @@ fn main() -> Result<()> {
                                 && disk_space_retries < max_session_retries
                             {
                                 disk_space_retries += 1;
-                                worker_flags.track_transcode_retry(&short_name, disk_space_retries, "disk_space");
+                                worker_flags.track_transcode_retry(
+                                    &short_name,
+                                    disk_space_retries,
+                                    "disk_space",
+                                );
                                 if !disk_wait_tracked {
                                     let avail_gb = util::available_disk_space(check_dir)
                                         .map(|b| b as f64 / (1024.0 * 1024.0 * 1024.0))
@@ -1368,7 +1394,11 @@ fn main() -> Result<()> {
                                 && session_retries < max_session_retries
                             {
                                 session_retries += 1;
-                                worker_flags.track_transcode_retry(&short_name, session_retries, "session_limit");
+                                worker_flags.track_transcode_retry(
+                                    &short_name,
+                                    session_retries,
+                                    "session_limit",
+                                );
                                 worker_flags.track_session_limit_hit(
                                     active_encoders.load(Ordering::SeqCst),
                                 );
@@ -1439,7 +1469,11 @@ fn main() -> Result<()> {
         }
     });
 
-    flags.track_phase_completed("transcode", phase3_start.elapsed().as_secs_f64(), transcoded.load(Ordering::Relaxed) as usize);
+    flags.track_phase_completed(
+        "transcode",
+        phase3_start.elapsed().as_secs_f64(),
+        transcoded.load(Ordering::Relaxed) as usize,
+    );
 
     // Drain any completed lines the render thread didn't get to (skip on cancel)
     if !CANCELLED.load(Ordering::Relaxed) {
@@ -1504,7 +1538,11 @@ fn main() -> Result<()> {
                 format_size(replace_saved)
             );
         }
-        flags.track_phase_completed("replace", phase4_start.elapsed().as_secs_f64(), replaced as usize);
+        flags.track_phase_completed(
+            "replace",
+            phase4_start.elapsed().as_secs_f64(),
+            replaced as usize,
+        );
     }
 
     let final_transcoded = transcoded.load(Ordering::Relaxed);
@@ -1642,7 +1680,10 @@ mod tests {
         assert!(
             worker.len() <= cols,
             "worker line ({} chars) exceeds {} cols at max_name={}: {:?}",
-            worker.len(), cols, max_name, worker
+            worker.len(),
+            cols,
+            max_name,
+            worker
         );
 
         // Completed: "  + <name> (<src> -> <dst>, -100%)"
@@ -1650,7 +1691,10 @@ mod tests {
         assert!(
             completed.len() <= cols,
             "completed line ({} chars) exceeds {} cols at max_name={}: {:?}",
-            completed.len(), cols, max_name, completed
+            completed.len(),
+            cols,
+            max_name,
+            completed
         );
 
         // Disk-wait: "  ~           <name> (<size>)  waiting for disk"
@@ -1658,15 +1702,24 @@ mod tests {
         assert!(
             diskwait.len() <= cols,
             "disk-wait line ({} chars) exceeds {} cols at max_name={}: {:?}",
-            diskwait.len(), cols, max_name, diskwait
+            diskwait.len(),
+            cols,
+            max_name,
+            diskwait
         );
 
         // Queued: "  ~           <name> (<size>)  queued 999/999"
-        let queued = format!("  {}           {} ({})  queued {}/{}", "~", name, size, 999, 999);
+        let queued = format!(
+            "  {}           {} ({})  queued {}/{}",
+            "~", name, size, 999, 999
+        );
         assert!(
             queued.len() <= cols,
             "queued line ({} chars) exceeds {} cols at max_name={}: {:?}",
-            queued.len(), cols, max_name, queued
+            queued.len(),
+            cols,
+            max_name,
+            queued
         );
     }
 
@@ -1771,4 +1824,3 @@ mod tests {
         assert_eq!(single, multi, "single and multi-file ISO stems must match");
     }
 }
-

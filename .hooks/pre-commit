@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Runs checks on the remote build host (where ffmpeg/GPU are available).
+# Uses deploy.sh which syncs code first, then builds and tests remotely.
+set -euo pipefail
+
+REMOTE="root@10.30.0.199"
+PROXY="neurotic"
+REMOTE_DIR="/root/tdorr"
+
+echo "Syncing to remote..."
+rsync -az --delete \
+  --exclude='.git' \
+  --exclude='target' \
+  "$(git rev-parse --show-toplevel)/" \
+  -e "ssh -J $PROXY" \
+  "$REMOTE:$REMOTE_DIR/"
+
+echo "fmt..."
+ssh -J "$PROXY" "$REMOTE" "cd $REMOTE_DIR && cargo fmt --check"
+
+echo "clippy..."
+ssh -J "$PROXY" "$REMOTE" "cd $REMOTE_DIR && cargo clippy --quiet -- -D warnings"
+
+echo "test..."
+ssh -J "$PROXY" "$REMOTE" "cd $REMOTE_DIR && cargo test --quiet"
+
+echo "ok"

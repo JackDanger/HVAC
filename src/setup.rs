@@ -32,13 +32,13 @@ pub fn run(api_key: &str) -> Result<()> {
 fn find_or_create_project(api_key: &str) -> Result<(String, &'static str)> {
     match api_get(api_key, &format!("/projects/{PROJECT_KEY}"))? {
         Some(_) => {
-            let env =
-                api_get(api_key, &format!("/projects/{PROJECT_KEY}/environments/{ENV_KEY}"))?
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "environment '{ENV_KEY}' not found in project '{PROJECT_KEY}'"
-                        )
-                    })?;
+            let env = api_get(
+                api_key,
+                &format!("/projects/{PROJECT_KEY}/environments/{ENV_KEY}"),
+            )?
+            .ok_or_else(|| {
+                anyhow::anyhow!("environment '{ENV_KEY}' not found in project '{PROJECT_KEY}'")
+            })?;
             let sdk_key = extract_sdk_key(&env)?;
             Ok((sdk_key, "found"))
         }
@@ -58,18 +58,12 @@ fn find_or_create_project(api_key: &str) -> Result<(String, &'static str)> {
                 .get("environments")
                 .and_then(|e| e.as_array())
                 .and_then(|arr| {
-                    arr.iter().find(|e| {
-                        e.get("key").and_then(|k| k.as_str()) == Some(ENV_KEY)
-                    })
+                    arr.iter()
+                        .find(|e| e.get("key").and_then(|k| k.as_str()) == Some(ENV_KEY))
                 })
                 .and_then(|e| e.get("apiKey"))
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "no SDK key in created project response: {}",
-                        resp
-                    )
-                })
+                .ok_or_else(|| anyhow::anyhow!("no SDK key in created project response: {}", resp))
                 .and_then(|s| {
                     if s.contains("***") {
                         bail!("SDK key masked — check API key permissions (needs Writer role)")
