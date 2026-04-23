@@ -3,7 +3,7 @@ use std::io::BufRead;
 use std::os::unix::fs::{chown, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 
 use crate::config::TargetConfig;
 use crate::gpu::{GpuInfo, GpuKind};
@@ -12,6 +12,14 @@ use crate::util::format_size;
 
 /// Guard that kills the ffmpeg child process on drop (prevents orphans).
 struct ChildGuard(Child);
+
+/// Clears a PID slot when it goes out of scope, even on error paths.
+struct PidGuard<'a>(&'a AtomicI32);
+impl Drop for PidGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(-1, Ordering::Relaxed);
+    }
+}
 
 impl Drop for ChildGuard {
     fn drop(&mut self) {
@@ -64,6 +72,7 @@ pub fn transcode(
     progress: Option<&AtomicU64>,
     speed: Option<&AtomicU64>,
     skip_subs: bool,
+    pid_slot: Option<&AtomicI32>,
 ) -> Result<PathBuf> {
     let final_output = match output {
         Some(p) => p.to_path_buf(),
@@ -172,6 +181,11 @@ pub fn transcode(
     }
 
     let mut guard = ChildGuard(cmd.spawn().context("Failed to execute ffmpeg")?);
+    // Store the PID so the render thread can send SIGSTOP/SIGCONT; cleared on drop.
+    let _pid_guard = pid_slot.map(|s| {
+        s.store(guard.0.id() as i32, Ordering::Relaxed);
+        PidGuard(s)
+    });
     let stderr = guard.0.stderr.take().unwrap();
 
     // Drain stderr in background
@@ -282,6 +296,7 @@ pub fn transcode_iso(
     progress: Option<&AtomicU64>,
     speed: Option<&AtomicU64>,
     skip_subs: bool,
+    pid_slot: Option<&AtomicI32>,
 ) -> Result<PathBuf> {
     let final_output = output.to_path_buf();
 
@@ -377,6 +392,10 @@ pub fn transcode_iso(
     }
 
     let mut guard = ChildGuard(cmd.spawn().context("Failed to execute ffmpeg")?);
+    let _pid_guard = pid_slot.map(|s| {
+        s.store(guard.0.id() as i32, Ordering::Relaxed);
+        PidGuard(s)
+    });
     let stderr = guard.0.stderr.take().unwrap();
     let stdin = guard.0.stdin.take().unwrap();
 

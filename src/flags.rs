@@ -280,12 +280,12 @@ impl Flags {
 
     // ── Pause / resume ────────────────────────────────────────────────────────
 
-    pub fn track_transcoding_paused(&self, filename: &str) {
-        self.emit("transcoding-paused", serde_json::json!({ "filename": filename }));
+    pub fn track_transcoding_paused(&self, active_workers: usize) {
+        self.emit("transcoding-paused", serde_json::json!({ "active_workers": active_workers as i64 }));
     }
 
-    pub fn track_transcoding_resumed(&self, filename: &str) {
-        self.emit("transcoding-resumed", serde_json::json!({ "filename": filename }));
+    pub fn track_transcoding_resumed(&self, active_workers: usize) {
+        self.emit("transcoding-resumed", serde_json::json!({ "active_workers": active_workers as i64 }));
     }
 
     // ── Probe events ──────────────────────────────────────────────────────────

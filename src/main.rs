@@ -4,6 +4,7 @@ mod gpu;
 mod iso;
 mod probe;
 mod scanner;
+mod setup;
 mod telemetry;
 mod transcode;
 mod util;
@@ -12,7 +13,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -133,7 +134,7 @@ static TMP_DIRS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 #[command(name = "tdorr", version, about = "GPU-accelerated media transcoder")]
 struct Cli {
     /// Directory to scan for media files
-    #[arg(required_unless_present = "dump_config")]
+    #[arg(required_unless_present_any = ["dump_config", "setup_launchdarkly"])]
     path: Option<PathBuf>,
 
     /// Path to YAML config file (uses built-in defaults if omitted)
@@ -143,6 +144,11 @@ struct Cli {
     /// Print the built-in default config to stdout and exit
     #[arg(long)]
     dump_config: bool,
+
+    /// Create a LaunchDarkly project + all flags, then print the SDK key.
+    /// Usage: tdorr --setup-launchdarkly api-xxxx
+    #[arg(long, value_name = "API_KEY")]
+    setup_launchdarkly: Option<String>,
 
     /// Suppress the banner shown when running with built-in default config
     #[arg(short, long)]
@@ -192,6 +198,9 @@ struct WorkerSlot {
     queued: AtomicBool,
     disk_wait: AtomicBool,
     paused: AtomicBool,
+    /// PID of the active ffmpeg subprocess, or -1 if none. Written by transcode.rs,
+    /// read by the render thread to send SIGSTOP/SIGCONT on flag transitions.
+    ffmpeg_pid: AtomicI32,
 }
 
 fn truncate_name(name: &str, max_len: usize, sym: &Symbols) -> String {
@@ -291,6 +300,11 @@ fn embedded_config_banner(use_unicode: bool) -> String {
 fn main() -> Result<()> {
     env_logger::init();
     let cli = Cli::parse();
+
+    if let Some(ref api_key) = cli.setup_launchdarkly {
+        return setup::run(api_key);
+    }
+
     let mut flags = flags::Flags::new();
     let telemetry = std::sync::Arc::new(telemetry::Telemetry::new());
 
@@ -728,6 +742,7 @@ fn main() -> Result<()> {
                 queued: AtomicBool::new(false),
                 disk_wait: AtomicBool::new(false),
                 paused: AtomicBool::new(false),
+                ffmpeg_pid: AtomicI32::new(-1),
             })
         })
         .collect();
@@ -789,6 +804,7 @@ fn main() -> Result<()> {
             s.spawn(move || {
                 let start = Instant::now();
                 let mut prev_viewport = 0usize;
+                let mut was_paused = false;
 
                 // Auto-ramp state
                 let mut ramp_baseline_speed = 0u64;
@@ -909,6 +925,34 @@ fn main() -> Result<()> {
                         prev_viewport = viewport;
                     }
 
+                    // --- Pause/resume: SIGSTOP or SIGCONT active ffmpeg jobs on flag transition ---
+                    let now_paused = render_flags.pause_transcoding();
+                    if now_paused != was_paused {
+                        let pids: Vec<i32> = render_slots
+                            .iter()
+                            .map(|s| s.ffmpeg_pid.load(Ordering::Relaxed))
+                            .filter(|&p| p > 0)
+                            .collect();
+                        if now_paused {
+                            for &pid in &pids {
+                                unsafe { libc::kill(pid, libc::SIGSTOP); }
+                            }
+                            for slot in &render_slots {
+                                slot.paused.store(true, Ordering::Relaxed);
+                            }
+                            render_flags.track_transcoding_paused(pids.len());
+                        } else {
+                            for &pid in &pids {
+                                unsafe { libc::kill(pid, libc::SIGCONT); }
+                            }
+                            for slot in &render_slots {
+                                slot.paused.store(false, Ordering::Relaxed);
+                            }
+                            render_flags.track_transcoding_resumed(pids.len());
+                        }
+                        was_paused = now_paused;
+                    }
+
                     // --- Auto-ramp: add workers while total throughput improves ---
                     if render_ramping.load(Ordering::SeqCst)
                         && last_ramp_time.elapsed().as_secs() >= 5
@@ -1010,6 +1054,13 @@ fn main() -> Result<()> {
                     break;
                 }
 
+                // Don't start a new file while paused; in-progress jobs are frozen
+                // by SIGSTOP from the render thread and will resume via SIGCONT.
+                while worker_flags.pause_transcoding() {
+                    if CANCELLED.load(Ordering::Relaxed) { break 'outer; }
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                }
+
                 let idx = next_idx.fetch_add(1, Ordering::Relaxed) as usize;
                 if idx >= to_transcode.len() {
                     break;
@@ -1082,7 +1133,6 @@ fn main() -> Result<()> {
                 let mut transcode_started_tracked = false;
                 let mut disk_wait_tracked = false;
                 let mut queue_tracked = false;
-                let mut was_paused = false;
                 let mut otel_span = worker_telemetry.span("transcode");
                 otel_span.str_attr("filename", &short_name);
                 otel_span.int_attr("source_size_bytes", item.source_size as i64);
@@ -1092,26 +1142,6 @@ fn main() -> Result<()> {
                 let last_err: Option<anyhow::Error> = loop {
                     if CANCELLED.load(Ordering::Relaxed) {
                         break None;
-                    }
-
-                    // Pause check: spin here while pause-transcoding flag is true.
-                    if worker_flags.pause_transcoding() {
-                        if !was_paused {
-                            worker_flags.track_transcoding_paused(&short_name);
-                            was_paused = true;
-                            my_slot.paused.store(true, Ordering::Relaxed);
-                            if !auto_ramp {
-                                let mut info = my_slot.info.lock().unwrap();
-                                *info = Some((short_name.clone(), size_str.clone()));
-                            }
-                        }
-                        std::thread::sleep(std::time::Duration::from_millis(2000));
-                        continue;
-                    }
-                    if was_paused {
-                        worker_flags.track_transcoding_resumed(&short_name);
-                        was_paused = false;
-                        my_slot.paused.store(false, Ordering::Relaxed);
                     }
 
                     // Check disk space before acquiring GPU slot.
@@ -1216,6 +1246,7 @@ fn main() -> Result<()> {
                             Some(&my_slot.progress),
                             Some(&my_slot.speed),
                             skip_subs,
+                            Some(&my_slot.ffmpeg_pid),
                         )
                     } else {
                         transcode::transcode(
@@ -1229,6 +1260,7 @@ fn main() -> Result<()> {
                             Some(&my_slot.progress),
                             Some(&my_slot.speed),
                             skip_subs,
+                            Some(&my_slot.ffmpeg_pid),
                         )
                     };
 
