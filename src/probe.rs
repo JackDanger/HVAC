@@ -68,8 +68,7 @@ pub fn probe_file(path: &Path) -> Result<MediaInfo> {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let err_msg = stderr
             .lines()
-            .filter(|l| !l.trim().is_empty())
-            .last()
+            .rfind(|l| !l.trim().is_empty())
             .unwrap_or("unknown error");
         bail!("ffprobe failed for {:?}: {}", path, err_msg);
     }

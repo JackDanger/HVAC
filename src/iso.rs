@@ -281,7 +281,7 @@ fn analyze_dvd(root: &isomage::TreeNode) -> Result<DiscAnalysis> {
         .iter()
         .map(|(ts, files)| (ts.clone(), files.iter().map(|f| f.size).sum()))
         .collect();
-    set_sizes.sort_by(|a, b| b.1.cmp(&a.1));
+    set_sizes.sort_by_key(|a| std::cmp::Reverse(a.1));
 
     let largest_size = set_sizes[0].1;
     // Include title sets within 20% of the largest — catches TV episode discs
@@ -404,7 +404,7 @@ fn analyze_bare_media(root: &isomage::TreeNode) -> Result<DiscAnalysis> {
         });
     }
 
-    all_media.sort_by(|a, b| b.size.cmp(&a.size));
+    all_media.sort_by_key(|a| std::cmp::Reverse(a.size));
 
     let max_size = all_media[0].size;
     let threshold = max_size / 4;

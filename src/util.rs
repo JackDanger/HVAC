@@ -16,7 +16,7 @@ pub fn available_disk_space(path: &Path) -> Result<u64> {
                 std::io::Error::last_os_error()
             );
         }
-        Ok(stat.f_bavail as u64 * stat.f_frsize as u64)
+        Ok(stat.f_bavail as u64 * stat.f_frsize)
     }
 }
 
