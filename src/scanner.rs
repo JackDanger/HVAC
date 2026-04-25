@@ -6,12 +6,13 @@ use crate::iso;
 
 /// Recursively collect all files under `dir`, following symlinks.
 /// Tracks visited canonical directory paths to prevent infinite symlink cycles.
-/// Calls `on_progress` periodically (throttled to ~every 2 seconds) with current directory and counts.
+/// Calls `on_progress` every 1000 files with current directory and counts.
 fn walk_files(
     dir: &Path,
     out: &mut Vec<PathBuf>,
     visited_dirs: &mut HashSet<PathBuf>,
     on_progress: &mut dyn FnMut(&Path, usize),
+    files_since_update: &mut usize,
 ) {
     let canonical = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
     if !visited_dirs.insert(canonical) {
@@ -21,24 +22,24 @@ fn walk_files(
         Ok(e) => e,
         Err(_) => return,
     };
-    let mut last_update = std::time::Instant::now();
     for entry in entries.filter_map(|e| e.ok()) {
         let path = entry.path();
         // Use metadata() (follows symlinks) so symlinked dirs/files are handled correctly
         match std::fs::metadata(&path) {
-            Ok(m) if m.is_dir() => walk_files(&path, out, visited_dirs, on_progress),
+            Ok(m) if m.is_dir() => {
+                walk_files(&path, out, visited_dirs, on_progress, files_since_update)
+            }
             Ok(m) if m.is_file() => {
                 out.push(path);
-                if last_update.elapsed().as_secs_f64() >= 2.0 {
+                *files_since_update += 1;
+                if *files_since_update >= 1000 {
                     on_progress(dir, out.len());
-                    last_update = std::time::Instant::now();
+                    *files_since_update = 0;
                 }
             }
             _ => {}
         }
     }
-    // Final update for this directory
-    on_progress(dir, out.len());
 }
 
 /// Scan a directory tree for media files matching the given extensions.
@@ -66,13 +67,20 @@ pub fn scan(root: &Path, extensions: &[String]) -> Result<Vec<PathBuf>> {
     let in_screen = std::env::var("STY").is_ok();
 
     let mut all_files = Vec::new();
+    let mut files_since_update = 0;
     if in_screen {
         // In screen, spinner causes newline spam. Use simple logging instead.
         let mut on_progress = |dir: &Path, total: usize| {
             let dir_name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("...");
             eprintln!("  Scanning: {} [{} files found]", dir_name, total);
         };
-        walk_files(root, &mut all_files, &mut HashSet::new(), &mut on_progress);
+        walk_files(
+            root,
+            &mut all_files,
+            &mut HashSet::new(),
+            &mut on_progress,
+            &mut files_since_update,
+        );
     } else {
         let spinner = indicatif::ProgressBar::new_spinner();
         spinner.set_style(
@@ -87,7 +95,13 @@ pub fn scan(root: &Path, extensions: &[String]) -> Result<Vec<PathBuf>> {
             spinner.tick();
         };
 
-        walk_files(root, &mut all_files, &mut HashSet::new(), &mut on_progress);
+        walk_files(
+            root,
+            &mut all_files,
+            &mut HashSet::new(),
+            &mut on_progress,
+            &mut files_since_update,
+        );
         spinner.finish_and_clear();
     }
 
