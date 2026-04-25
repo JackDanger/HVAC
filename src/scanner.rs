@@ -6,7 +6,7 @@ use crate::iso;
 
 /// Recursively collect all files under `dir`, following symlinks.
 /// Tracks visited canonical directory paths to prevent infinite symlink cycles.
-/// Calls `on_progress` after every batch of files with current directory and counts.
+/// Calls `on_progress` periodically (throttled to ~every 2 seconds) with current directory and counts.
 fn walk_files(
     dir: &Path,
     out: &mut Vec<PathBuf>,
@@ -21,7 +21,7 @@ fn walk_files(
         Ok(e) => e,
         Err(_) => return,
     };
-    let mut count_since_update = 0;
+    let mut last_update = std::time::Instant::now();
     for entry in entries.filter_map(|e| e.ok()) {
         let path = entry.path();
         // Use metadata() (follows symlinks) so symlinked dirs/files are handled correctly
@@ -29,19 +29,16 @@ fn walk_files(
             Ok(m) if m.is_dir() => walk_files(&path, out, visited_dirs, on_progress),
             Ok(m) if m.is_file() => {
                 out.push(path);
-                count_since_update += 1;
-                if count_since_update >= 100 {
+                if last_update.elapsed().as_secs_f64() >= 2.0 {
                     on_progress(dir, out.len());
-                    count_since_update = 0;
+                    last_update = std::time::Instant::now();
                 }
             }
             _ => {}
         }
     }
     // Final update for this directory
-    if count_since_update > 0 {
-        on_progress(dir, out.len());
-    }
+    on_progress(dir, out.len());
 }
 
 /// Scan a directory tree for media files matching the given extensions.
@@ -71,13 +68,9 @@ pub fn scan(root: &Path, extensions: &[String]) -> Result<Vec<PathBuf>> {
     let mut all_files = Vec::new();
     if in_screen {
         // In screen, spinner causes newline spam. Use simple logging instead.
-        let mut last_log = std::time::Instant::now();
         let mut on_progress = |dir: &Path, total: usize| {
-            if last_log.elapsed().as_secs() >= 2 {
-                let dir_name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("...");
-                eprintln!("  Scanning: {} [{} files found]", dir_name, total);
-                last_log = std::time::Instant::now();
-            }
+            let dir_name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("...");
+            eprintln!("  Scanning: {} [{} files found]", dir_name, total);
         };
         walk_files(root, &mut all_files, &mut HashSet::new(), &mut on_progress);
     } else {
