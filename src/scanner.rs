@@ -6,7 +6,14 @@ use crate::iso;
 
 /// Recursively collect all files under `dir`, following symlinks.
 /// Tracks visited canonical directory paths to prevent infinite symlink cycles.
-fn walk_files(dir: &Path, out: &mut Vec<PathBuf>, visited_dirs: &mut HashSet<PathBuf>) {
+/// Calls `on_progress` every 0.5 seconds (time-based, not file-count-based).
+fn walk_files(
+    dir: &Path,
+    out: &mut Vec<PathBuf>,
+    visited_dirs: &mut HashSet<PathBuf>,
+    on_progress: &mut dyn FnMut(usize),
+    last_update: &mut std::time::Instant,
+) {
     let canonical = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
     if !visited_dirs.insert(canonical) {
         return;
@@ -19,8 +26,14 @@ fn walk_files(dir: &Path, out: &mut Vec<PathBuf>, visited_dirs: &mut HashSet<Pat
         let path = entry.path();
         // Use metadata() (follows symlinks) so symlinked dirs/files are handled correctly
         match std::fs::metadata(&path) {
-            Ok(m) if m.is_dir() => walk_files(&path, out, visited_dirs),
-            Ok(m) if m.is_file() => out.push(path),
+            Ok(m) if m.is_dir() => walk_files(&path, out, visited_dirs, on_progress, last_update),
+            Ok(m) if m.is_file() => {
+                out.push(path);
+                if last_update.elapsed().as_secs_f64() >= 0.5 {
+                    on_progress(out.len());
+                    *last_update = std::time::Instant::now();
+                }
+            }
             _ => {}
         }
     }
@@ -48,8 +61,44 @@ pub fn scan(root: &Path, extensions: &[String]) -> Result<Vec<PathBuf>> {
         return Ok(vec![]);
     }
 
+    let in_screen = std::env::var("STY").is_ok();
+
     let mut all_files = Vec::new();
-    walk_files(root, &mut all_files, &mut HashSet::new());
+    let mut last_update = std::time::Instant::now();
+    if in_screen {
+        // In screen, spinner causes newline spam. Use simple logging instead.
+        let mut on_progress = |total: usize| {
+            eprintln!("  Scanning... [{} files found]", total);
+        };
+        walk_files(
+            root,
+            &mut all_files,
+            &mut HashSet::new(),
+            &mut on_progress,
+            &mut last_update,
+        );
+    } else {
+        let spinner = indicatif::ProgressBar::new_spinner();
+        spinner.set_style(
+            indicatif::ProgressStyle::default_spinner()
+                .template("{spinner:.cyan} Scanning... [{msg}]")
+                .unwrap(),
+        );
+
+        let mut on_progress = |total: usize| {
+            spinner.set_message(format!("{} files found", total));
+            spinner.tick();
+        };
+
+        walk_files(
+            root,
+            &mut all_files,
+            &mut HashSet::new(),
+            &mut on_progress,
+            &mut last_update,
+        );
+        spinner.finish_and_clear();
+    }
 
     let mut seen = HashSet::new();
     let mut files: Vec<PathBuf> = all_files
