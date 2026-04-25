@@ -1,7 +1,7 @@
-class Tdorr < Formula
+class Slimarr < Formula
   desc "GPU-accelerated media transcoding that I could figure out"
-  homepage "https://github.com/JackDanger/tdorr"
-  url "https://github.com/JackDanger/tdorr/archive/v0.1.0.tar.gz"
+  homepage "https://github.com/JackDanger/slimarr"
+  url "https://github.com/JackDanger/slimarr/archive/v0.1.0.tar.gz"
   sha256 "PLACEHOLDER" # Update with actual sha256 on release
   license "MIT"
 
@@ -10,21 +10,21 @@ class Tdorr < Formula
 
   def install
     system "cargo", "install", *std_cargo_args
-    etc.install "config.yaml" => "tdorr/config.yaml"
+    etc.install "config.yaml" => "slimarr/config.yaml"
   end
 
   def caveats
     <<~EOS
-      tdorr requires a GPU with hardware HEVC encoding support:
+      slimarr requires a GPU with hardware HEVC encoding support:
         - macOS: Apple VideoToolbox (built-in on Apple Silicon and recent Intel Macs)
         - Linux: NVIDIA NVENC or Intel VAAPI
 
       A default config has been installed to:
-        #{etc}/tdorr/config.yaml
+        #{etc}/slimarr/config.yaml
     EOS
   end
 
   test do
-    assert_match "tdorr", shell_output("#{bin}/tdorr --help")
+    assert_match "slimarr", shell_output("#{bin}/slimarr --help")
   end
 end

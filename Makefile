@@ -1,11 +1,11 @@
 .PHONY: build test clean run
 
 CARGO := cargo
-TARGET := target/release/tdorr
+TARGET := target/release/slimarr
 
 build:
 	$(CARGO) build --release
-	ln -sf $(TARGET) tdorr
+	ln -sf $(TARGET) slimarr
 
 test:
 	$(CARGO) test -- --nocapture

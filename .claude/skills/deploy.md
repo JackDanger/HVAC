@@ -4,7 +4,7 @@ description: Deploy, build, and test on the remote host
 
 # Deploy Skill
 
-To build and test tdorr:
+To build and test slimarr:
 
 1. `./deploy.sh` - sync code and build
 2. `./deploy.sh test` - sync code and run tests

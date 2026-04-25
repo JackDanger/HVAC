@@ -5,7 +5,7 @@ set -euo pipefail
 
 REMOTE="root@10.30.0.199"
 PROXY="neurotic"
-REMOTE_DIR="/root/tdorr"
+REMOTE_DIR="/root/slimarr"
 
 echo "Syncing to remote..."
 rsync -az --delete \

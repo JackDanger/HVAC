@@ -1,9 +1,9 @@
 ---
-description: Project-wide rules for tdorr development
+description: Project-wide rules for slimarr development
 globs: "**/*"
 ---
 
-# tdorr - Rust Tdarr Alternative
+# slimarr - Rust Tdarr Alternative
 
 ## Project Purpose
 A Rust CLI tool that scans media directories and transcodes video files to highly-compressed h265 using GPU acceleration (NVIDIA NVENC or Intel QSV).

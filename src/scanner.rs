@@ -104,9 +104,9 @@ pub fn scan(root: &Path, extensions: &[String]) -> Result<Vec<PathBuf>> {
     let mut files: Vec<PathBuf> = all_files
         .into_iter()
         .filter(|path| {
-            // Skip tdorr temporary and transcoded output files
+            // Skip slimarr temporary and transcoded output files
             if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if name.starts_with(".tdorr_tmp_") {
+                if name.starts_with(".slimarr_tmp_") {
                     return false;
                 }
                 if name.contains(".transcoded.") {
@@ -198,7 +198,7 @@ mod tests {
     fn test_scan_skips_tmp_files() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("episode.mkv"), "fake").unwrap();
-        fs::write(dir.path().join(".tdorr_tmp_episode.mkv"), "fake").unwrap();
+        fs::write(dir.path().join(".slimarr_tmp_episode.mkv"), "fake").unwrap();
 
         let exts = vec!["mkv".to_string()];
         let files = scan(dir.path(), &exts).unwrap();

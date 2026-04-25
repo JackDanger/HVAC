@@ -1,17 +1,17 @@
 # Maintainer: Jack Danger <jack@jackdanger.com>
-pkgname=tdorr
+pkgname=slimarr
 pkgver=0.1.0
 pkgrel=1
 pkgdesc="GPU-accelerated media transcoding that I could figure out"
 arch=('x86_64' 'aarch64')
-url="https://github.com/JackDanger/tdorr"
+url="https://github.com/JackDanger/slimarr"
 license=('MIT')
 depends=('ffmpeg')
 makedepends=('cargo')
 optdepends=('nvidia-utils: for NVIDIA NVENC encoding'
             'intel-media-driver: for Intel VAAPI encoding'
             'isomage: for .iso/.img disc image support')
-source=("$pkgname-$pkgver.tar.gz::https://github.com/JackDanger/tdorr/archive/v$pkgver.tar.gz")
+source=("$pkgname-$pkgver.tar.gz::https://github.com/JackDanger/slimarr/archive/v$pkgver.tar.gz")
 sha256sums=('SKIP')
 
 prepare() {
@@ -29,7 +29,7 @@ build() {
 
 package() {
   cd "$pkgname-$pkgver"
-  install -Dm755 "target/release/tdorr" "$pkgdir/usr/bin/tdorr"
-  install -Dm644 "config.yaml" "$pkgdir/etc/tdorr/config.yaml"
+  install -Dm755 "target/release/slimarr" "$pkgdir/usr/bin/slimarr"
+  install -Dm644 "config.yaml" "$pkgdir/etc/slimarr/config.yaml"
   install -Dm644 "LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }

@@ -81,7 +81,7 @@ pub fn transcode(
             // In-place: use temp file then rename
             let parent = source.parent().context("source has no parent")?;
             parent.join(format!(
-                ".tdorr_tmp_{}.{}",
+                ".slimarr_tmp_{}.{}",
                 source.file_stem().unwrap_or_default().to_string_lossy(),
                 target.container
             ))

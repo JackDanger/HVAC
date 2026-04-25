@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="logo.svg" alt="tdorr" width="700"/>
+  <img src="logo.svg" alt="slimarr" width="700"/>
 </p>
 
 <p align="center">
@@ -16,9 +16,9 @@
 
 ## Why?
 
-I spent an evening trying to get [Tdarr](https://github.com/HaveAGitGat/Tdarr) working and failed. I just wanted to compress my media library to h265. So I wrote tdorr instead.
+I spent an evening trying to get [Tdarr](https://github.com/HaveAGitGat/Tdarr) working and failed. I just wanted to compress my media library to h265. So I wrote slimarr instead.
 
-**tdorr** is a single binary you can point at a directory. It finds video files, skips the ones that are already fine, and GPU-transcodes the rest to h265. It can reach inside .iso files and .img files and extract + convert the stuff it finds with correct names.
+**slimarr** is a single binary you can point at a directory. It finds video files, skips the ones that are already fine, and GPU-transcodes the rest to h265. It can reach inside .iso files and .img files and extract + convert the stuff it finds with correct names.
 
 ---
 
@@ -70,34 +70,34 @@ Real numbers from a media library. Public domain films make surprisingly good te
 ### Homebrew (macOS)
 
 ```bash
-brew install JackDanger/tap/tdorr
+brew install JackDanger/tap/slimarr
 ```
 
 ### Cargo (any platform)
 
 ```bash
-cargo install tdorr
+cargo install slimarr
 ```
 
 ### AUR (Arch Linux)
 
 ```bash
-yay -S tdorr
+yay -S slimarr
 ```
 
 ### Pre-built binaries
 
-Download from [GitHub Releases](https://github.com/JackDanger/tdorr/releases) for:
+Download from [GitHub Releases](https://github.com/JackDanger/slimarr/releases) for:
 - Linux x86\_64 / aarch64
 - macOS x86\_64 (Intel) / aarch64 (Apple Silicon)
 
 ### From source
 
 ```bash
-git clone https://github.com/JackDanger/tdorr.git
-cd tdorr
+git clone https://github.com/JackDanger/slimarr.git
+cd slimarr
 make build
-# ./tdorr is now symlinked to the release binary
+# ./slimarr is now symlinked to the release binary
 ```
 
 ### Requirements
@@ -110,22 +110,22 @@ make build
 
 ```bash
 # Dry run — see what would be transcoded without doing anything
-tdorr --dry-run --config config.yaml /mnt/media/movies
+slimarr --dry-run --config config.yaml /mnt/media/movies
 
 # Transcode (creates .transcoded.mkv copies alongside originals)
-tdorr --config config.yaml /mnt/media/movies
+slimarr --config config.yaml /mnt/media/movies
 
 # Write outputs to a separate directory tree
-tdorr --config config.yaml --output-dir /mnt/transcoded /mnt/media/movies
+slimarr --config config.yaml --output-dir /mnt/transcoded /mnt/media/movies
 
 # Overwrite originals in-place
-tdorr --overwrite --config config.yaml /mnt/media/movies
+slimarr --overwrite --config config.yaml /mnt/media/movies
 ```
 
 ### What it looks like
 
 ```
-$ tdorr --config config.yaml /mnt/media/movies
+$ slimarr --config config.yaml /mnt/media/movies
 GPU detected: NVIDIA GeForce RTX 2060 (encoder: hevc_nvenc)
 Found 8 media files in "/mnt/media/movies"
 ▶ Nosferatu (1922)/Nosferatu.mkv (h264, 1920x1080, 18240 kbps)
@@ -138,7 +138,7 @@ Done: 8 transcoded, 0 skipped, 0 errors (of 8 total)
 Run it again and everything is skipped:
 
 ```
-$ tdorr --config config.yaml /mnt/media/movies
+$ slimarr --config config.yaml /mnt/media/movies
 GPU detected: NVIDIA GeForce RTX 2060 (encoder: hevc_nvenc)
 Found 8 media files in "/mnt/media/movies"
 
@@ -175,7 +175,7 @@ media_extensions:
 
 ## GPU Requirements
 
-tdorr requires a GPU encoder and will exit with a clear error if none is detected.
+slimarr requires a GPU encoder and will exit with a clear error if none is detected.
 
 | GPU | Encoder | Platform | Detection method |
 |-----|---------|----------|-----------------|
@@ -183,7 +183,7 @@ tdorr requires a GPU encoder and will exit with a clear error if none is detecte
 | Intel (Broadwell+) | `hevc_vaapi` | Linux | `/dev/dri/renderD128` + ffmpeg encoder check |
 | Apple Silicon / Intel Mac | `hevc_videotoolbox` | macOS | OS detection + ffmpeg encoder check |
 
-CPU h265 encoding is painfully slow and not what tdorr is for. No GPU, no encoding. This is intentional.
+CPU h265 encoding is painfully slow and not what slimarr is for. No GPU, no encoding. This is intentional.
 
 ---
 

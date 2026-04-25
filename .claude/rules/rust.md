@@ -1,5 +1,5 @@
 ---
-description: Rust coding conventions for tdorr
+description: Rust coding conventions for slimarr
 globs: "**/*.rs"
 ---
 

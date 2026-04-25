@@ -130,7 +130,7 @@ static CANCELLED: AtomicBool = AtomicBool::new(false);
 static TMP_DIRS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
 #[derive(Parser, Debug)]
-#[command(name = "tdorr", version, about = "GPU-accelerated media transcoder")]
+#[command(name = "slimarr", version, about = "GPU-accelerated media transcoder")]
 struct Cli {
     /// Directory to scan for media files
     #[arg(required_unless_present_any = ["dump_config", "setup_launchdarkly"])]
@@ -145,7 +145,7 @@ struct Cli {
     dump_config: bool,
 
     /// Create a LaunchDarkly project + all flags, then print the SDK key.
-    /// Usage: tdorr --setup-launchdarkly api-xxxx
+    /// Usage: slimarr --setup-launchdarkly api-xxxx
     #[arg(long, value_name = "API_KEY")]
     setup_launchdarkly: Option<String>,
 
@@ -265,15 +265,15 @@ fn embedded_config_banner(use_unicode: bool) -> String {
     const W: usize = 62; // inner width (chars between the border columns)
 
     let content: &[&str] = &[
-        "  tdorr: using built-in default configuration",
+        "  slimarr: using built-in default configuration",
         "",
         "  To customise encoding settings, save the defaults to a file:",
         "",
-        "    tdorr --dump-config > config.yaml",
+        "    slimarr --dump-config > config.yaml",
         "    $EDITOR config.yaml",
-        "    tdorr --config config.yaml /path/to/media",
+        "    slimarr --config config.yaml /path/to/media",
         "",
-        "  Suppress this message: tdorr --quiet ...",
+        "  Suppress this message: slimarr --quiet ...",
     ];
 
     let (tl, tr, bl, br, h, v) = if use_unicode {
@@ -1071,15 +1071,6 @@ fn main() -> Result<()> {
                     break;
                 }
 
-                // Don't start a new file while paused; in-progress jobs are frozen
-                // by SIGSTOP from the render thread and will resume via SIGCONT.
-                while worker_flags.pause_transcoding() {
-                    if CANCELLED.load(Ordering::Relaxed) {
-                        break 'outer;
-                    }
-                    std::thread::sleep(std::time::Duration::from_secs(1));
-                }
-
                 let idx = next_idx.fetch_add(1, Ordering::Relaxed) as usize;
                 if idx >= to_transcode.len() {
                     break;
@@ -1116,6 +1107,18 @@ fn main() -> Result<()> {
                     my_slot.progress.store(0, Ordering::Relaxed);
                     my_slot.speed.store(0, Ordering::Relaxed);
                 }
+
+                // Don't start encoding while paused; show as paused in the display.
+                // In-progress jobs are frozen by SIGSTOP from the render thread and
+                // will resume via SIGCONT on flag transition.
+                while worker_flags.pause_transcoding() {
+                    my_slot.paused.store(true, Ordering::Relaxed);
+                    if CANCELLED.load(Ordering::Relaxed) {
+                        break 'outer;
+                    }
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                }
+                my_slot.paused.store(false, Ordering::Relaxed);
 
                 let output_path = if overwrite && item.iso_path.is_none() {
                     None
@@ -1483,7 +1486,7 @@ fn main() -> Result<()> {
         }
     }
 
-    // Clean up any leftover .tdorr_tmp_* files
+    // Clean up any leftover .slimarr_tmp_* files
     cleanup_tmp_dirs();
 
     let was_cancelled = CANCELLED.load(Ordering::Relaxed);
@@ -1589,7 +1592,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Remove .tdorr_tmp_* files from all registered work directories.
+/// Remove .slimarr_tmp_* files from all registered work directories.
 fn cleanup_tmp_dirs() {
     if let Ok(dirs) = TMP_DIRS.lock() {
         for dir in dirs.iter() {
@@ -1602,7 +1605,7 @@ fn cleanup_tmp_in_dir(dir: &std::path::Path) {
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             if let Some(name) = entry.file_name().to_str() {
-                if name.starts_with(".tdorr_tmp_") {
+                if name.starts_with(".slimarr_tmp_") {
                     let _ = std::fs::remove_file(entry.path());
                 }
             }
