@@ -6,7 +6,7 @@ use crate::iso;
 
 /// Recursively collect all files under `dir`, following symlinks.
 /// Tracks visited canonical directory paths to prevent infinite symlink cycles.
-/// Calls `on_progress` every 5 seconds (time-based, not file-count-based).
+/// Calls `on_progress` every 0.5 seconds (time-based, not file-count-based).
 fn walk_files(
     dir: &Path,
     out: &mut Vec<PathBuf>,
@@ -29,7 +29,7 @@ fn walk_files(
             Ok(m) if m.is_dir() => walk_files(&path, out, visited_dirs, on_progress, last_update),
             Ok(m) if m.is_file() => {
                 out.push(path);
-                if last_update.elapsed().as_secs_f64() >= 5.0 {
+                if last_update.elapsed().as_secs_f64() >= 0.5 {
                     on_progress(out.len());
                     *last_update = std::time::Instant::now();
                 }
