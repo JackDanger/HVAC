@@ -66,22 +66,37 @@ pub fn scan(root: &Path, extensions: &[String]) -> Result<Vec<PathBuf>> {
         return Ok(vec![]);
     }
 
-    let spinner = indicatif::ProgressBar::new_spinner();
-    spinner.set_style(
-        indicatif::ProgressStyle::default_spinner()
-            .template("{spinner:.cyan} {msg}")
-            .unwrap(),
-    );
+    let in_screen = std::env::var("STY").is_ok();
 
     let mut all_files = Vec::new();
-    let mut on_progress = |dir: &Path, total: usize| {
-        let dir_name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("...");
-        spinner.set_message(format!("Scanning: {} [{} files found]", dir_name, total));
-        spinner.tick();
-    };
+    if in_screen {
+        // In screen, spinner causes newline spam. Use simple logging instead.
+        let mut last_log = std::time::Instant::now();
+        let mut on_progress = |dir: &Path, total: usize| {
+            if last_log.elapsed().as_secs() >= 2 {
+                let dir_name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("...");
+                eprintln!("  Scanning: {} [{} files found]", dir_name, total);
+                last_log = std::time::Instant::now();
+            }
+        };
+        walk_files(root, &mut all_files, &mut HashSet::new(), &mut on_progress);
+    } else {
+        let spinner = indicatif::ProgressBar::new_spinner();
+        spinner.set_style(
+            indicatif::ProgressStyle::default_spinner()
+                .template("{spinner:.cyan} {msg}")
+                .unwrap(),
+        );
 
-    walk_files(root, &mut all_files, &mut HashSet::new(), &mut on_progress);
-    spinner.finish_and_clear();
+        let mut on_progress = |dir: &Path, total: usize| {
+            let dir_name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("...");
+            spinner.set_message(format!("Scanning: {} [{} files found]", dir_name, total));
+            spinner.tick();
+        };
+
+        walk_files(root, &mut all_files, &mut HashSet::new(), &mut on_progress);
+        spinner.finish_and_clear();
+    }
 
     let mut seen = HashSet::new();
     let mut files: Vec<PathBuf> = all_files
