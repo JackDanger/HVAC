@@ -36,15 +36,15 @@
   <text x="400" y="75"
         text-anchor="middle"
         font-family="'Courier New', monospace"
-        font-size="9.5" letter-spacing="4" fill="#b38a6a">GPU-ACCELERATED H265 TRANSCODING</text>
+        font-size="12" letter-spacing="4" fill="#b38a6a">GPU-ACCELERATED H265 TRANSCODING</text>
 
   <!-- Source file -->
   <text x="124" y="92" text-anchor="middle"
-        font-family="monospace" font-size="11" fill="#d9a980">27 GB</text>
+        font-family="monospace" font-size="14" fill="#d9a980">27 GB</text>
   <rect x="78" y="96" width="92" height="68" rx="3"
         fill="#180700" stroke="#c89970" stroke-width="1.5"/>
   <text x="124" y="137" text-anchor="middle"
-        font-family="monospace" font-size="10" fill="#b38a6a">h264</text>
+        font-family="monospace" font-size="13" fill="#b38a6a">h264</text>
 
   <!-- Flow: source → GPU -->
   <line x1="170" y1="130" x2="342" y2="130"
@@ -57,10 +57,10 @@
     <animate attributeName="stroke-opacity" values="0.5;1;0.5" dur="3s" repeatCount="indefinite"/>
   </rect>
   <text x="400" y="131" text-anchor="middle"
-        font-family="monospace" font-size="13" font-weight="bold"
+        font-family="monospace" font-size="16" font-weight="bold"
         fill="url(#amber)">GPU</text>
   <text x="400" y="147" text-anchor="middle"
-        font-family="monospace" font-size="7.5" fill="#c89970" letter-spacing="1">hevc_nvenc</text>
+        font-family="monospace" font-size="10" fill="#c89970" letter-spacing="1">hevc_nvenc</text>
 
   <!-- Flow: GPU → output -->
   <line x1="450" y1="130" x2="590" y2="130"
@@ -69,23 +69,23 @@
 
   <!-- Output file (~15% the width) -->
   <text x="605" y="92" text-anchor="middle"
-        font-family="monospace" font-size="11" fill="#f0c4a0">4 GB</text>
-  <rect x="592" y="96" width="26" height="68" rx="3"
+        font-family="monospace" font-size="14" fill="#f0c4a0">4 GB</text>
+  <rect x="580" y="96" width="50" height="68" rx="3"
         fill="#180700" stroke="#f0c4a0" stroke-width="1.5"/>
   <text x="605" y="137" text-anchor="middle"
-        font-family="monospace" font-size="10" fill="#f0c4a0">h265</text>
+        font-family="monospace" font-size="13" fill="#f0c4a0">h265</text>
 
   <!-- Reduction -->
   <text x="660" y="130" text-anchor="middle"
         font-family="monospace" font-size="28" font-weight="bold"
         fill="url(#amber)" filter="url(#glow)">-85%</text>
   <text x="660" y="146" text-anchor="middle"
-        font-family="monospace" font-size="8.5" fill="#b38a6a" letter-spacing="1">avg savings</text>
+        font-family="monospace" font-size="11" fill="#b38a6a" letter-spacing="1">avg savings</text>
 
   <!-- Tagline -->
   <text x="400" y="172" text-anchor="middle"
         font-family="'Courier New', monospace"
-        font-size="9" fill="#b38a6a" letter-spacing="1">
+        font-size="12" fill="#b38a6a" letter-spacing="1">
     safe by default  ·  skips already-efficient files  ·  ISO / disc image support
   </text>
 </svg>
