@@ -9,10 +9,10 @@
       <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
     </filter>
     <pattern id="sprockets" x="0" y="0" width="40" height="20" patternUnits="userSpaceOnUse">
-      <rect x="8" y="5" width="16" height="10" rx="2" fill="#4a3020"/>
+      <rect x="8" y="5" width="16" height="10" rx="2" fill="#663322"/>
     </pattern>
     <marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
-      <path d="M0,0 L0,6 L8,3 z" fill="#8a5a30"/>
+      <path d="M0,0 L0,6 L8,3 z" fill="#9a6a52"/>
     </marker>
   </defs>
 
@@ -24,8 +24,8 @@
   <rect x="0" y="180" width="800" height="20" fill="#0e0500"/>
   <rect x="0" y="0"   width="800" height="20" fill="url(#sprockets)"/>
   <rect x="0" y="180" width="800" height="20" fill="url(#sprockets)"/>
-  <line x1="0" y1="20"  x2="800" y2="20"  stroke="#6a4020" stroke-width="1"/>
-  <line x1="0" y1="180" x2="800" y2="180" stroke="#6a4020" stroke-width="1"/>
+  <line x1="0" y1="20"  x2="800" y2="20"  stroke="#8a5a42" stroke-width="1"/>
+  <line x1="0" y1="180" x2="800" y2="180" stroke="#8a5a42" stroke-width="1"/>
 
   <!-- Title -->
   <text x="400" y="60"
@@ -36,56 +36,56 @@
   <text x="400" y="75"
         text-anchor="middle"
         font-family="'Courier New', monospace"
-        font-size="9.5" letter-spacing="4" fill="#8a5a30">GPU-ACCELERATED H265 TRANSCODING</text>
+        font-size="9.5" letter-spacing="4" fill="#b38a6a">GPU-ACCELERATED H265 TRANSCODING</text>
 
   <!-- Source file -->
   <text x="124" y="92" text-anchor="middle"
-        font-family="monospace" font-size="11" fill="#e08840">27 GB</text>
+        font-family="monospace" font-size="11" fill="#d9a980">27 GB</text>
   <rect x="78" y="96" width="92" height="68" rx="3"
-        fill="#180700" stroke="#b86a40" stroke-width="1.5"/>
+        fill="#180700" stroke="#c89970" stroke-width="1.5"/>
   <text x="124" y="137" text-anchor="middle"
-        font-family="monospace" font-size="10" fill="#b05a30">h264</text>
+        font-family="monospace" font-size="10" fill="#b38a6a">h264</text>
 
   <!-- Flow: source → GPU -->
   <line x1="170" y1="130" x2="342" y2="130"
-        stroke="#9a6a40" stroke-width="1.5" stroke-dasharray="5 4"
+        stroke="#9a6a52" stroke-width="1.5" stroke-dasharray="5 4"
         marker-end="url(#arrow)"/>
 
   <!-- GPU chip -->
   <rect x="350" y="104" width="100" height="56" rx="5"
-        fill="#150600" stroke="#f0a040" stroke-width="1.5">
+        fill="#150600" stroke="#e8b890" stroke-width="1.5">
     <animate attributeName="stroke-opacity" values="0.5;1;0.5" dur="3s" repeatCount="indefinite"/>
   </rect>
   <text x="400" y="131" text-anchor="middle"
         font-family="monospace" font-size="13" font-weight="bold"
         fill="url(#amber)">GPU</text>
   <text x="400" y="147" text-anchor="middle"
-        font-family="monospace" font-size="7.5" fill="#d08a50" letter-spacing="1">hevc_nvenc</text>
+        font-family="monospace" font-size="7.5" fill="#c89970" letter-spacing="1">hevc_nvenc</text>
 
   <!-- Flow: GPU → output -->
   <line x1="450" y1="130" x2="590" y2="130"
-        stroke="#9a6a40" stroke-width="1.5" stroke-dasharray="5 4"
+        stroke="#9a6a52" stroke-width="1.5" stroke-dasharray="5 4"
         marker-end="url(#arrow)"/>
 
   <!-- Output file (~15% the width) -->
   <text x="605" y="92" text-anchor="middle"
-        font-family="monospace" font-size="11" fill="#f0a850">4 GB</text>
+        font-family="monospace" font-size="11" fill="#f0c4a0">4 GB</text>
   <rect x="592" y="96" width="26" height="68" rx="3"
-        fill="#180700" stroke="#f0a850" stroke-width="1.5"/>
+        fill="#180700" stroke="#f0c4a0" stroke-width="1.5"/>
   <text x="605" y="137" text-anchor="middle"
-        font-family="monospace" font-size="10" fill="#f0a850">h265</text>
+        font-family="monospace" font-size="10" fill="#f0c4a0">h265</text>
 
   <!-- Reduction -->
   <text x="660" y="130" text-anchor="middle"
         font-family="monospace" font-size="28" font-weight="bold"
         fill="url(#amber)" filter="url(#glow)">-85%</text>
   <text x="660" y="146" text-anchor="middle"
-        font-family="monospace" font-size="8.5" fill="#8a5a30" letter-spacing="1">avg savings</text>
+        font-family="monospace" font-size="8.5" fill="#b38a6a" letter-spacing="1">avg savings</text>
 
   <!-- Tagline -->
   <text x="400" y="172" text-anchor="middle"
         font-family="'Courier New', monospace"
-        font-size="9" fill="#8a5a30" letter-spacing="1">
+        font-size="9" fill="#b38a6a" letter-spacing="1">
     safe by default  ·  skips already-efficient files  ·  ISO / disc image support
   </text>
 </svg>
