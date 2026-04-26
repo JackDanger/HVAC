@@ -76,10 +76,10 @@
         font-family="monospace" font-size="13" fill="#f0c4a0">h265</text>
 
   <!-- Reduction -->
-  <text x="660" y="130" text-anchor="middle"
+  <text x="700" y="130" text-anchor="middle"
         font-family="monospace" font-size="28" font-weight="bold"
         fill="url(#amber)" filter="url(#glow)">-85%</text>
-  <text x="660" y="146" text-anchor="middle"
+  <text x="700" y="146" text-anchor="middle"
         font-family="monospace" font-size="11" fill="#b38a6a" letter-spacing="1">avg savings</text>
 
   <!-- Tagline -->
