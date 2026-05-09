@@ -3,7 +3,7 @@ description: Project-wide rules for hvac development
 globs: "**/*"
 ---
 
-# HVECuum - Rust Tdarr Alternative
+# HVAC - Rust Tdarr Alternative
 
 ## Project Purpose
 A Rust CLI tool that scans media directories and transcodes video files to highly-compressed h265 using GPU acceleration (NVIDIA NVENC or Intel QSV).
