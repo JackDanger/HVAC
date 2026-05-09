@@ -1,5 +1,5 @@
 ---
-description: Rust coding conventions for slimarr
+description: Rust coding conventions for hvecuum
 globs: "**/*.rs"
 ---
 

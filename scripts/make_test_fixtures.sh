@@ -4,7 +4,7 @@
 # Output: tests/fixtures/*.iso
 set -e
 
-OUTDIR="${1:-/tmp/slimarr_fixtures}"
+OUTDIR="${1:-/tmp/hvecuum_fixtures}"
 mkdir -p "$OUTDIR"
 
 # Helper: create a small H.264 mpegts file

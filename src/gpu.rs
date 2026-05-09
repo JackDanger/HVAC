@@ -58,7 +58,7 @@ pub fn detect_gpu() -> Result<GpuInfo> {
 
     bail!(
         "No GPU found for h265 encoding!\n\
-         slimarr requires one of:\n\
+         hvecuum requires one of:\n\
          - NVIDIA GPU with NVENC support (hevc_nvenc)\n\
          - Intel GPU with VAAPI support (hevc_vaapi)\n\
          - Apple Silicon or Mac with VideoToolbox (hevc_videotoolbox)\n\

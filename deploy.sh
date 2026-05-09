@@ -3,7 +3,7 @@ set -euo pipefail
 
 REMOTE_HOST="root@10.30.0.199"
 SSH_OPTS="-J neurotic"
-REMOTE_DIR="/root/slimarr"
+REMOTE_DIR="/root/tdorr"
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 sync_code() {
@@ -38,7 +38,7 @@ case "${1:-build}" in
         # skip the -- separator if present
         [[ "${1:-}" == "--" ]] && shift
         remote_cmd make build
-        remote_cmd "./target/release/slimarr $*"
+        remote_cmd "./target/release/hvecuum $*"
         ;;
     sync)
         sync_code
