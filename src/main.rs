@@ -105,7 +105,7 @@ fn detect_symbols() -> &'static Symbols {
     // causing the C library to fall back to ASCII.
     unsafe {
         // Initialize locale from environment (required before nl_langinfo)
-        libc::setlocale(libc::LC_ALL, b"\0".as_ptr() as *const _);
+        libc::setlocale(libc::LC_ALL, c"".as_ptr());
         let codeset = libc::nl_langinfo(libc::CODESET);
         if !codeset.is_null() {
             let cs = std::ffi::CStr::from_ptr(codeset)
@@ -354,12 +354,8 @@ fn main() -> Result<()> {
 
     // --- Phase 1: Expand disc images into flat work list ---
     // Each entry is (path, optional iso_path, optional inner_path, optional inner_paths)
-    let mut expanded: Vec<(
-        PathBuf,
-        Option<PathBuf>,
-        Option<String>,
-        Option<Vec<String>>,
-    )> = Vec::new();
+    type ExpandedItem = (PathBuf, Option<PathBuf>, Option<String>, Option<Vec<String>>);
+    let mut expanded: Vec<ExpandedItem> = Vec::new();
     let mut errors = 0u32;
 
     for file in &files {
@@ -836,8 +832,10 @@ fn main() -> Result<()> {
             });
         }
 
-        // Worker threads
-        for worker_id in 0..jobs {
+        // Worker threads. worker_slots was built with exactly `jobs` entries
+        // (see WorkerSlot construction above), so iterating it spawns one
+        // thread per slot.
+        for slot in &worker_slots {
             let to_transcode = Arc::clone(&to_transcode);
             let next_idx = Arc::clone(&next_idx);
             let transcoded = Arc::clone(&transcoded);
@@ -850,7 +848,7 @@ fn main() -> Result<()> {
             let output_dir = output_dir.clone();
             let completed_units = Arc::clone(&completed_units);
             let completed_lines = Arc::clone(&completed_lines);
-            let my_slot = Arc::clone(&worker_slots[worker_id]);
+            let my_slot = Arc::clone(slot);
             let active_encoders = Arc::clone(&active_encoders);
             let max_encoders = Arc::clone(&max_encoders);
             let ramping = Arc::clone(&ramping);
