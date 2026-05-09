@@ -1,5 +1,5 @@
 ---
-description: Rust coding conventions for HEVCuum
+description: Rust coding conventions for hvac
 globs: "**/*.rs"
 ---
 

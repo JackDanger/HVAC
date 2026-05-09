@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="logo.svg" alt="HEVCuum" width="700"/>
+  <img src="logo.svg" alt="hvac" width="700"/>
 </p>
 
 <p align="center">
@@ -70,34 +70,34 @@ Real numbers from a media library. Public domain films make surprisingly good te
 ### Homebrew (macOS)
 
 ```bash
-brew install JackDanger/tap/HEVCuum
+brew install JackDanger/tap/hvac
 ```
 
 ### Cargo (any platform)
 
 ```bash
-cargo install HEVCuum
+cargo install hvac
 ```
 
 ### AUR (Arch Linux)
 
 ```bash
-yay -S HEVCuum
+yay -S hvac
 ```
 
 ### Pre-built binaries
 
-Download from [GitHub Releases](https://github.com/JackDanger/HEVCuum/releases) for:
+Download from [GitHub Releases](https://github.com/JackDanger/hvac/releases) for:
 - Linux x86\_64 / aarch64
 - macOS x86\_64 (Intel) / aarch64 (Apple Silicon)
 
 ### From source
 
 ```bash
-git clone https://github.com/JackDanger/HEVCuum.git
-cd HEVCuum
+git clone https://github.com/JackDanger/hvac.git
+cd hvac
 make build
-# ./HEVCuum is now symlinked to the release binary
+# ./hvac is now symlinked to the release binary
 ```
 
 ### Requirements
@@ -110,22 +110,22 @@ make build
 
 ```bash
 # Dry run — see what would be transcoded without doing anything
-HEVCuum --dry-run --config config.yaml /mnt/media/movies
+hvac --dry-run --config config.yaml /mnt/media/movies
 
 # Transcode (creates .transcoded.mkv copies alongside originals)
-HEVCuum --config config.yaml /mnt/media/movies
+hvac --config config.yaml /mnt/media/movies
 
 # Write outputs to a separate directory tree
-HEVCuum --config config.yaml --output-dir /mnt/transcoded /mnt/media/movies
+hvac --config config.yaml --output-dir /mnt/transcoded /mnt/media/movies
 
 # Overwrite originals in-place
-HEVCuum --overwrite --config config.yaml /mnt/media/movies
+hvac --overwrite --config config.yaml /mnt/media/movies
 ```
 
 ### What it looks like
 
 ```
-$ HEVCuum --config config.yaml /mnt/media/movies
+$ hvac --config config.yaml /mnt/media/movies
 GPU detected: NVIDIA GeForce RTX 2060 (encoder: hevc_nvenc)
 Found 8 media files in "/mnt/media/movies"
 ▶ Nosferatu (1922)/Nosferatu.mkv (h264, 1920x1080, 18240 kbps)
@@ -138,7 +138,7 @@ Done: 8 transcoded, 0 skipped, 0 errors (of 8 total)
 Run it again and everything is skipped:
 
 ```
-$ HEVCuum --config config.yaml /mnt/media/movies
+$ hvac --config config.yaml /mnt/media/movies
 GPU detected: NVIDIA GeForce RTX 2060 (encoder: hevc_nvenc)
 Found 8 media files in "/mnt/media/movies"
 

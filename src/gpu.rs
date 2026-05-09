@@ -58,7 +58,7 @@ pub fn detect_gpu() -> Result<GpuInfo> {
 
     bail!(
         "No GPU found for h265 encoding!\n\
-         HEVCuum requires one of:\n\
+         hvac requires one of:\n\
          - NVIDIA GPU with NVENC support (hevc_nvenc)\n\
          - Intel GPU with VAAPI support (hevc_vaapi)\n\
          - Apple Silicon or Mac with VideoToolbox (hevc_videotoolbox)\n\

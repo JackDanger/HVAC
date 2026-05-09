@@ -1,11 +1,11 @@
 [package]
-name = "HEVCuum"
+name = "hvac"
 version = "5.1.1"
 edition = "2021"
 description = "GPU-accelerated media transcoding that I could figure out"
 license = "MIT"
-repository = "https://github.com/JackDanger/HEVCuum"
-homepage = "https://github.com/JackDanger/HEVCuum"
+repository = "https://github.com/JackDanger/hvac"
+homepage = "https://github.com/JackDanger/hvac"
 readme = "README.md"
 keywords = ["video", "transcode", "hevc", "h265", "ffmpeg"]
 categories = ["command-line-utilities", "multimedia::video"]

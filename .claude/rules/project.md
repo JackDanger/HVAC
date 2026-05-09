@@ -1,5 +1,5 @@
 ---
-description: Project-wide rules for HEVCuum development
+description: Project-wide rules for hvac development
 globs: "**/*"
 ---
 

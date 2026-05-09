@@ -126,7 +126,7 @@ static CANCELLED: AtomicBool = AtomicBool::new(false);
 static TMP_DIRS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
 #[derive(Parser, Debug)]
-#[command(name = "HEVCuum", version, about = "GPU-accelerated media transcoder")]
+#[command(name = "hvac", version, about = "GPU-accelerated media transcoder")]
 struct Cli {
     /// Directory to scan for media files
     #[arg(required_unless_present = "dump_config")]
@@ -252,15 +252,15 @@ fn embedded_config_banner(use_unicode: bool) -> String {
     const W: usize = 62; // inner width (chars between the border columns)
 
     let content: &[&str] = &[
-        "  HEVCuum: using built-in default configuration",
+        "  hvac: using built-in default configuration",
         "",
         "  To customise encoding settings, save the defaults to a file:",
         "",
-        "    HEVCuum --dump-config > config.yaml",
+        "    hvac --dump-config > config.yaml",
         "    $EDITOR config.yaml",
-        "    HEVCuum --config config.yaml /path/to/media",
+        "    hvac --config config.yaml /path/to/media",
         "",
-        "  Suppress this message: HEVCuum --quiet ...",
+        "  Suppress this message: hvac --quiet ...",
     ];
 
     let (tl, tr, bl, br, h, v) = if use_unicode {
@@ -1174,7 +1174,7 @@ fn main() -> Result<()> {
         }
     }
 
-    // Clean up any leftover .HEVCuum_tmp_* files
+    // Clean up any leftover .hvac_tmp_* files
     cleanup_tmp_dirs();
 
     let was_cancelled = CANCELLED.load(Ordering::Relaxed);
@@ -1254,7 +1254,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Remove .HEVCuum_tmp_* files from all registered work directories.
+/// Remove .hvac_tmp_* files from all registered work directories.
 fn cleanup_tmp_dirs() {
     if let Ok(dirs) = TMP_DIRS.lock() {
         for dir in dirs.iter() {
@@ -1267,7 +1267,7 @@ fn cleanup_tmp_in_dir(dir: &std::path::Path) {
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             if let Some(name) = entry.file_name().to_str() {
-                if name.starts_with(".HEVCuum_tmp_") {
+                if name.starts_with(".hvac_tmp_") {
                     let _ = std::fs::remove_file(entry.path());
                 }
             }

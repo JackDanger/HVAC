@@ -1,11 +1,11 @@
 .PHONY: build test clean run
 
 CARGO := cargo
-TARGET := target/release/HEVCuum
+TARGET := target/release/hvac
 
 build:
 	$(CARGO) build --release
-	ln -sf $(TARGET) HEVCuum
+	ln -sf $(TARGET) hvac
 
 test:
 	$(CARGO) test -- --nocapture
