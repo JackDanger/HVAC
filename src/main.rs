@@ -472,11 +472,8 @@ fn main() -> Result<()> {
                     //   - regular file    → use file path as stem
                     {
                         let out_dir = cli.output_dir.as_deref().or(cfg.output_dir.as_deref());
-                        let source_for_output = output_stem_for_item(
-                            file,
-                            inner_p.as_deref(),
-                            inner_ps.as_deref(),
-                        );
+                        let source_for_output =
+                            output_stem_for_item(file, inner_p.as_deref(), inner_ps.as_deref());
                         if let Ok(out_path) = transcode::output_path(
                             &source_for_output,
                             out_dir,
@@ -1345,7 +1342,10 @@ mod tests {
         assert!(
             worker.len() <= cols,
             "worker line ({} chars) exceeds {} cols at max_name={}: {:?}",
-            worker.len(), cols, max_name, worker
+            worker.len(),
+            cols,
+            max_name,
+            worker
         );
 
         // Completed: "  + <name> (<src> -> <dst>, -100%)"
@@ -1353,7 +1353,10 @@ mod tests {
         assert!(
             completed.len() <= cols,
             "completed line ({} chars) exceeds {} cols at max_name={}: {:?}",
-            completed.len(), cols, max_name, completed
+            completed.len(),
+            cols,
+            max_name,
+            completed
         );
 
         // Disk-wait: "  ~           <name> (<size>)  waiting for disk"
@@ -1361,15 +1364,24 @@ mod tests {
         assert!(
             diskwait.len() <= cols,
             "disk-wait line ({} chars) exceeds {} cols at max_name={}: {:?}",
-            diskwait.len(), cols, max_name, diskwait
+            diskwait.len(),
+            cols,
+            max_name,
+            diskwait
         );
 
         // Queued: "  ~           <name> (<size>)  queued 999/999"
-        let queued = format!("  {}           {} ({})  queued {}/{}", "~", name, size, 999, 999);
+        let queued = format!(
+            "  {}           {} ({})  queued {}/{}",
+            "~", name, size, 999, 999
+        );
         assert!(
             queued.len() <= cols,
             "queued line ({} chars) exceeds {} cols at max_name={}: {:?}",
-            queued.len(), cols, max_name, queued
+            queued.len(),
+            cols,
+            max_name,
+            queued
         );
     }
 
@@ -1474,4 +1486,3 @@ mod tests {
         assert_eq!(single, multi, "single and multi-file ISO stems must match");
     }
 }
-
