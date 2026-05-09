@@ -16,9 +16,9 @@
 
 ## Why?
 
-I spent an entire evening trying to get [Tdarr](https://github.com/HaveAGitGat/Tdarr) working. Nodes, servers, web UIs, plugins, databases... I just wanted to convert my media library to h265. So I wrote HVECuum instead.
+I spent an entire evening trying to get [Tdarr](https://github.com/HaveAGitGat/Tdarr) working. Nodes, servers, web UIs, plugins, databases... I just wanted to convert my media library to h265. So I wrote HVAC instead.
 
-**HVECuum** is a single binary. Point it at a directory. It finds video files, skips the ones that are already fine, and GPU-transcodes the rest to h265. That's it.
+**HVAC** is a single binary. Point it at a directory. It finds video files, skips the ones that are already fine, and GPU-transcodes the rest to h265. That's it.
 
 ---
 
@@ -67,7 +67,51 @@ Real numbers from a media library. Public domain films make surprisingly good te
 
 ## Install
 
-### Homebrew (macOS)
+### One-liner (Linux & macOS)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/JackDanger/hvac/main/install.sh | sh
+```
+
+Detects your OS and architecture, downloads the matching binary from the
+latest GitHub release, verifies its sha256, and installs to `/usr/local/bin`
+(falling back to `~/.local/bin` if that's not writable). Pin a version with
+`HVAC_VERSION=v5.2.0` or change the install dir with `HVAC_PREFIX=...`.
+
+### Debian / Ubuntu (apt)
+
+A signed `.deb` is published with every release.
+
+```bash
+# Install ffmpeg first — the .deb declares it as a dependency
+sudo apt update && sudo apt install -y ffmpeg
+
+# x86_64 (most laptops/servers)
+curl -fsSLO https://github.com/JackDanger/hvac/releases/latest/download/hvac_5.2.0_amd64.deb
+sudo apt install -y ./hvac_5.2.0_amd64.deb
+
+# aarch64 / arm64 (Raspberry Pi, Ampere, Graviton)
+curl -fsSLO https://github.com/JackDanger/hvac/releases/latest/download/hvac_5.2.0_arm64.deb
+sudo apt install -y ./hvac_5.2.0_arm64.deb
+```
+
+`apt install ./file.deb` resolves dependencies (unlike bare `dpkg -i`).
+
+### Arch Linux (AUR)
+
+```bash
+yay -S hvac     # or: paru -S hvac, or any AUR helper
+```
+
+Or build from the in-tree PKGBUILD without an AUR helper:
+
+```bash
+git clone https://github.com/JackDanger/hvac.git
+cd hvac/packaging/aur
+makepkg -si
+```
+
+### Homebrew (macOS & Linuxbrew)
 
 ```bash
 brew install JackDanger/tap/hvac
@@ -75,21 +119,19 @@ brew install JackDanger/tap/hvac
 
 ### Cargo (any platform)
 
-```bash
-cargo install hvac
-```
-
-### AUR (Arch Linux)
+The crate is published as `hvac-transcoder` because the short `hvac` name on
+crates.io is held by an unrelated 2018 thermostat crate. The installed
+binary is still `hvac`.
 
 ```bash
-yay -S hvac
+cargo install hvac-transcoder
 ```
 
 ### Pre-built binaries
 
-Download from [GitHub Releases](https://github.com/JackDanger/hvac/releases) for:
-- Linux x86\_64 / aarch64
-- macOS x86\_64 (Intel) / aarch64 (Apple Silicon)
+Download tarballs and `.sha256` sidecars from [GitHub Releases](https://github.com/JackDanger/hvac/releases) for:
+- Linux x86\_64 / aarch64 (`.tar.gz` and `.deb`)
+- macOS x86\_64 (Intel) / aarch64 (Apple Silicon) (`.tar.gz`)
 
 ### From source
 
@@ -103,6 +145,10 @@ make build
 ### Requirements
 
 - `ffmpeg` with a GPU encoder (`hevc_nvenc`, `hevc_vaapi`, or `hevc_videotoolbox`)
+  - Debian/Ubuntu: `sudo apt install ffmpeg`
+  - Arch: `sudo pacman -S ffmpeg`
+  - Fedora: `sudo dnf install ffmpeg`
+  - macOS: `brew install ffmpeg`
 
 ---
 
@@ -175,7 +221,7 @@ media_extensions:
 
 ## GPU Requirements
 
-HVECuum requires a GPU encoder and will exit with a clear error if none is detected.
+HVAC requires a GPU encoder and will exit with a clear error if none is detected.
 
 | GPU | Encoder | Platform | Detection method |
 |-----|---------|----------|-----------------|
@@ -183,7 +229,7 @@ HVECuum requires a GPU encoder and will exit with a clear error if none is detec
 | Intel (Broadwell+) | `hevc_vaapi` | Linux | `/dev/dri/renderD128` + ffmpeg encoder check |
 | Apple Silicon / Intel Mac | `hevc_videotoolbox` | macOS | OS detection + ffmpeg encoder check |
 
-CPU h265 encoding is painfully slow and not what HVECuum is for. No GPU, no encoding. This is intentional.
+CPU h265 encoding is painfully slow and not what HVAC is for. No GPU, no encoding. This is intentional.
 
 ---
 

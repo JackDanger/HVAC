@@ -1,8 +1,11 @@
 [package]
-name = "hvac"
-version = "5.1.1"
+# The crate name on crates.io is `hvac-transcoder` because the unrelated
+# `hvac` crate (a 2018 thermostat controller) holds the short name. The
+# installed binary remains `hvac` — see the [[bin]] section below.
+name = "hvac-transcoder"
+version = "5.2.0"
 edition = "2021"
-description = "GPU-accelerated media transcoding that I could figure out"
+description = "GPU-accelerated media transcoder (HEVC/h265 via NVENC, VAAPI, VideoToolbox). Single-binary Tdarr alternative."
 license = "MIT"
 repository = "https://github.com/JackDanger/hvac"
 homepage = "https://github.com/JackDanger/hvac"
@@ -10,6 +13,10 @@ readme = "README.md"
 keywords = ["video", "transcode", "hevc", "h265", "ffmpeg"]
 categories = ["command-line-utilities", "multimedia::video"]
 exclude = ["tests/fixtures/*", "scripts/*", "packaging/*", "logo.svg"]
+
+[[bin]]
+name = "hvac"
+path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
@@ -25,3 +32,27 @@ serde_yaml = "0.9"
 
 [dev-dependencies]
 tempfile = "3"
+
+[package.metadata.deb]
+maintainer = "Jack Danger <jack@jackdanger.com>"
+copyright = "2026, Jack Danger <jack@jackdanger.com>"
+license-file = ["LICENSE", "0"]
+extended-description = """
+hvac scans media directories and transcodes video files to highly-compressed
+HEVC/h265 using GPU acceleration (NVIDIA NVENC, Intel VAAPI, or Apple
+VideoToolbox). Smart-skip avoids re-encoding files that already meet the
+target codec/resolution/bitrate."""
+depends = "libc6, ffmpeg"
+section = "video"
+priority = "optional"
+assets = [
+    ["target/release/hvac", "usr/bin/", "755"],
+    ["config.yaml", "etc/hvac/config.yaml", "644"],
+    ["README.md", "usr/share/doc/hvac/README.md", "644"],
+    ["LICENSE", "usr/share/doc/hvac/LICENSE", "644"],
+]
+
+[package.metadata.deb.variants.aarch64]
+# cargo-deb auto-detects target arch; this stanza exists so cross-built
+# aarch64 .debs pick up the same assets as the native build.
+

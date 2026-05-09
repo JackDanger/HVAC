@@ -1,35 +1,41 @@
 # Maintainer: Jack Danger <jack@jackdanger.com>
-pkgname=slimarr
-pkgver=0.1.0
+pkgname=hvac
+pkgver=5.2.0
 pkgrel=1
-pkgdesc="GPU-accelerated media transcoding that I could figure out"
+pkgdesc="GPU-accelerated media transcoder (HEVC/h265 via NVENC, VAAPI, VideoToolbox)"
 arch=('x86_64' 'aarch64')
-url="https://github.com/JackDanger/slimarr"
+url="https://github.com/JackDanger/hvac"
 license=('MIT')
 depends=('ffmpeg')
 makedepends=('cargo')
 optdepends=('nvidia-utils: for NVIDIA NVENC encoding'
-            'intel-media-driver: for Intel VAAPI encoding'
-            'isomage: for .iso/.img disc image support')
-source=("$pkgname-$pkgver.tar.gz::https://github.com/JackDanger/slimarr/archive/v$pkgver.tar.gz")
+            'intel-media-driver: for Intel VAAPI encoding')
+source=("$pkgname-$pkgver.tar.gz::https://github.com/JackDanger/hvac/archive/v$pkgver.tar.gz")
 sha256sums=('SKIP')
 
 prepare() {
   cd "$pkgname-$pkgver"
   export RUSTUP_TOOLCHAIN=stable
-  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+  cargo fetch --target "$(rustc -vV | sed -n 's/host: //p')"
 }
 
 build() {
   cd "$pkgname-$pkgver"
   export RUSTUP_TOOLCHAIN=stable
   export CARGO_TARGET_DIR=target
-  cargo build --frozen --release
+  cargo build --release
+}
+
+check() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo test --release
 }
 
 package() {
   cd "$pkgname-$pkgver"
-  install -Dm755 "target/release/slimarr" "$pkgdir/usr/bin/slimarr"
-  install -Dm644 "config.yaml" "$pkgdir/etc/slimarr/config.yaml"
+  install -Dm755 "target/release/hvac" "$pkgdir/usr/bin/hvac"
+  install -Dm644 "config.yaml" "$pkgdir/etc/hvac/config.yaml"
+  install -Dm644 "README.md" "$pkgdir/usr/share/doc/$pkgname/README.md"
   install -Dm644 "LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }

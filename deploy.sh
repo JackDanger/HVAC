@@ -3,7 +3,7 @@ set -euo pipefail
 
 REMOTE_HOST="root@10.30.0.199"
 SSH_OPTS="-J neurotic"
-REMOTE_DIR="/root/tdorr"
+REMOTE_DIR="/root/hvac"
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 sync_code() {
