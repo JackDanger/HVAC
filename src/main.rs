@@ -354,7 +354,12 @@ fn main() -> Result<()> {
 
     // --- Phase 1: Expand disc images into flat work list ---
     // Each entry is (path, optional iso_path, optional inner_path, optional inner_paths)
-    type ExpandedItem = (PathBuf, Option<PathBuf>, Option<String>, Option<Vec<String>>);
+    type ExpandedItem = (
+        PathBuf,
+        Option<PathBuf>,
+        Option<String>,
+        Option<Vec<String>>,
+    );
     let mut expanded: Vec<ExpandedItem> = Vec::new();
     let mut errors = 0u32;
 
