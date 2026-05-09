@@ -2,8 +2,8 @@ use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 
 const BASE: &str = "https://app.launchdarkly.com/api/v2";
-const PROJECT_KEY: &str = "slimarr";
-const PROJECT_NAME: &str = "slimarr";
+const PROJECT_KEY: &str = "hvecuum";
+const PROJECT_NAME: &str = "hvecuum";
 const ENV_KEY: &str = "production";
 
 pub fn run(api_key: &str) -> Result<()> {
@@ -23,7 +23,7 @@ pub fn run(api_key: &str) -> Result<()> {
         "\nToggle pause: https://app.launchdarkly.com/{}/production/features/pause-transcoding",
         PROJECT_KEY
     );
-    // stdout only — lets `eval $(slimarr --setup-launchdarkly ...)` set the var directly
+    // stdout only — lets `eval $(hvecuum --setup-launchdarkly ...)` set the var directly
     println!("export LAUNCHDARKLY_SDK_KEY={}", sdk_key);
 
     Ok(())

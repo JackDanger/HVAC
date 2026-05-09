@@ -82,7 +82,7 @@ impl Telemetry {
             .map_err(|e| anyhow::anyhow!("OTel exporter: {e}"))?;
 
         let resource = Resource::new([
-            KeyValue::new("service.name", "slimarr"),
+            KeyValue::new("service.name", "hvecuum"),
             KeyValue::new("service.version", env!("CARGO_PKG_VERSION")),
         ]);
 
@@ -97,7 +97,7 @@ impl Telemetry {
     /// Start a named span. Safe to call when not connected (returns no-op span).
     pub fn span(&self, name: &str) -> OtelSpan {
         OtelSpan {
-            inner: global::tracer("slimarr").start(name.to_string()),
+            inner: global::tracer("hvecuum").start(name.to_string()),
         }
     }
 
