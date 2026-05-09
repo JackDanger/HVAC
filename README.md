@@ -56,7 +56,7 @@ Real numbers from a media library. Public domain films make surprisingly good te
 
 - **GPU-accelerated h265 encoding** &mdash; NVIDIA NVENC, Intel VAAPI, and Apple VideoToolbox
 - **Smart skip** &mdash; won't touch files that are already h265 at or below your target resolution and bitrate
-- **Safe by default** &mdash; writes `.transcoded.mkv` copies alongside originals; never overwrites unless `--overwrite` is passed
+- **Overwrites in place** &mdash; just `hvac /path/to/media` is the real deal: originals are replaced with the smaller HEVC version once the new file is verified. Use `--dry-run` to preview, or `--no-overwrite` to write `.transcoded.mkv` copies alongside instead
 - **Output validation** &mdash; ffprobe-verifies each output for duration, codec, and minimum file size before finalizing
 - **Disc image support** &mdash; extracts and transcodes media from `.iso` and `.img` files (Blu-ray, DVD, AVCHD) using the bundled [isomage](https://github.com/JackDanger/isomage) library — no separate install needed
 - **YAML config** &mdash; sensible defaults, fully overridable
@@ -156,16 +156,19 @@ make build
 
 ```bash
 # Dry run — see what would be transcoded without doing anything
-hvac --dry-run --config config.yaml /mnt/media/movies
+hvac --dry-run /mnt/media/movies
 
-# Transcode (creates .transcoded.mkv copies alongside originals)
-hvac --config config.yaml /mnt/media/movies
+# Transcode and overwrite originals in place (the default)
+hvac /mnt/media/movies
+
+# Keep originals — write .transcoded.mkv copies alongside instead
+hvac --no-overwrite /mnt/media/movies
 
 # Write outputs to a separate directory tree
-hvac --config config.yaml --output-dir /mnt/transcoded /mnt/media/movies
+hvac --output-dir /mnt/transcoded /mnt/media/movies
 
-# Overwrite originals in-place
-hvac --overwrite --config config.yaml /mnt/media/movies
+# Use a custom config file
+hvac --config config.yaml /mnt/media/movies
 ```
 
 ### What it looks like

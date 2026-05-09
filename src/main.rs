@@ -144,11 +144,11 @@ struct Cli {
     #[arg(short, long)]
     quiet: bool,
 
-    /// Overwrite original files instead of creating copies
+    /// Keep originals: write `.transcoded.<ext>` copies alongside instead of overwriting in place
     #[arg(long, default_value_t = false)]
-    overwrite: bool,
+    no_overwrite: bool,
 
-    /// Dry run - show what would be transcoded without doing it
+    /// Dry run — print what would be transcoded and exit without touching anything
     #[arg(long, default_value_t = false)]
     dry_run: bool,
 
@@ -295,6 +295,9 @@ fn main() -> Result<()> {
 
     // Safety: clap enforces `path` is present unless --dump-config is set
     let path = cli.path.as_deref().unwrap();
+
+    // Overwriting originals in place is the default; --no-overwrite opts out.
+    let overwrite = !cli.no_overwrite;
 
     // Register CTRL-C handler: first press cancels gracefully, second force-exits
     ctrlc::set_handler(move || {
@@ -484,7 +487,7 @@ fn main() -> Result<()> {
                                 // Never rename a .transcoded file back over a disc image —
                                 // the ISO/IMG is the source, not the destination.
                                 let is_disc = iso_p.is_some();
-                                if cli.overwrite && !is_disc {
+                                if overwrite && !is_disc {
                                     // Adopt: replace original with existing transcoded file
                                     match transcode::replace_original(
                                         file,
@@ -644,7 +647,6 @@ fn main() -> Result<()> {
     let next_idx = Arc::new(AtomicU32::new(0));
     let cfg = Arc::new(cfg);
     let gpu = Arc::new(gpu);
-    let overwrite = cli.overwrite;
     let output_dir = cli.output_dir.clone();
 
     std::thread::scope(|s| {
