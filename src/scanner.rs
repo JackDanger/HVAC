@@ -55,9 +55,9 @@ pub fn scan(root: &Path, extensions: &[String]) -> Result<Vec<PathBuf>> {
     let mut files: Vec<PathBuf> = all_files
         .into_iter()
         .filter(|path| {
-            // Skip hvecuum temporary and transcoded output files
+            // Skip HEVCuum temporary and transcoded output files
             if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if name.starts_with(".hvecuum_tmp_") {
+                if name.starts_with(".HEVCuum_tmp_") {
                     return false;
                 }
                 if name.contains(".transcoded.") {
@@ -149,7 +149,7 @@ mod tests {
     fn test_scan_skips_tmp_files() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("episode.mkv"), "fake").unwrap();
-        fs::write(dir.path().join(".hvecuum_tmp_episode.mkv"), "fake").unwrap();
+        fs::write(dir.path().join(".HEVCuum_tmp_episode.mkv"), "fake").unwrap();
 
         let exts = vec!["mkv".to_string()];
         let files = scan(dir.path(), &exts).unwrap();

@@ -1,11 +1,11 @@
 .PHONY: build test clean run
 
 CARGO := cargo
-TARGET := target/release/hvecuum
+TARGET := target/release/HEVCuum
 
 build:
 	$(CARGO) build --release
-	ln -sf $(TARGET) hvecuum
+	ln -sf $(TARGET) HEVCuum
 
 test:
 	$(CARGO) test -- --nocapture

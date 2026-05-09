@@ -1,5 +1,5 @@
 ---
-description: Project-wide rules for hvecuum development
+description: Project-wide rules for HEVCuum development
 globs: "**/*"
 ---
 

@@ -38,7 +38,7 @@ case "${1:-build}" in
         # skip the -- separator if present
         [[ "${1:-}" == "--" ]] && shift
         remote_cmd make build
-        remote_cmd "./target/release/hvecuum $*"
+        remote_cmd "./target/release/HEVCuum $*"
         ;;
     sync)
         sync_code

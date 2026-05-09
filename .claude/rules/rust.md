@@ -1,5 +1,5 @@
 ---
-description: Rust coding conventions for hvecuum
+description: Rust coding conventions for HEVCuum
 globs: "**/*.rs"
 ---
 
