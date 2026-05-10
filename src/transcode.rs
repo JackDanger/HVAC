@@ -470,12 +470,28 @@ pub fn transcode_iso(
         bail!("ffmpeg failed ({}): {}", status, context);
     }
 
-    // Validate output (can't compare to source size for ISO streams,
-    // just check it's non-empty and has valid duration)
+    // Validate output. We can't compare to source size for ISO streams (the
+    // ISO bytes piped in are not the same as the file's effective payload),
+    // so we apply the same bitrate-floor check used for direct files.
     let out_meta = std::fs::metadata(&final_output).context("Output file does not exist")?;
     if out_meta.len() == 0 {
         let _ = std::fs::remove_file(&final_output);
         bail!("Output file is empty");
+    }
+
+    // Lower bound: 50 kbps × duration. See validate_output() for rationale.
+    const MIN_KBPS_FLOOR: u64 = 50;
+    let expected_min_bytes =
+        (source_duration_secs as u64).saturating_mul(MIN_KBPS_FLOOR * 1000 / 8);
+    let floor = expected_min_bytes.max(64 * 1024);
+    if out_meta.len() < floor {
+        let _ = std::fs::remove_file(&final_output);
+        bail!(
+            "Output suspiciously small: {} bytes; expected at least {} bytes for {:.0}s duration",
+            out_meta.len(),
+            floor,
+            source_duration_secs
+        );
     }
 
     let out_info = probe::probe_file(&final_output).context("ffprobe cannot read output file")?;
@@ -535,12 +551,29 @@ fn validate_output(output: &Path, source: &Path, source_duration_secs: f64) -> R
         bail!("Output file is empty");
     }
 
-    let src_meta = std::fs::metadata(source).context("Source file disappeared")?;
-    if out_meta.len() < src_meta.len() / 100 {
+    // Confirm source still exists (we may rely on it later) but don't compare
+    // by size ratio — see the bitrate-floor reasoning below.
+    let _ = std::fs::metadata(source).context("Source file disappeared")?;
+
+    // Lower bound: 50 kbps × duration. A real video+audio HEVC encode never goes
+    // below this even at extreme compression. Pure source-size ratios false-trip
+    // on heavy compression (e.g. 4K HDR Blu-ray → 1080p mobile profile produces
+    // ~1-2% of source size, which is legitimate). 50 kbps is well below the
+    // floor of any real-world HEVC output: even speech-only audio runs ~32 kbps
+    // and HEVC video at any usable quality is at least tens of kbps on top.
+    // Anything below this is almost certainly a truncated/corrupt encode.
+    const MIN_KBPS_FLOOR: u64 = 50;
+    let expected_min_bytes =
+        (source_duration_secs as u64).saturating_mul(MIN_KBPS_FLOOR * 1000 / 8);
+    // Also enforce a 64KB absolute floor to catch trivially tiny outputs even
+    // when duration is unknown (0) or very short.
+    let floor = expected_min_bytes.max(64 * 1024);
+    if out_meta.len() < floor {
         bail!(
-            "Output file is suspiciously small ({} bytes vs {} bytes source)",
+            "Output suspiciously small: {} bytes; expected at least {} bytes for {:.0}s duration",
             out_meta.len(),
-            src_meta.len()
+            floor,
+            source_duration_secs
         );
     }
 
@@ -999,5 +1032,98 @@ Conversion failed!
     fn test_summarize_handles_empty() {
         assert_eq!(summarize_ffmpeg_error(""), "unknown error");
         assert_eq!(summarize_ffmpeg_error("\n\n   \n"), "unknown error");
+    }
+
+    /// Helper: write `bytes` zero bytes to `path`. We need an actual file since
+    /// validate_output stats it; an ffprobe-readable output isn't required for
+    /// the size-floor checks we want to exercise (those bail before ffprobe).
+    fn write_zeros(path: &Path, bytes: u64) {
+        use std::io::Write;
+        let mut f = std::fs::File::create(path).unwrap();
+        let chunk = vec![0u8; 64 * 1024];
+        let mut remaining = bytes;
+        while remaining > 0 {
+            let n = remaining.min(chunk.len() as u64) as usize;
+            f.write_all(&chunk[..n]).unwrap();
+            remaining -= n as u64;
+        }
+    }
+
+    #[test]
+    fn test_validate_output_rejects_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.mkv");
+        let output = dir.path().join("output.mkv");
+        write_zeros(&source, 100 * 1024 * 1024); // 100 MB source
+        write_zeros(&output, 0); // empty output
+        let err = validate_output(&output, &source, 60.0).unwrap_err();
+        assert!(
+            err.to_string().contains("empty"),
+            "expected empty-file error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_output_rejects_tiny_nonempty_output() {
+        // A 1KB output for a 60s source: well below the 50 kbps × 60s = 375KB floor.
+        // The previous "1% of source size" check would have *passed* this for a small
+        // source; the new check correctly rejects it as truncation/corruption.
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.mkv");
+        let output = dir.path().join("output.mkv");
+        write_zeros(&source, 50 * 1024); // 50KB source — old check would allow tiny outputs
+        write_zeros(&output, 1024); // 1KB output
+        let err = validate_output(&output, &source, 60.0).unwrap_err();
+        assert!(
+            err.to_string().contains("suspiciously small"),
+            "expected size-floor error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_output_passes_size_floor_for_60s_at_50kbps() {
+        // For a 60s source, 50 kbps × 60s / 8 = 375,000 bytes. An output at or above
+        // that size should clear the size-floor check (it'll fail later on ffprobe
+        // since we wrote zeros, but that's a separate later step). Using 400KB to
+        // be comfortably above the floor.
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.mkv");
+        let output = dir.path().join("output.mkv");
+        write_zeros(&source, 100 * 1024 * 1024); // arbitrary large source
+        write_zeros(&output, 400 * 1024); // 400KB > 375KB floor
+
+        // We expect validate_output to fail on a *later* check (ffprobe) but
+        // crucially NOT on the size floor. Distinguish by error message.
+        let err = validate_output(&output, &source, 60.0).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("suspiciously small"),
+            "size-floor check should pass for 400KB / 60s; got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_validate_output_passes_heavy_compression_ratio() {
+        // The motivating case: a heavily-compressed output that's <1% of source
+        // size used to false-trip the old `out_size < src_size / 100` check.
+        // With the new bitrate-floor check that ratio is irrelevant; only the
+        // bytes-per-second of the output matters.
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.mkv");
+        let output = dir.path().join("output.mkv");
+        // 100 MB "source" stand-in, 800 KB output (0.8% ratio — old check rejects).
+        // 800 KB over 60s ≈ 109 kbps, comfortably above the 50 kbps floor.
+        write_zeros(&source, 100 * 1024 * 1024);
+        write_zeros(&output, 800 * 1024);
+        let err = validate_output(&output, &source, 60.0).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("suspiciously small"),
+            "heavy compression should not trip the size floor; got: {}",
+            msg
+        );
     }
 }
