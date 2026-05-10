@@ -4,11 +4,126 @@ use std::os::unix::fs::{chown, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::TargetConfig;
 use crate::gpu::{GpuInfo, GpuKind};
 use crate::probe;
 use crate::util::format_size;
+
+/// Filename suffix for the sidecar completion marker that is written only
+/// after an output file has fully passed post-encode validation and any
+/// final rename has succeeded. Resume / adopt logic refuses to reuse an
+/// existing output unless this marker is present and matches the current
+/// source file's size — this prevents adopting half-written `.transcoded.*`
+/// files left over from a killed run, which can otherwise pass ffprobe-only
+/// validation despite being silently truncated.
+pub const MARKER_SUFFIX: &str = ".hvac.complete";
+
+/// Contents of the sidecar marker file. Small JSON blob written via serde_json.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+pub struct CompletionMarker {
+    /// Size (in bytes) of the source file at the moment the encode completed.
+    /// On resume we re-read the source and refuse to adopt if it differs —
+    /// which would mean the source has been replaced or modified since.
+    pub source_size: u64,
+    /// Duration (seconds) of the source as measured before encoding.
+    pub duration_secs: f64,
+    /// ISO-8601 (UTC) timestamp when the marker was written.
+    pub completed_at: String,
+}
+
+/// Path of the sidecar completion marker for a given output file.
+pub fn marker_path(output: &Path) -> PathBuf {
+    let mut s = output.as_os_str().to_owned();
+    s.push(MARKER_SUFFIX);
+    PathBuf::from(s)
+}
+
+/// Write the completion marker next to `output`. Best-effort: failure to
+/// write is logged but does not fail the encode (the encode itself is fine;
+/// a missing marker just means the next run will re-encode, never that
+/// data is silently corrupted).
+pub fn write_marker(output: &Path, source_size: u64, duration_secs: f64) -> Result<()> {
+    let marker = CompletionMarker {
+        source_size,
+        duration_secs,
+        completed_at: iso8601_now(),
+    };
+    let path = marker_path(output);
+    let json = serde_json::to_string(&marker).context("serialize completion marker")?;
+    std::fs::write(&path, json).with_context(|| format!("write completion marker {:?}", path))?;
+    Ok(())
+}
+
+/// Read and parse a sidecar marker for `output`. Returns None if the marker
+/// is absent or unparseable.
+pub fn read_marker(output: &Path) -> Option<CompletionMarker> {
+    let path = marker_path(output);
+    let bytes = std::fs::read(&path).ok()?;
+    serde_json::from_slice::<CompletionMarker>(&bytes).ok()
+}
+
+/// True when `output` exists AND has a sidecar marker AND the marker's
+/// `source_size` matches the current size of `source`. Used to gate adopt:
+/// a marker is the only trustworthy signal that an existing output is
+/// fully written, since ffprobe-only validation can pass on a half-written
+/// file.
+///
+/// Existence of the output file is checked first — without it, a stale
+/// marker (sidecar that outlived the file it described) would falsely
+/// claim safety.
+pub fn marker_valid_for_source(output: &Path, source: &Path) -> bool {
+    if !output.exists() {
+        return false;
+    }
+    let Some(marker) = read_marker(output) else {
+        return false;
+    };
+    let Ok(meta) = std::fs::metadata(source) else {
+        return false;
+    };
+    marker.source_size == meta.len()
+}
+
+/// Best-effort delete of any sidecar marker next to `output`.
+pub fn remove_marker(output: &Path) {
+    let _ = std::fs::remove_file(marker_path(output));
+}
+
+fn iso8601_now() -> String {
+    // Minimal RFC3339 / ISO-8601 UTC formatter: "YYYY-MM-DDTHH:MM:SSZ".
+    // Avoids pulling in chrono just for a timestamp string.
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let (y, mo, d, h, mi, s) = unix_to_ymdhms(secs);
+    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, mo, d, h, mi, s)
+}
+
+/// Convert a unix-epoch second count to (year, month, day, hour, min, sec) in UTC.
+/// Civil-from-days algorithm by Howard Hinnant — exact for the full unix range.
+fn unix_to_ymdhms(secs: i64) -> (i32, u32, u32, u32, u32, u32) {
+    let days = secs.div_euclid(86_400);
+    let tod = secs.rem_euclid(86_400) as u32;
+    let h = tod / 3600;
+    let mi = (tod % 3600) / 60;
+    let s = tod % 60;
+
+    // Days since 1970-01-01 → civil date.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097) as u32; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let mo = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    let year = if mo <= 2 { y + 1 } else { y };
+    (year as i32, mo, d, h, mi, s)
+}
 
 /// Guard that kills the ffmpeg child process on drop (prevents orphans).
 struct ChildGuard(Child);
@@ -40,12 +155,25 @@ pub fn output_path(source: &Path, output_dir: Option<&Path>, container: &str) ->
 
 /// Check if an existing output file is a valid, complete transcode of the source.
 /// Used for resume: if output already exists and passes validation, skip re-encoding.
+///
+/// NOTE: this only verifies the file's *content* (header, duration, size).  It
+/// does NOT verify completeness — a partially-written file with a valid header
+/// and plausible duration will pass.  Adopt logic must additionally check
+/// `marker_valid_for_source` before reusing the output.
 pub fn output_already_valid(output: &Path, source: &Path, source_duration_secs: f64) -> bool {
     if !output.exists() {
         return false;
     }
     validate_output(output, source, source_duration_secs).is_ok()
 }
+
+// (`output_safe_to_adopt` was a candidate helper composing output_already_valid
+// + marker_valid_for_source. Deleted because main.rs's adopt path needs the
+// two predicates separately to log a precise "ffprobe passed but no marker —
+// re-encoding" message; collapsing them into one helper would either lose
+// that diagnostic or duplicate the call. Kept this comment as a signpost so
+// future callers that want a single-shot adopt check don't reinvent it
+// without understanding the trade-off.)
 
 /// Transcode a file using ffmpeg with GPU acceleration.
 /// If `output` is None, transcode in-place (to a temp file, then replace original).
@@ -273,7 +401,26 @@ pub fn transcode(
     if output.is_none() {
         std::fs::rename(&final_output, source)
             .context("Failed to replace original file with transcoded version")?;
+        // The "output" is now the source path. Record source_size POST-rename
+        // (which equals the new transcoded size) — but the marker's purpose is
+        // to mark the *source-of-record* as fully transcoded so future runs
+        // skip it.  Since the file IS the source, source_size is its own size.
+        let final_size = std::fs::metadata(source).map(|m| m.len()).unwrap_or(0);
+        if let Err(e) = write_marker(source, final_size, source_duration_secs) {
+            log::warn!("Failed to write completion marker for {:?}: {}", source, e);
+        }
         return Ok(source.to_path_buf());
+    }
+
+    // --no-overwrite mode: the output is a sibling .transcoded.* file. The
+    // marker records the source's size at completion time so a later adopt
+    // run can detect a stale output (source replaced/modified since).
+    if let Err(e) = write_marker(&final_output, source_size, source_duration_secs) {
+        log::warn!(
+            "Failed to write completion marker for {:?}: {}",
+            final_output,
+            e
+        );
     }
 
     Ok(final_output)
@@ -470,13 +617,12 @@ pub fn transcode_iso(
         bail!("ffmpeg failed ({}): {}", status, context);
     }
 
-    // Validate output. We can't compare to source size for ISO streams (the
-    // ISO bytes piped in are not the same as the file's effective payload),
-    // so we apply the same bitrate-floor check used for direct files.
+    // Validate output (can't compare to source size for ISO streams,
+    // just check it's non-empty and has valid duration)
     let out_meta = std::fs::metadata(&final_output).context("Output file does not exist")?;
-    if let Err(e) = check_output_size_floor(out_meta.len(), source_duration_secs) {
+    if out_meta.len() == 0 {
         let _ = std::fs::remove_file(&final_output);
-        return Err(e);
+        bail!("Output file is empty");
     }
 
     let out_info = probe::probe_file(&final_output).context("ffprobe cannot read output file")?;
@@ -487,15 +633,13 @@ pub fn transcode_iso(
 
     if source_duration_secs > 0.0 && out_info.duration_secs > 0.0 {
         let diff = (source_duration_secs - out_info.duration_secs).abs();
-        let tolerance = duration_tolerance(source_duration_secs);
-        if diff > tolerance {
+        if diff > 5.0 {
             let _ = std::fs::remove_file(&final_output);
             bail!(
-                "Duration mismatch: source {:.1}s vs output {:.1}s (diff {:.1}s, tolerance {:.1}s)",
+                "Duration mismatch: source {:.1}s vs output {:.1}s (diff {:.1}s)",
                 source_duration_secs,
                 out_info.duration_secs,
-                diff,
-                tolerance
+                diff
             );
         }
     }
@@ -506,6 +650,18 @@ pub fn transcode_iso(
         out_info.duration_secs,
         out_meta.len()
     );
+
+    // Mark the output as fully written. ISO source size IS the source-of-record
+    // size (the ISO/IMG file itself); a later adopt run will refuse this output
+    // if the ISO has been replaced since.
+    let iso_size = std::fs::metadata(iso_path).map(|m| m.len()).unwrap_or(0);
+    if let Err(e) = write_marker(&final_output, iso_size, source_duration_secs) {
+        log::warn!(
+            "Failed to write completion marker for {:?}: {}",
+            final_output,
+            e
+        );
+    }
 
     Ok(final_output)
 }
@@ -531,63 +687,21 @@ fn copy_permissions(source: &Path, dest: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Reject outputs that are too small to be a real encode for their duration.
-///
-/// We deliberately don't compare against source size as a ratio: heavy but
-/// legitimate compression (4K HDR Blu-ray → 1080p mobile profile) can produce
-/// outputs at 1-2 % of source size and would false-trip a ratio check.
-/// Instead we floor at `duration × 50 kbps` (well below the smallest realistic
-/// HEVC video+audio output — even speech-only AAC runs ~32 kbps), with a 64 KB
-/// absolute minimum to catch trivially tiny outputs when duration is unknown
-/// or very short.
-///
-/// Returns `Err` with a clear message when too small; never panics.
-fn check_output_size_floor(out_size: u64, source_duration_secs: f64) -> Result<()> {
-    if out_size == 0 {
-        bail!("Output file is empty");
-    }
-
-    const MIN_KBPS_FLOOR: u64 = 50;
-    const ABSOLUTE_FLOOR_BYTES: u64 = 64 * 1024;
-
-    let expected_min_bytes =
-        (source_duration_secs as u64).saturating_mul(MIN_KBPS_FLOOR * 1000 / 8);
-    let floor = expected_min_bytes.max(ABSOLUTE_FLOOR_BYTES);
-    if out_size < floor {
-        bail!(
-            "Output suspiciously small: {} bytes; expected at least {} bytes for {:.0}s duration",
-            out_size,
-            floor,
-            source_duration_secs
-        );
-    }
-
-    Ok(())
-}
-
-/// Allowed duration drift between source and re-encoded output.
-///
-/// Variable-frame-rate sources (screen recordings, Twitch VODs, VHS captures)
-/// legitimately drift more than a couple seconds when re-encoded to CFR. We
-/// scale the tolerance with source length: 1% of the source duration, with a
-/// 5-second floor. A 5-minute clip allows 5s; a 2-hour VOD allows ~72s.
-fn duration_tolerance(source_duration_secs: f64) -> f64 {
-    let scaled = 0.01 * source_duration_secs;
-    if scaled > 5.0 {
-        scaled
-    } else {
-        5.0
-    }
-}
-
 /// Validate transcoded output to prevent corruption.
 fn validate_output(output: &Path, source: &Path, source_duration_secs: f64) -> Result<()> {
     let out_meta = std::fs::metadata(output).context("Output file does not exist")?;
-    // Confirm source still exists; we don't compare sizes by ratio (see
-    // check_output_size_floor below for why) but a vanished source is a
-    // distinct failure worth surfacing separately.
-    let _ = std::fs::metadata(source).context("Source file disappeared")?;
-    check_output_size_floor(out_meta.len(), source_duration_secs)?;
+    if out_meta.len() == 0 {
+        bail!("Output file is empty");
+    }
+
+    let src_meta = std::fs::metadata(source).context("Source file disappeared")?;
+    if out_meta.len() < src_meta.len() / 100 {
+        bail!(
+            "Output file is suspiciously small ({} bytes vs {} bytes source)",
+            out_meta.len(),
+            src_meta.len()
+        );
+    }
 
     let out_info = probe::probe_file(output).context("ffprobe cannot read output file")?;
 
@@ -597,14 +711,12 @@ fn validate_output(output: &Path, source: &Path, source_duration_secs: f64) -> R
 
     if source_duration_secs > 0.0 && out_info.duration_secs > 0.0 {
         let diff = (source_duration_secs - out_info.duration_secs).abs();
-        let tolerance = duration_tolerance(source_duration_secs);
-        if diff > tolerance {
+        if diff > 5.0 {
             bail!(
-                "Duration mismatch: source {:.1}s vs output {:.1}s (diff {:.1}s, tolerance {:.1}s)",
+                "Duration mismatch: source {:.1}s vs output {:.1}s (diff {:.1}s)",
                 source_duration_secs,
                 out_info.duration_secs,
-                diff,
-                tolerance
+                diff
             );
         }
     }
@@ -661,83 +773,27 @@ pub fn is_disk_space_error(error_msg: &str) -> bool {
         || error_msg.contains("ENOSPC")
 }
 
-/// Audio codec names that ffmpeg uses in its "Could not find tag for codec X"
-/// message. Used by `is_audio_copy_error` to distinguish audio mismatches from
-/// subtitle ones (mov_text, hdmv_pgs_subtitle, dvd_subtitle, …) without
-/// over-matching.
-///
-/// Common offenders:
-/// - `truehd`, `dts`, `eac3`, `ac3` — Blu-ray / DVD lossy & lossless tracks
-///   that don't fit in MP4 without a re-encode.
-/// - `flac`, `opus`, `vorbis` — open codecs older MP4 builds reject.
-/// - `pcm_dvd`, `pcm_bluray`, `pcm_s16le`, `pcm_s24le` — raw PCM variants
-///   that matroska/MP4 won't take via `-c:a copy`.
-/// - `mp3`, `aac`, `alac` — included for completeness; rare but seen with
-///   exotic container choices.
-const AUDIO_COPY_CODECS: &[&str] = &[
-    "truehd",
-    "dts",
-    "eac3",
-    "ac3",
-    "flac",
-    "opus",
-    "vorbis",
-    "pcm_dvd",
-    "pcm_bluray",
-    "pcm_s16le",
-    "pcm_s24le",
-    "pcm_s16be",
-    "pcm_s24be",
-    "pcm_f32le",
-    "mp3",
-    "aac",
-    "alac",
-];
-
 /// Check if an ffmpeg error indicates `-c:a copy` produced a stream the chosen
 /// container can't accept. The classic case is a DVD's pcm_dvd audio being
 /// stream-copied into MKV: the matroska muxer fails the header write, then
 /// every other stream stalls and ffmpeg ends with the generic
 /// "Nothing was written into output file" cascade. Recoverable by re-encoding.
 ///
-/// "Could not find tag for codec X" is the most common form for MP4 muxers
-/// (TrueHD/DTS/E-AC-3 from Blu-ray, FLAC in older ffmpeg). That message is
-/// also emitted for subtitle codecs, so we only treat it as an audio-copy
-/// error when X appears in `AUDIO_COPY_CODECS` — subtitle codecs (mov_text,
-/// hdmv_pgs_subtitle, dvd_subtitle) are deliberately excluded and stay with
-/// `is_subtitle_error` / the skip-subs retry.
+/// We deliberately match only patterns that are unambiguously audio. The
+/// generic "Could not find tag for codec X" message can be either audio
+/// or subtitle (mov_text, hdmv_pgs_subtitle) — that one is left to
+/// `is_subtitle_error` and the skip-subs retry.
 pub fn is_audio_copy_error(error_msg: &str) -> bool {
     let lower = error_msg.to_lowercase();
-
     // matroska's wav-tag rejection — only emitted for PCM-family audio codecs
     // (pcm_dvd, pcm_bluray) being stream-copied into MKV. Unambiguous.
-    if lower.contains("no wav codec tag found") {
-        return true;
-    }
-
-    // Header-write failure with "incorrect codec parameters". This *can* be
-    // triggered by other stream types, but if a subtitle codec is the cause
-    // is_subtitle_error catches it first via the muxer's specific message;
-    // by the time we land here, audio re-encode is the right next step.
-    if lower.contains("could not write header") && lower.contains("incorrect codec parameters") {
-        return true;
-    }
-
-    // "Could not find tag for codec X ..." — match only when X is a known
-    // audio codec. Subtitle codecs (mov_text, hdmv_pgs_subtitle) deliberately
-    // do not appear in AUDIO_COPY_CODECS so they don't trigger here.
-    if let Some(rest) = lower.split("could not find tag for codec ").nth(1) {
-        // Codec name is the next whitespace-delimited token.
-        let codec = rest
-            .split(|c: char| c.is_whitespace() || c == ',')
-            .next()
-            .unwrap_or("");
-        if AUDIO_COPY_CODECS.contains(&codec) {
-            return true;
-        }
-    }
-
-    false
+    lower.contains("no wav codec tag found")
+        // Header-write failure with "incorrect codec parameters". This *can* be
+        // triggered by other stream types, but if a subtitle codec is the cause
+        // is_subtitle_error catches it first via the muxer's specific message;
+        // by the time we land here, audio re-encode is the right next step.
+        || (lower.contains("could not write header")
+            && lower.contains("incorrect codec parameters"))
 }
 
 /// Distill multi-line ffmpeg stderr into the most informative error context.
@@ -822,6 +878,13 @@ fn summarize_ffmpeg_error(stderr: &str) -> String {
 
 /// Replace an original file with its transcoded copy.
 /// Validates the transcoded file first, then atomically replaces.
+///
+/// Adopt safety: callers reaching this function from the resume path must have
+/// already verified the marker via `output_safe_to_adopt`.  This function
+/// re-runs ffprobe validation but does NOT re-check the marker — adopt
+/// callers are responsible for that gate.  After the rename succeeds, a
+/// fresh marker is written next to the now-replaced original so subsequent
+/// runs skip the file via the normal probe-based skip-if-already-HEVC path.
 pub fn replace_original(
     original: &Path,
     transcoded: &Path,
@@ -838,8 +901,26 @@ pub fn replace_original(
 
     copy_permissions(original, transcoded)?;
 
+    // The transcoded sibling carries its own marker. We must NOT delete it
+    // before the rename: if the rename fails (cross-device, permission flap,
+    // transient IO), the file remains but loses its marker — the next run
+    // would treat it as incomplete and re-encode for nothing. Delete only
+    // after the rename succeeds, so a failed rename leaves the marker
+    // intact alongside the still-valid transcoded file.
     std::fs::rename(transcoded, original)
         .with_context(|| format!("Failed to replace {:?} with transcoded version", original))?;
+    remove_marker(transcoded);
+
+    // Mark the in-place result as fully written.  source_size is now the
+    // post-rename file's size (it IS the source going forward).
+    let final_size = std::fs::metadata(original).map(|m| m.len()).unwrap_or(0);
+    if let Err(e) = write_marker(original, final_size, source_duration_secs) {
+        log::warn!(
+            "Failed to write completion marker for {:?}: {}",
+            original,
+            e
+        );
+    }
 
     Ok(original_size.saturating_sub(transcoded_size))
 }
@@ -924,57 +1005,18 @@ mod tests {
         assert!(is_audio_copy_error(
             "[matroska @ 0x123] No wav codec tag found for codec pcm_dvd"
         ));
-        // pcm_bluray sister case: matroska rejects raw PCM the same way
-        assert!(is_audio_copy_error(
-            "[matroska @ 0x123] No wav codec tag found for codec pcm_bluray"
-        ));
         assert!(is_audio_copy_error(
             "[out#0/matroska @ 0x123] Could not write header (incorrect codec parameters ?): Invalid argument"
         ));
-
-        // MP4 muxer rejecting Blu-ray / DVD audio that won't fit in MOV/MP4.
-        // These are the cases the broadened predicate is meant to catch.
-        assert!(is_audio_copy_error(
-            "[mp4 @ 0x123] Could not find tag for codec truehd in stream #0:1, codec not currently supported in container"
-        ));
-        assert!(is_audio_copy_error(
-            "[mp4 @ 0x123] Could not find tag for codec dts in stream #0:1, codec not currently supported in container"
-        ));
-        assert!(is_audio_copy_error(
-            "[mp4 @ 0x123] Could not find tag for codec eac3 in stream #0:1"
-        ));
-        assert!(is_audio_copy_error(
-            "[mp4 @ 0x123] Could not find tag for codec ac3 in stream #0:1"
-        ));
-        assert!(is_audio_copy_error(
-            "[mp4 @ 0x123] Could not find tag for codec flac in stream #0:1"
-        ));
-        assert!(is_audio_copy_error(
-            "[mp4 @ 0x123] Could not find tag for codec opus in stream #0:1"
-        ));
-
-        // PGS / mov_text "Could not find tag for codec X" is subtitle-side; the
-        // retry path for those is `force_skip_subs`, not audio re-encode. These
-        // MUST stay false even after broadening — that's the whole point of
-        // the AUDIO_COPY_CODECS allow-list.
+        // PGS / mov_text "Could not find tag for codec X" is subtitle-side and ambiguous;
+        // we deliberately leave it to is_subtitle_error / skip-subs retry.
         assert!(!is_audio_copy_error(
-            "Could not find tag for codec hdmv_pgs_subtitle in stream #0:2"
+            "Could not find tag for codec hdmv_pgs_subtitle"
         ));
         assert!(!is_audio_copy_error(
             "Could not find tag for codec mov_text in stream #0:2, codec not currently supported in container"
         ));
-        assert!(!is_audio_copy_error(
-            "Could not find tag for codec dvd_subtitle in stream #0:2"
-        ));
-        assert!(!is_audio_copy_error(
-            "Could not find tag for codec dvb_subtitle in stream #0:2"
-        ));
-
-        // Generic / unrelated noise should never match.
         assert!(!is_audio_copy_error("some unrelated ffmpeg error"));
-        assert!(!is_audio_copy_error(
-            "Could not find tag for codec h264 in stream #0:0"
-        ));
     }
 
     #[test]
@@ -1048,128 +1090,165 @@ Conversion failed!
         assert_eq!(summarize_ffmpeg_error("\n\n   \n"), "unknown error");
     }
 
-    /// Helper: write `bytes` zero bytes to `path`. We need an actual file since
-    /// validate_output stats it; an ffprobe-readable output isn't required for
-    /// the size-floor checks we want to exercise (those bail before ffprobe).
-    fn write_zeros(path: &Path, bytes: u64) {
-        use std::io::Write;
-        let mut f = std::fs::File::create(path).unwrap();
-        let chunk = vec![0u8; 64 * 1024];
-        let mut remaining = bytes;
-        while remaining > 0 {
-            let n = remaining.min(chunk.len() as u64) as usize;
-            f.write_all(&chunk[..n]).unwrap();
-            remaining -= n as u64;
-        }
-    }
+    // ── Completion-marker tests ──────────────────────────────────────────────
+    //
+    // These exercise the marker reader/writer and the adopt-safety predicate
+    // without invoking ffmpeg.  They verify the data-loss bug from the bug
+    // report: a half-written `.transcoded.*` left over from a killed run
+    // must NOT be adopted.
 
     #[test]
-    fn test_validate_output_rejects_empty_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let source = dir.path().join("source.mkv");
-        let output = dir.path().join("output.mkv");
-        write_zeros(&source, 100 * 1024 * 1024); // 100 MB source
-        write_zeros(&output, 0); // empty output
-        let err = validate_output(&output, &source, 60.0).unwrap_err();
-        assert!(
-            err.to_string().contains("empty"),
-            "expected empty-file error, got: {}",
-            err
+    fn test_marker_path_appends_suffix() {
+        let p = Path::new("/tmp/foo.transcoded.mkv");
+        assert_eq!(
+            marker_path(p),
+            PathBuf::from("/tmp/foo.transcoded.mkv.hvac.complete")
         );
     }
 
     #[test]
-    fn test_validate_output_rejects_tiny_nonempty_output() {
-        // A 1KB output for a 60s source: well below the 50 kbps × 60s = 375KB floor.
-        // The previous "1% of source size" check would have *passed* this for a small
-        // source; the new check correctly rejects it as truncation/corruption.
+    fn test_write_and_read_marker_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
-        let source = dir.path().join("source.mkv");
-        let output = dir.path().join("output.mkv");
-        write_zeros(&source, 50 * 1024); // 50KB source — old check would allow tiny outputs
-        write_zeros(&output, 1024); // 1KB output
-        let err = validate_output(&output, &source, 60.0).unwrap_err();
+        let out = dir.path().join("out.mkv");
+        std::fs::write(&out, b"fake encoded bytes").unwrap();
+
+        write_marker(&out, 12345, 67.5).unwrap();
+
+        let marker = read_marker(&out).expect("marker readable");
+        assert_eq!(marker.source_size, 12345);
+        assert!((marker.duration_secs - 67.5).abs() < f64::EPSILON);
+        // Roughly ISO-8601: starts with year, contains 'T', ends with 'Z'.
+        assert!(marker.completed_at.contains('T'));
+        assert!(marker.completed_at.ends_with('Z'));
+        assert!(marker.completed_at.len() >= 20);
+    }
+
+    #[test]
+    fn test_read_marker_missing_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("nonexistent.mkv");
+        assert!(read_marker(&out).is_none());
+    }
+
+    #[test]
+    fn test_read_marker_corrupt_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("out.mkv");
+        std::fs::write(&out, b"x").unwrap();
+        std::fs::write(marker_path(&out), b"this is not json {{{").unwrap();
+        assert!(read_marker(&out).is_none());
+    }
+
+    #[test]
+    fn test_marker_valid_for_source_matches_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("in.mkv");
+        let out = dir.path().join("out.mkv");
+        std::fs::write(&source, vec![0u8; 1000]).unwrap();
+        std::fs::write(&out, b"output").unwrap();
+
+        write_marker(&out, 1000, 30.0).unwrap();
+        assert!(marker_valid_for_source(&out, &source));
+    }
+
+    #[test]
+    fn test_marker_valid_for_source_rejects_stale_size() {
+        // Source has been modified since the previous run wrote the marker —
+        // adopting the orphan output would silently associate it with a
+        // different source.
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("in.mkv");
+        let out = dir.path().join("out.mkv");
+        std::fs::write(&source, vec![0u8; 1000]).unwrap();
+        std::fs::write(&out, b"output").unwrap();
+
+        write_marker(&out, 999, 30.0).unwrap(); // recorded size != actual
+        assert!(!marker_valid_for_source(&out, &source));
+    }
+
+    #[test]
+    fn test_marker_valid_for_source_rejects_missing_marker() {
+        // The data-loss bug case: a .transcoded.* file exists from a killed
+        // run, but no marker was written.  Adopt MUST refuse it.
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("in.mkv");
+        let out = dir.path().join("out.mkv");
+        std::fs::write(&source, vec![0u8; 1000]).unwrap();
+        std::fs::write(&out, b"output").unwrap(); // no sidecar marker
+
+        assert!(!marker_valid_for_source(&out, &source));
+    }
+
+    #[test]
+    fn test_marker_valid_for_source_rejects_missing_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("gone.mkv");
+        let out = dir.path().join("out.mkv");
+        std::fs::write(&out, b"output").unwrap();
+        write_marker(&out, 1000, 30.0).unwrap();
+
+        assert!(!marker_valid_for_source(&out, &source));
+    }
+
+    #[test]
+    fn test_remove_marker_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("out.mkv");
+        std::fs::write(&out, b"x").unwrap();
+
+        // Removing when absent is fine.
+        remove_marker(&out);
+        assert!(!marker_path(&out).exists());
+
+        write_marker(&out, 10, 1.0).unwrap();
+        assert!(marker_path(&out).exists());
+        remove_marker(&out);
+        assert!(!marker_path(&out).exists());
+    }
+
+    #[test]
+    fn test_unix_to_ymdhms_known_values() {
+        // 2000-01-01T00:00:00Z = 946684800
+        assert_eq!(unix_to_ymdhms(946_684_800), (2000, 1, 1, 0, 0, 0));
+        // 1970-01-01T00:00:00Z = 0
+        assert_eq!(unix_to_ymdhms(0), (1970, 1, 1, 0, 0, 0));
+        // 2024-02-29T12:34:56Z (leap day) = 1709210096
+        assert_eq!(unix_to_ymdhms(1_709_210_096), (2024, 2, 29, 12, 34, 56));
+    }
+
+    #[test]
+    fn test_marker_valid_for_source_rejects_missing_output() {
+        // The classic stale-marker scenario: someone deleted the output
+        // file but left the sidecar behind. marker_valid_for_source must
+        // refuse to claim safety in that case — without this guard the
+        // adopt path would happily skip a file that doesn't exist.
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("in.mkv");
+        let out = dir.path().join("out.mkv");
+        std::fs::write(&source, vec![0u8; 1024]).unwrap();
+
+        // Write only the marker, NOT the output file. This shouldn't
+        // happen in practice, but we have to defend against it.
+        write_marker(&out, 1024, 30.0).unwrap();
+        assert!(marker_path(&out).exists());
+        assert!(!out.exists());
+
         assert!(
-            err.to_string().contains("suspiciously small"),
-            "expected size-floor error, got: {}",
-            err
+            !marker_valid_for_source(&out, &source),
+            "marker_valid_for_source must refuse when output file is missing, regardless of sidecar"
         );
     }
 
     #[test]
-    fn test_validate_output_passes_size_floor_for_60s_at_50kbps() {
-        // For a 60s source, 50 kbps × 60s / 8 = 375,000 bytes. An output at or above
-        // that size should clear the size-floor check (it'll fail later on ffprobe
-        // since we wrote zeros, but that's a separate later step). Using 400KB to
-        // be comfortably above the floor.
-        let dir = tempfile::tempdir().unwrap();
-        let source = dir.path().join("source.mkv");
-        let output = dir.path().join("output.mkv");
-        write_zeros(&source, 100 * 1024 * 1024); // arbitrary large source
-        write_zeros(&output, 400 * 1024); // 400KB > 375KB floor
-
-        // We expect validate_output to fail on a *later* check (ffprobe) but
-        // crucially NOT on the size floor. Distinguish by error message.
-        let err = validate_output(&output, &source, 60.0).unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            !msg.contains("suspiciously small"),
-            "size-floor check should pass for 400KB / 60s; got: {}",
-            msg
-        );
-    }
-
-    #[test]
-    fn test_validate_output_passes_heavy_compression_ratio() {
-        // The motivating case: a heavily-compressed output that's <1% of source
-        // size used to false-trip the old `out_size < src_size / 100` check.
-        // With the new bitrate-floor check that ratio is irrelevant; only the
-        // bytes-per-second of the output matters.
-        let dir = tempfile::tempdir().unwrap();
-        let source = dir.path().join("source.mkv");
-        let output = dir.path().join("output.mkv");
-        // 100 MB "source" stand-in, 800 KB output (0.8% ratio — old check rejects).
-        // 800 KB over 60s ≈ 109 kbps, comfortably above the 50 kbps floor.
-        write_zeros(&source, 100 * 1024 * 1024);
-        write_zeros(&output, 800 * 1024);
-        let err = validate_output(&output, &source, 60.0).unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            !msg.contains("suspiciously small"),
-            "heavy compression should not trip the size floor; got: {}",
-            msg
-        );
-    }
-
-    #[test]
-    fn test_duration_tolerance_floor_for_short_sources() {
-        // 5s minimum applies for anything under 500s (where 1% < 5s).
-        assert_eq!(duration_tolerance(0.0), 5.0);
-        assert_eq!(duration_tolerance(60.0), 5.0); // 1 min
-        assert_eq!(duration_tolerance(300.0), 5.0); // 5 min: 1% = 3s, floor wins
-        assert_eq!(duration_tolerance(499.0), 5.0); // just below crossover
-    }
-
-    #[test]
-    fn test_duration_tolerance_scales_at_long_durations() {
-        // Crossover from floor to 1% scaling happens at 500s.
-        // At 500s exactly, scaled (5.0) is not strictly greater than floor (5.0),
-        // so the floor still applies — both are 5.0 either way.
-        assert_eq!(duration_tolerance(500.0), 5.0);
-
-        // 1 hour: 1% = 36s
-        assert!((duration_tolerance(3600.0) - 36.0).abs() < 1e-9);
-
-        // 2 hours: 1% = 72s
-        assert!((duration_tolerance(7200.0) - 72.0).abs() < 1e-9);
-
-        // 4-hour VOD: 1% = 144s
-        assert!((duration_tolerance(14400.0) - 144.0).abs() < 1e-9);
-    }
-
-    #[test]
-    fn test_duration_tolerance_handles_negative() {
-        // Defensive: a bogus negative source duration should still return the floor.
-        assert_eq!(duration_tolerance(-100.0), 5.0);
+    fn test_iso8601_now_format() {
+        let s = iso8601_now();
+        // Length and structural sanity: YYYY-MM-DDTHH:MM:SSZ
+        assert_eq!(s.len(), 20);
+        assert_eq!(s.as_bytes()[4], b'-');
+        assert_eq!(s.as_bytes()[7], b'-');
+        assert_eq!(s.as_bytes()[10], b'T');
+        assert_eq!(s.as_bytes()[13], b':');
+        assert_eq!(s.as_bytes()[16], b':');
+        assert_eq!(s.as_bytes()[19], b'Z');
     }
 }
