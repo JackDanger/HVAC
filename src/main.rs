@@ -936,6 +936,7 @@ fn main() -> Result<()> {
                 let mut session_retries = 0u32;
                 let mut disk_space_retries = 0u32;
                 let mut skip_subs = false;
+                let mut force_reencode_audio = false;
 
                 let last_err: Option<anyhow::Error> = loop {
                     if CANCELLED.load(Ordering::Relaxed) {
@@ -1017,6 +1018,7 @@ fn main() -> Result<()> {
                             Some(&my_slot.progress),
                             Some(&my_slot.speed),
                             skip_subs,
+                            force_reencode_audio,
                         )
                     } else {
                         transcode::transcode(
@@ -1030,6 +1032,7 @@ fn main() -> Result<()> {
                             Some(&my_slot.progress),
                             Some(&my_slot.speed),
                             skip_subs,
+                            force_reencode_audio,
                         )
                     };
 
@@ -1091,6 +1094,22 @@ fn main() -> Result<()> {
                                 my_slot.speed.store(0, Ordering::Relaxed);
                                 std::thread::sleep(std::time::Duration::from_secs(5));
                                 my_slot.disk_wait.store(false, Ordering::Relaxed);
+                                continue;
+                            }
+
+                            // Audio-copy error: matroska / wav-tag muxer rejecting a
+                            // copied stream (most commonly DVDs' pcm_dvd into MKV).
+                            // Checked BEFORE the subtitle/Nothing-written branch because
+                            // both produce a "Nothing was written" cascade — but here
+                            // the fix is re-encoding audio, not dropping subtitles.
+                            if transcode::is_audio_copy_error(&err_str) && !force_reencode_audio {
+                                force_reencode_audio = true;
+                                log::info!(
+                                    "{}: retrying with audio re-encode (source codec not muxable as copy)",
+                                    short_name
+                                );
+                                my_slot.progress.store(0, Ordering::Relaxed);
+                                my_slot.speed.store(0, Ordering::Relaxed);
                                 continue;
                             }
 

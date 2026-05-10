@@ -52,6 +52,8 @@ pub fn output_already_valid(output: &Path, source: &Path, source_duration_secs: 
 /// `source_bitrate_kbps` is used to cap the output so we never produce a larger file.
 /// `source_pix_fmt` is used to handle 10-bit content that needs pixel format conversion.
 /// If `progress` is provided, it's updated with 0-1000 as encoding progresses.
+/// If `force_reencode_audio` is true, the configured `audio_codec: copy` is overridden
+/// with `aac` — used to retry after a copy-incompatible codec (e.g. pcm_dvd → MKV) fails.
 #[allow(clippy::too_many_arguments)]
 pub fn transcode(
     source: &Path,
@@ -64,6 +66,7 @@ pub fn transcode(
     progress: Option<&AtomicU64>,
     speed: Option<&AtomicU64>,
     skip_subs: bool,
+    force_reencode_audio: bool,
 ) -> Result<PathBuf> {
     let final_output = match output {
         Some(p) => p.to_path_buf(),
@@ -135,7 +138,12 @@ pub fn transcode(
     }
 
     // Audio
-    cmd.args(["-c:a", &target.audio_codec]);
+    let audio_codec = if force_reencode_audio && target.audio_codec == "copy" {
+        AUDIO_REENCODE_FALLBACK
+    } else {
+        target.audio_codec.as_str()
+    };
+    cmd.args(["-c:a", audio_codec]);
 
     // Subtitles
     if !skip_subs && target.subtitle_codec == "copy" {
@@ -158,8 +166,13 @@ pub fn transcode(
     cmd.arg(&final_output);
 
     log::debug!(
-        "Running{}: {:?}",
+        "Running{}{}: {:?}",
         if skip_subs { " (no subs)" } else { "" },
+        if force_reencode_audio {
+            " (audio re-encode)"
+        } else {
+            ""
+        },
         cmd
     );
 
@@ -228,7 +241,7 @@ pub fn transcode(
 
     if !status.success() {
         let _ = std::fs::remove_file(&final_output);
-        let context = last_n_lines(&stderr_output, 3);
+        let context = summarize_ffmpeg_error(&stderr_output);
         bail!("ffmpeg failed ({}): {}", status, context);
     }
 
@@ -269,6 +282,8 @@ pub fn transcode(
 /// Transcode file(s) from inside an ISO by streaming them to ffmpeg via stdin.
 /// Multiple inner paths are concatenated sequentially (e.g. Blu-ray chapters).
 /// The ISO contents are piped directly to ffmpeg without extracting to disk.
+/// `force_reencode_audio` overrides `audio_codec: copy` with `aac` for retries
+/// after a copy-incompatible codec is detected.
 #[allow(clippy::too_many_arguments)]
 pub fn transcode_iso(
     iso_path: &Path,
@@ -282,6 +297,7 @@ pub fn transcode_iso(
     progress: Option<&AtomicU64>,
     speed: Option<&AtomicU64>,
     skip_subs: bool,
+    force_reencode_audio: bool,
 ) -> Result<PathBuf> {
     let final_output = output.to_path_buf();
 
@@ -340,7 +356,12 @@ pub fn transcode_iso(
     }
 
     // Audio
-    cmd.args(["-c:a", &target.audio_codec]);
+    let audio_codec = if force_reencode_audio && target.audio_codec == "copy" {
+        AUDIO_REENCODE_FALLBACK
+    } else {
+        target.audio_codec.as_str()
+    };
+    cmd.args(["-c:a", audio_codec]);
 
     // Subtitles
     if !skip_subs && target.subtitle_codec == "copy" {
@@ -363,8 +384,13 @@ pub fn transcode_iso(
     cmd.arg(&final_output);
 
     log::debug!(
-        "Running (piped from ISO{}): {:?}",
+        "Running (piped from ISO{}{}): {:?}",
         if skip_subs { ", no subs" } else { "" },
+        if force_reencode_audio {
+            ", audio re-encode"
+        } else {
+            ""
+        },
         cmd
     );
 
@@ -440,7 +466,7 @@ pub fn transcode_iso(
 
     if !status.success() {
         let _ = std::fs::remove_file(&final_output);
-        let context = last_n_lines(&stderr_output, 3);
+        let context = summarize_ffmpeg_error(&stderr_output);
         bail!("ffmpeg failed ({}): {}", status, context);
     }
 
@@ -546,6 +572,10 @@ fn validate_output(output: &Path, source: &Path, source_duration_secs: f64) -> R
     Ok(())
 }
 
+/// Audio codec used when `audio_codec: copy` produces a stream the chosen
+/// container can't accept (e.g. pcm_dvd in MKV). AAC is universally muxable.
+const AUDIO_REENCODE_FALLBACK: &str = "aac";
+
 /// Check if an ffmpeg error looks like an NVENC session limit issue.
 /// Matches NVENC-specific init errors and the "Nothing was written" pattern
 /// which is the most common manifestation of session exhaustion.
@@ -584,11 +614,102 @@ pub fn is_disk_space_error(error_msg: &str) -> bool {
         || error_msg.contains("ENOSPC")
 }
 
-/// Extract the last N non-empty lines from a string, joined by " | ".
-fn last_n_lines(s: &str, n: usize) -> String {
-    let lines: Vec<&str> = s.lines().filter(|l| !l.trim().is_empty()).collect();
-    let start = lines.len().saturating_sub(n);
-    let result = lines[start..].join(" | ");
+/// Check if an ffmpeg error indicates `-c:a copy` produced a stream the chosen
+/// container can't accept. The classic case is a DVD's pcm_dvd audio being
+/// stream-copied into MKV: the matroska muxer fails the header write, then
+/// every other stream stalls and ffmpeg ends with the generic
+/// "Nothing was written into output file" cascade. Recoverable by re-encoding.
+///
+/// We deliberately match only patterns that are unambiguously audio. The
+/// generic "Could not find tag for codec X" message can be either audio
+/// or subtitle (mov_text, hdmv_pgs_subtitle) — that one is left to
+/// `is_subtitle_error` and the skip-subs retry.
+pub fn is_audio_copy_error(error_msg: &str) -> bool {
+    let lower = error_msg.to_lowercase();
+    // matroska's wav-tag rejection — only emitted for PCM-family audio codecs
+    // (pcm_dvd, pcm_bluray) being stream-copied into MKV. Unambiguous.
+    lower.contains("no wav codec tag found")
+        // Header-write failure with "incorrect codec parameters". This *can* be
+        // triggered by other stream types, but if a subtitle codec is the cause
+        // is_subtitle_error catches it first via the muxer's specific message;
+        // by the time we land here, audio re-encode is the right next step.
+        || (lower.contains("could not write header")
+            && lower.contains("incorrect codec parameters"))
+}
+
+/// Distill multi-line ffmpeg stderr into the most informative error context.
+///
+/// ffmpeg often prints the *root cause* early (e.g. "No wav codec tag found
+/// for codec pcm_dvd") then cascades into generic noise:
+/// "Conversion failed!", "Nothing was written into output file...", a string
+/// of "Error sending frames" warnings, etc. Showing only the tail buries the
+/// real cause, so this scans the full stream, surfaces the substantive
+/// error/warning lines, and de-duplicates the cascade.
+fn summarize_ffmpeg_error(stderr: &str) -> String {
+    let lines: Vec<&str> = stderr
+        .lines()
+        .map(|l| l.trim_end())
+        .filter(|l| !l.is_empty())
+        .collect();
+
+    // ffmpeg progress lines and trivially generic cascade summaries — never useful.
+    let is_noise = |l: &str| {
+        let t = l.trim_start();
+        t.starts_with("frame=")
+            || t.starts_with("size=")
+            || t.starts_with("Last message repeated")
+            || t == "Conversion failed!"
+    };
+
+    // Lines that look like an actual ffmpeg error/warning worth surfacing.
+    let is_error = |l: &str| {
+        let lower = l.to_lowercase();
+        lower.contains("error")
+            || lower.contains("invalid")
+            || lower.contains("could not")
+            || lower.contains("failed")
+            || lower.contains("cannot")
+            || lower.contains("not supported")
+            || lower.contains("unsupported")
+            || lower.contains("no wav codec")
+            || lower.contains("no such")
+            || lower.contains("incorrect codec")
+            || lower.contains("nothing was written")
+    };
+
+    // Strip the "[module @ 0xADDR]" prefix that varies per run, so identical
+    // messages cascading through different modules dedupe cleanly.
+    fn body(line: &str) -> &str {
+        if let Some(rest) = line.strip_prefix('[') {
+            if let Some(end) = rest.find("] ") {
+                return rest[end + 2..].trim_start();
+            }
+        }
+        line
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    let mut picked: Vec<&str> = Vec::new();
+    for line in &lines {
+        if is_noise(line) || !is_error(line) {
+            continue;
+        }
+        if seen.insert(body(line).to_string()) {
+            picked.push(line);
+            if picked.len() >= 4 {
+                break;
+            }
+        }
+    }
+
+    if !picked.is_empty() {
+        return picked.join(" | ");
+    }
+
+    // Fallback: last 3 non-noise lines. Better than nothing.
+    let tail: Vec<&str> = lines.iter().copied().filter(|l| !is_noise(l)).collect();
+    let start = tail.len().saturating_sub(3);
+    let result = tail[start..].join(" | ");
     if result.is_empty() {
         "unknown error".to_string()
     } else {
@@ -695,10 +816,93 @@ mod tests {
     }
 
     #[test]
-    fn test_last_n_lines() {
-        let s = "line1\nline2\nline3\nline4\n";
-        assert_eq!(last_n_lines(s, 2), "line3 | line4");
-        assert_eq!(last_n_lines("", 3), "unknown error");
-        assert_eq!(last_n_lines("only\n", 5), "only");
+    fn test_is_audio_copy_error() {
+        // The exact pcm_dvd-into-MKV failure that prompted this code path
+        assert!(is_audio_copy_error(
+            "[matroska @ 0x123] No wav codec tag found for codec pcm_dvd"
+        ));
+        assert!(is_audio_copy_error(
+            "[out#0/matroska @ 0x123] Could not write header (incorrect codec parameters ?): Invalid argument"
+        ));
+        // PGS / mov_text "Could not find tag for codec X" is subtitle-side and ambiguous;
+        // we deliberately leave it to is_subtitle_error / skip-subs retry.
+        assert!(!is_audio_copy_error(
+            "Could not find tag for codec hdmv_pgs_subtitle"
+        ));
+        assert!(!is_audio_copy_error(
+            "Could not find tag for codec mov_text in stream #0:2, codec not currently supported in container"
+        ));
+        assert!(!is_audio_copy_error("some unrelated ffmpeg error"));
+    }
+
+    #[test]
+    fn test_summarize_extracts_root_cause_not_cascade() {
+        // Real stderr from a pcm_dvd → MKV failure. The first two lines are the root
+        // cause; everything below them is cascade noise. The summary must surface
+        // the cause, not just the trailing "Nothing was written" muxer complaint.
+        let stderr = "\
+Input #0, mpeg, from 'pipe:0':
+  Duration: N/A, start: 0.287267, bitrate: N/A
+  Stream #0:2[0xa0]: Audio: pcm_dvd, 48000 Hz, stereo, s16, 1536 kb/s
+Stream mapping:
+  Stream #0:1 -> #0:0 (mpeg2video (native) -> hevc (hevc_nvenc))
+  Stream #0:2 -> #0:1 (copy)
+[matroska @ 0x5ed165ece880] No wav codec tag found for codec pcm_dvd
+[out#0/matroska @ 0x5ed165ece780] Could not write header (incorrect codec parameters ?): Invalid argument
+[vf#0:0 @ 0x5ed165d3e0c0] Error sending frames to consumers: Invalid argument
+[vf#0:0 @ 0x5ed165d3e0c0] Task finished with error code: -22 (Invalid argument)
+[vf#0:0 @ 0x5ed165d3e0c0] Terminating thread with return code -22 (Invalid argument)
+[mpeg @ 0x5ed165d2e940] Packet corrupt (stream = 1, dts = NOPTS).
+[out#0/matroska @ 0x5ed165ece780] Nothing was written into output file, because at least one of its streams received no packets.
+frame=    0 fps=0.0 q=0.0 Lsize=       0KiB time=N/A bitrate=N/A speed=N/A
+Conversion failed!
+";
+        let summary = summarize_ffmpeg_error(stderr);
+        assert!(
+            summary.contains("No wav codec tag found for codec pcm_dvd"),
+            "Summary must surface the root cause; got: {}",
+            summary
+        );
+        assert!(
+            !summary.contains("Conversion failed!"),
+            "Summary must drop the trivial trailing 'Conversion failed!'; got: {}",
+            summary
+        );
+        assert!(
+            !summary.contains("frame="),
+            "Summary must drop progress lines; got: {}",
+            summary
+        );
+    }
+
+    #[test]
+    fn test_summarize_dedupes_cascade_with_different_module_prefixes() {
+        // Same message body repeated under different "[module @ 0xADDR]" prefixes
+        // should collapse into a single entry.
+        let stderr = "\
+[vf#0:0 @ 0x111] Error sending frames to consumers: Invalid argument
+[vf#0:1 @ 0x222] Error sending frames to consumers: Invalid argument
+[vf#0:2 @ 0x333] Error sending frames to consumers: Invalid argument
+";
+        let summary = summarize_ffmpeg_error(stderr);
+        assert_eq!(
+            summary.matches("Error sending frames to consumers").count(),
+            1,
+            "Repeated body should appear once; got: {}",
+            summary
+        );
+    }
+
+    #[test]
+    fn test_summarize_falls_back_to_tail_when_no_keywords() {
+        let stderr = "step one\nstep two\nstep three\nstep four\n";
+        let summary = summarize_ffmpeg_error(stderr);
+        assert_eq!(summary, "step two | step three | step four");
+    }
+
+    #[test]
+    fn test_summarize_handles_empty() {
+        assert_eq!(summarize_ffmpeg_error(""), "unknown error");
+        assert_eq!(summarize_ffmpeg_error("\n\n   \n"), "unknown error");
     }
 }
