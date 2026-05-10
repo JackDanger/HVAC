@@ -79,6 +79,7 @@ pub fn analyze_disc(iso_path: &Path) -> Result<DiscAnalysis> {
             main_feature: Vec::new(),
             main_feature_size: 0,
             extras: Vec::new(),
+            multi_title_groups: None,
         });
     }
 

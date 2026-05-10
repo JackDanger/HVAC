@@ -385,15 +385,43 @@ fn main() -> Result<()> {
     }
 
     // --- Phase 1: Expand disc images into flat work list ---
-    // Each entry is (path, optional iso_path, optional inner_path, optional inner_paths, optional title_suffix)
-    type ExpandedItem = (
-        PathBuf,
-        Option<PathBuf>,
-        Option<String>,
-        Option<Vec<String>>,
-        Option<String>,
-    );
-    let mut expanded: Vec<ExpandedItem> = Vec::new();
+    //
+    // Each ScanItem either represents a regular file (just `file`) or a
+    // member of an ISO main feature (file + iso_path + at least one
+    // inner_path). title_suffix is set only for multi-title discs and is
+    // appended to the output filename to keep per-title outputs distinct.
+    struct ScanItem {
+        /// Original on-disk path (regular file, or the .iso/.img for ISO entries).
+        file: PathBuf,
+        /// Same as `file` for ISO entries, `None` for regular files.
+        iso_path: Option<PathBuf>,
+        /// Representative inner path used for probing; first element of inner_paths.
+        inner_path: Option<String>,
+        /// Multi-file ISO main feature, in concatenation order. None when single-file.
+        inner_paths: Option<Vec<String>>,
+        /// "titleNN" for one-of-many multi-title outputs; None for single-feature.
+        title_suffix: Option<String>,
+    }
+
+    // Build one ISO main-feature group (single or multi-file) into a ScanItem.
+    let iso_item_from_group =
+        |iso_file: &Path, group: &[iso::IsoMediaFile], suffix: Option<String>| -> ScanItem {
+            let paths: Vec<String> = group.iter().map(|f| f.path.clone()).collect();
+            let (inner_paths, inner_path) = if paths.len() == 1 {
+                (None, Some(paths[0].clone()))
+            } else {
+                (Some(paths.clone()), Some(paths[0].clone()))
+            };
+            ScanItem {
+                file: iso_file.to_path_buf(),
+                iso_path: Some(iso_file.to_path_buf()),
+                inner_path,
+                inner_paths,
+                title_suffix: suffix,
+            }
+        };
+
+    let mut expanded: Vec<ScanItem> = Vec::new();
     let mut errors = 0u32;
 
     for file in &files {
@@ -434,25 +462,8 @@ fn main() -> Result<()> {
                     if group.is_empty() {
                         continue;
                     }
-                    let paths: Vec<String> = group.iter().map(|f| f.path.clone()).collect();
                     let suffix = format!("title{:02}", i + 1);
-                    if paths.len() == 1 {
-                        expanded.push((
-                            file.clone(),
-                            Some(file.clone()),
-                            Some(paths[0].clone()),
-                            None,
-                            Some(suffix),
-                        ));
-                    } else {
-                        expanded.push((
-                            file.clone(),
-                            Some(file.clone()),
-                            Some(paths[0].clone()),
-                            Some(paths),
-                            Some(suffix),
-                        ));
-                    }
+                    expanded.push(iso_item_from_group(file, group, Some(suffix)));
                 }
                 continue;
             }
@@ -465,35 +476,17 @@ fn main() -> Result<()> {
                 analysis.extras.len(),
             );
 
-            if analysis.main_feature.len() == 1 {
-                // Single file: use inner_path
-                expanded.push((
-                    file.clone(),
-                    Some(file.clone()),
-                    Some(analysis.main_feature[0].path.clone()),
-                    None,
-                    None,
-                ));
-            } else {
-                // Multiple files: use inner_paths for concatenation
-                let paths: Vec<String> = analysis
-                    .main_feature
-                    .iter()
-                    .map(|f| f.path.clone())
-                    .collect();
-                // Use the first file's path as the representative for probing
-                expanded.push((
-                    file.clone(),
-                    Some(file.clone()),
-                    Some(paths[0].clone()),
-                    Some(paths),
-                    None,
-                ));
-            }
+            expanded.push(iso_item_from_group(file, &analysis.main_feature, None));
             continue;
         }
 
-        expanded.push((file.clone(), None, None, None, None));
+        expanded.push(ScanItem {
+            file: file.clone(),
+            iso_path: None,
+            inner_path: None,
+            inner_paths: None,
+            title_suffix: None,
+        });
     }
 
     // --- Phase 2: Probe all files to partition skip vs. transcode ---
@@ -502,7 +495,16 @@ fn main() -> Result<()> {
     let mut skipped = 0u32;
     let mut resumed = 0u32;
 
-    for (file, iso_p, inner_p, inner_ps, title_suffix) in &expanded {
+    for item in &expanded {
+        // Local aliases keep the existing body code readable without
+        // forcing every field access to spell out item.field. The compiler
+        // optimises these out — they're just naming the borrowed fields.
+        let file = &item.file;
+        let iso_p = &item.iso_path;
+        let inner_p = &item.inner_path;
+        let inner_ps = &item.inner_paths;
+        let title_suffix = &item.title_suffix;
+
         let probe_result = if let (Some(ip), Some(inner)) = (iso_p, inner_p) {
             probe::probe_iso_file(ip, inner)
         } else {
