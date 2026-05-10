@@ -93,6 +93,18 @@ hvac --config config.yaml /path/to/movies
 
 ---
 
+## Development
+
+Hook formatting enforcement up once per clone:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+After that, every commit that touches a `.rs` file is rejected if `cargo fmt --all -- --check` would change anything. Fix it with `cargo fmt --all` and retry.
+
+---
+
 ## License
 
 [MIT](LICENSE) &copy; Jack Danger
