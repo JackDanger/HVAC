@@ -91,12 +91,37 @@ fn max_name_for_cols(cols: usize) -> usize {
 ///
 /// Inner track names (e.g. "00000.M2TS", "VTS_01_1.VOB") are meaningless
 /// technical identifiers; the ISO itself always carries the meaningful title.
+///
+/// `title_suffix`, when set, is appended to the file stem so multi-title discs
+/// emit distinct outputs per title (e.g. `Disc.title01.transcoded.mkv`).
 fn output_stem_for_item(
     file: &std::path::Path,
     _inner_path: Option<&str>,
     _inner_paths: Option<&[String]>,
+    title_suffix: Option<&str>,
 ) -> std::path::PathBuf {
-    file.to_path_buf()
+    match title_suffix {
+        Some(suffix) => {
+            let stem = file
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let ext = file
+                .extension()
+                .map(|e| e.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let new_name = if ext.is_empty() {
+                format!("{}.{}", stem, suffix)
+            } else {
+                format!("{}.{}.{}", stem, suffix, ext)
+            };
+            match file.parent() {
+                Some(parent) if !parent.as_os_str().is_empty() => parent.join(new_name),
+                _ => std::path::PathBuf::from(new_name),
+            }
+        }
+        None => file.to_path_buf(),
+    }
 }
 
 fn detect_symbols() -> &'static Symbols {
@@ -178,6 +203,10 @@ struct WorkItem {
     inner_path: Option<String>,
     /// For ISO main feature with multiple files: paths to concatenate in order.
     inner_paths: Option<Vec<String>>,
+    /// For multi-title discs (e.g. TV-episode DVDs): a per-title suffix that
+    /// distinguishes this work item's output from its sibling titles' outputs
+    /// (e.g. "title01" → `Disc.title01.transcoded.mkv`). `None` for single-feature.
+    title_suffix: Option<String>,
 }
 
 /// Per-worker display slot for the render thread.
@@ -356,14 +385,43 @@ fn main() -> Result<()> {
     }
 
     // --- Phase 1: Expand disc images into flat work list ---
-    // Each entry is (path, optional iso_path, optional inner_path, optional inner_paths)
-    type ExpandedItem = (
-        PathBuf,
-        Option<PathBuf>,
-        Option<String>,
-        Option<Vec<String>>,
-    );
-    let mut expanded: Vec<ExpandedItem> = Vec::new();
+    //
+    // Each ScanItem either represents a regular file (just `file`) or a
+    // member of an ISO main feature (file + iso_path + at least one
+    // inner_path). title_suffix is set only for multi-title discs and is
+    // appended to the output filename to keep per-title outputs distinct.
+    struct ScanItem {
+        /// Original on-disk path (regular file, or the .iso/.img for ISO entries).
+        file: PathBuf,
+        /// Same as `file` for ISO entries, `None` for regular files.
+        iso_path: Option<PathBuf>,
+        /// Representative inner path used for probing; first element of inner_paths.
+        inner_path: Option<String>,
+        /// Multi-file ISO main feature, in concatenation order. None when single-file.
+        inner_paths: Option<Vec<String>>,
+        /// "titleNN" for one-of-many multi-title outputs; None for single-feature.
+        title_suffix: Option<String>,
+    }
+
+    // Build one ISO main-feature group (single or multi-file) into a ScanItem.
+    let iso_item_from_group =
+        |iso_file: &Path, group: &[iso::IsoMediaFile], suffix: Option<String>| -> ScanItem {
+            let paths: Vec<String> = group.iter().map(|f| f.path.clone()).collect();
+            let (inner_paths, inner_path) = if paths.len() == 1 {
+                (None, Some(paths[0].clone()))
+            } else {
+                (Some(paths.clone()), Some(paths[0].clone()))
+            };
+            ScanItem {
+                file: iso_file.to_path_buf(),
+                iso_path: Some(iso_file.to_path_buf()),
+                inner_path,
+                inner_paths,
+                title_suffix: suffix,
+            }
+        };
+
+    let mut expanded: Vec<ScanItem> = Vec::new();
     let mut errors = 0u32;
 
     for file in &files {
@@ -391,6 +449,25 @@ fn main() -> Result<()> {
                 continue;
             }
 
+            // Multi-title disc (e.g. TV-episode DVD): emit one work item per title.
+            if let Some(groups) = analysis.multi_title_groups.as_ref() {
+                eprintln!(
+                    "  iso: {} ({:?}, {} titles, {} extras)",
+                    iso_name,
+                    analysis.disc_type,
+                    groups.len(),
+                    analysis.extras.len(),
+                );
+                for (i, group) in groups.iter().enumerate() {
+                    if group.is_empty() {
+                        continue;
+                    }
+                    let suffix = format!("title{:02}", i + 1);
+                    expanded.push(iso_item_from_group(file, group, Some(suffix)));
+                }
+                continue;
+            }
+
             eprintln!(
                 "  iso: {} ({:?}, {} main feature files, {} extras)",
                 iso_name,
@@ -399,33 +476,17 @@ fn main() -> Result<()> {
                 analysis.extras.len(),
             );
 
-            if analysis.main_feature.len() == 1 {
-                // Single file: use inner_path
-                expanded.push((
-                    file.clone(),
-                    Some(file.clone()),
-                    Some(analysis.main_feature[0].path.clone()),
-                    None,
-                ));
-            } else {
-                // Multiple files: use inner_paths for concatenation
-                let paths: Vec<String> = analysis
-                    .main_feature
-                    .iter()
-                    .map(|f| f.path.clone())
-                    .collect();
-                // Use the first file's path as the representative for probing
-                expanded.push((
-                    file.clone(),
-                    Some(file.clone()),
-                    Some(paths[0].clone()),
-                    Some(paths),
-                ));
-            }
+            expanded.push(iso_item_from_group(file, &analysis.main_feature, None));
             continue;
         }
 
-        expanded.push((file.clone(), None, None, None));
+        expanded.push(ScanItem {
+            file: file.clone(),
+            iso_path: None,
+            inner_path: None,
+            inner_paths: None,
+            title_suffix: None,
+        });
     }
 
     // --- Phase 2: Probe all files to partition skip vs. transcode ---
@@ -434,7 +495,16 @@ fn main() -> Result<()> {
     let mut skipped = 0u32;
     let mut resumed = 0u32;
 
-    for (file, iso_p, inner_p, inner_ps) in &expanded {
+    for item in &expanded {
+        // Local aliases keep the existing body code readable without
+        // forcing every field access to spell out item.field. The compiler
+        // optimises these out — they're just naming the borrowed fields.
+        let file = &item.file;
+        let iso_p = &item.iso_path;
+        let inner_p = &item.inner_path;
+        let inner_ps = &item.inner_paths;
+        let title_suffix = &item.title_suffix;
+
         let probe_result = if let (Some(ip), Some(inner)) = (iso_p, inner_p) {
             probe::probe_iso_file(ip, inner)
         } else {
@@ -483,8 +553,12 @@ fn main() -> Result<()> {
                     //   - regular file    → use file path as stem
                     {
                         let out_dir = cli.output_dir.as_deref().or(cfg.output_dir.as_deref());
-                        let source_for_output =
-                            output_stem_for_item(file, inner_p.as_deref(), inner_ps.as_deref());
+                        let source_for_output = output_stem_for_item(
+                            file,
+                            inner_p.as_deref(),
+                            inner_ps.as_deref(),
+                            title_suffix.as_deref(),
+                        );
                         if let Ok(out_path) = transcode::output_path(
                             &source_for_output,
                             out_dir,
@@ -535,6 +609,7 @@ fn main() -> Result<()> {
                         iso_path: iso_p.clone(),
                         inner_path: inner_p.clone(),
                         inner_paths: inner_ps.clone(),
+                        title_suffix: title_suffix.clone(),
                     });
                 }
             }
@@ -881,17 +956,25 @@ fn main() -> Result<()> {
 
                 let item = &to_transcode[idx];
                 let name = if let Some(ref paths) = item.inner_paths {
-                    // Multi-file ISO: show "iso_name (N files)"
+                    // Multi-file ISO: show "iso_name (N files)" or
+                    // "iso_name [titleNN] (N files)" for multi-title discs.
                     let iso_name = item.path.file_name().unwrap_or_default().to_string_lossy();
-                    format!("{} ({} files)", iso_name, paths.len())
+                    match item.title_suffix.as_deref() {
+                        Some(suffix) => format!("{} [{}] ({} files)", iso_name, suffix, paths.len()),
+                        None => format!("{} ({} files)", iso_name, paths.len()),
+                    }
                 } else if let Some(ref inner) = item.inner_path {
-                    // Single-file ISO: show "iso_name:inner_name"
+                    // Single-file ISO: show "iso_name:inner_name", with optional
+                    // [titleNN] tag for multi-title discs whose titles each have one VOB.
                     let iso_name = item.path.file_name().unwrap_or_default().to_string_lossy();
                     let inner_name = Path::new(inner)
                         .file_name()
                         .unwrap_or_default()
                         .to_string_lossy();
-                    format!("{}:{}", iso_name, inner_name)
+                    match item.title_suffix.as_deref() {
+                        Some(suffix) => format!("{} [{}]:{}", iso_name, suffix, inner_name),
+                        None => format!("{}:{}", iso_name, inner_name),
+                    }
                 } else {
                     item.path
                         .file_name()
@@ -919,6 +1002,7 @@ fn main() -> Result<()> {
                         &item.path,
                         item.inner_path.as_deref(),
                         item.inner_paths.as_deref(),
+                        item.title_suffix.as_deref(),
                     );
                     match transcode::output_path(&source_for_output, out_dir, &cfg.target.container)
                     {
@@ -1478,7 +1562,7 @@ mod tests {
     #[test]
     fn test_output_stem_regular_file() {
         let file = std::path::Path::new("/media/movie.mkv");
-        let stem = output_stem_for_item(file, None, None);
+        let stem = output_stem_for_item(file, None, None, None);
         assert_eq!(stem, file);
     }
 
@@ -1488,7 +1572,7 @@ mod tests {
         // Inner names like "00000.M2TS" or "VTS_01_1.VOB" are meaningless identifiers.
         let iso = std::path::Path::new("/media/Pirates of the Caribbean BR-DISK.iso");
         let inner = "BDMV/STREAM/00000.M2TS";
-        let stem = output_stem_for_item(iso, Some(inner), None);
+        let stem = output_stem_for_item(iso, Some(inner), None, None);
         assert_eq!(stem, iso);
     }
 
@@ -1501,7 +1585,7 @@ mod tests {
             "VIDEO_TS/VTS_01_1.VOB".to_string(),
             "VIDEO_TS/VTS_02_1.VOB".to_string(),
         ];
-        let stem = output_stem_for_item(iso, Some(inner), Some(&paths));
+        let stem = output_stem_for_item(iso, Some(inner), Some(&paths), None);
         assert_eq!(stem, iso);
     }
 
@@ -1512,8 +1596,65 @@ mod tests {
         let iso = std::path::Path::new("/media/Movie.iso");
         let inner = "BDMV/STREAM/00000.M2TS";
         let paths = vec![inner.to_string()];
-        let single = output_stem_for_item(iso, Some(inner), None);
-        let multi = output_stem_for_item(iso, Some(inner), Some(&paths));
+        let single = output_stem_for_item(iso, Some(inner), None, None);
+        let multi = output_stem_for_item(iso, Some(inner), Some(&paths), None);
         assert_eq!(single, multi, "single and multi-file ISO stems must match");
+    }
+
+    #[test]
+    fn test_output_stem_multi_title_suffix_distinguishes_outputs() {
+        // Multi-title disc: each title gets a distinct stem so transcode::output_path
+        // produces non-colliding output filenames (Disc.title01.transcoded.mkv etc.).
+        let iso = std::path::Path::new("/media/Sitcom S01D01.iso");
+        let inner = "VIDEO_TS/VTS_01_1.VOB";
+        let paths = vec![inner.to_string()];
+        let s1 = output_stem_for_item(iso, Some(inner), Some(&paths), Some("title01"));
+        let s2 = output_stem_for_item(iso, Some(inner), Some(&paths), Some("title02"));
+        assert_ne!(
+            s1, s2,
+            "different title suffixes must produce distinct output stems"
+        );
+        assert!(
+            s1.to_string_lossy().contains("Sitcom S01D01.title01"),
+            "stem should embed the title suffix: {:?}",
+            s1
+        );
+        assert!(
+            s2.to_string_lossy().contains("Sitcom S01D01.title02"),
+            "stem should embed the title suffix: {:?}",
+            s2
+        );
+        // Parent directory is preserved.
+        assert_eq!(s1.parent(), iso.parent());
+    }
+
+    #[test]
+    fn test_output_stem_multi_title_output_path_unique() {
+        // End-to-end: feed the suffixed stem through transcode::output_path
+        // and confirm the resulting .transcoded.<ext> filenames don't collide.
+        let iso = std::path::Path::new("/tmp/Disc.iso");
+        let inner = "VIDEO_TS/VTS_01_1.VOB";
+        let paths = vec![inner.to_string()];
+        let s1 = output_stem_for_item(iso, Some(inner), Some(&paths), Some("title01"));
+        let s2 = output_stem_for_item(iso, Some(inner), Some(&paths), Some("title02"));
+        let o1 = transcode::output_path(&s1, None, "mkv").unwrap();
+        let o2 = transcode::output_path(&s2, None, "mkv").unwrap();
+        assert_ne!(o1, o2, "per-title output filenames must be distinct");
+        assert!(
+            o1.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .contains("Disc.title01"),
+            "got {:?}",
+            o1
+        );
+        assert!(
+            o2.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .contains("Disc.title02"),
+            "got {:?}",
+            o2
+        );
     }
 }

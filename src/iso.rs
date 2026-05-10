@@ -50,6 +50,12 @@ pub struct DiscAnalysis {
     pub main_feature_size: u64,
     /// All other media files (extras, trailers, menus, smaller title sets).
     pub extras: Vec<IsoMediaFile>,
+    /// When `Some`, the disc holds multiple distinct titles of similar size
+    /// (e.g. a TV-episode DVD with one episode per VTS). Each inner Vec is
+    /// one title's files in playback order, and consumers should emit one
+    /// work item per group instead of concatenating `main_feature`.
+    /// When `None`, treat `main_feature` as a single feature.
+    pub multi_title_groups: Option<Vec<Vec<IsoMediaFile>>>,
 }
 
 /// Analyze a disc image and detect its structure, identifying the main feature.
@@ -73,6 +79,7 @@ pub fn analyze_disc(iso_path: &Path) -> Result<DiscAnalysis> {
             main_feature: Vec::new(),
             main_feature_size: 0,
             extras: Vec::new(),
+            multi_title_groups: None,
         });
     }
 
@@ -209,6 +216,7 @@ fn analyze_bluray(root: &isomage::TreeNode, stream_path: &str) -> Result<DiscAna
             main_feature: Vec::new(),
             main_feature_size: 0,
             extras: Vec::new(),
+            multi_title_groups: None,
         });
     }
 
@@ -233,6 +241,7 @@ fn analyze_bluray(root: &isomage::TreeNode, stream_path: &str) -> Result<DiscAna
         main_feature,
         main_feature_size,
         extras,
+        multi_title_groups: None,
     })
 }
 
@@ -304,6 +313,7 @@ fn analyze_dvd(root: &isomage::TreeNode) -> Result<DiscAnalysis> {
             main_feature: Vec::new(),
             main_feature_size: 0,
             extras: menu_files,
+            multi_title_groups: None,
         });
     }
 
@@ -327,8 +337,14 @@ fn analyze_dvd(root: &isomage::TreeNode) -> Result<DiscAnalysis> {
     let mut main_feature: Vec<IsoMediaFile> = Vec::new();
     let mut extras: Vec<IsoMediaFile> = Vec::new();
 
+    // Collect each main title set as its own group, ordered by title number (NN).
+    // BTreeMap iteration is already title-number order; per-set files were sorted
+    // by segment above. We preserve those orders here.
+    let mut main_groups: Vec<Vec<IsoMediaFile>> = Vec::new();
+
     for (ts, files) in title_sets {
         if main_sets.contains(&ts) {
+            main_groups.push(files.clone());
             main_feature.extend(files);
         } else {
             extras.extend(files);
@@ -341,11 +357,21 @@ fn analyze_dvd(root: &isomage::TreeNode) -> Result<DiscAnalysis> {
 
     let main_feature_size = main_feature.iter().map(|f| f.size).sum();
 
+    // When multiple distinct title sets cleared the similarity threshold, this
+    // is a multi-title disc (TV episodes etc.) — surface the per-title groups
+    // so the caller emits one work item per title instead of concatenating.
+    let multi_title_groups = if main_groups.len() >= 2 {
+        Some(main_groups)
+    } else {
+        None
+    };
+
     Ok(DiscAnalysis {
         disc_type: DiscType::Dvd,
         main_feature,
         main_feature_size,
         extras,
+        multi_title_groups,
     })
 }
 
@@ -409,6 +435,7 @@ fn analyze_avchd(root: &isomage::TreeNode) -> Result<DiscAnalysis> {
         main_feature: media,
         main_feature_size,
         extras: Vec::new(),
+        multi_title_groups: None,
     })
 }
 
@@ -432,6 +459,7 @@ fn analyze_bare_media(root: &isomage::TreeNode) -> Result<DiscAnalysis> {
             main_feature: Vec::new(),
             main_feature_size: 0,
             extras: Vec::new(),
+            multi_title_groups: None,
         });
     }
 
@@ -453,6 +481,7 @@ fn analyze_bare_media(root: &isomage::TreeNode) -> Result<DiscAnalysis> {
         main_feature,
         main_feature_size,
         extras,
+        multi_title_groups: None,
     })
 }
 
@@ -804,6 +833,74 @@ mod tests {
                 "Expected 4 VOBs (all similar-size title sets), got {}: {:?}",
                 a.main_feature.len(),
                 a.main_feature.iter().map(|f| &f.path).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn test_multi_title_dvd_emits_per_title_groups() {
+        let iso = require_fixture("MULTI_TITLE_DVD.iso");
+        if let Some(p) = iso {
+            let a = analyze_disc(&p).unwrap();
+            let groups = a
+                .multi_title_groups
+                .as_ref()
+                .expect("multi-title DVD should populate multi_title_groups");
+            assert_eq!(
+                groups.len(),
+                4,
+                "Expected 4 title groups (one per VTS_NN), got {}: {:?}",
+                groups.len(),
+                groups
+                    .iter()
+                    .map(|g| g.iter().map(|f| &f.path).collect::<Vec<_>>())
+                    .collect::<Vec<_>>()
+            );
+            // Every group is non-empty and internally sorted by VTS segment path.
+            for group in groups {
+                assert!(!group.is_empty(), "title group must be non-empty");
+                for w in group.windows(2) {
+                    assert!(
+                        w[0].path < w[1].path,
+                        "Files within a title group should be sorted: {} < {}",
+                        w[0].path,
+                        w[1].path
+                    );
+                }
+                // All files in a group share the same VTS_NN prefix.
+                let first_upper = group[0].path.to_uppercase();
+                let title_prefix = first_upper
+                    .split("VTS_")
+                    .nth(1)
+                    .and_then(|s| s.split('_').next())
+                    .map(|s| s.to_string())
+                    .expect("group path should contain VTS_NN_M.VOB");
+                for f in group {
+                    let upper = f.path.to_uppercase();
+                    let needle = format!("VTS_{}_", title_prefix);
+                    assert!(
+                        upper.contains(&needle),
+                        "All files in a group should share VTS_{} prefix, got {}",
+                        title_prefix,
+                        f.path
+                    );
+                }
+            }
+            // main_feature must remain populated for back-compat with the
+            // single-feature concat path used elsewhere.
+            assert_eq!(a.main_feature.len(), 4);
+        }
+    }
+
+    #[test]
+    fn test_single_feature_dvd_has_no_multi_title_groups() {
+        let iso = require_fixture("DVD_DISC.iso");
+        if let Some(p) = iso {
+            let a = analyze_disc(&p).unwrap();
+            assert!(
+                a.multi_title_groups.is_none(),
+                "Single-feature DVD should not set multi_title_groups, got {:?}",
+                a.multi_title_groups
             );
         }
     }
