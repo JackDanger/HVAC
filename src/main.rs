@@ -379,6 +379,13 @@ fn main() -> Result<()> {
                 }
             };
 
+            // Encrypted commercial discs (AACS / BD+) can't be decoded by ffmpeg.
+            // Skip with a clear, actionable message rather than aborting the run.
+            if let iso::DiscType::Encrypted { ref reason } = analysis.disc_type {
+                eprintln!("  skip: {}: {}", iso_name, reason);
+                continue;
+            }
+
             if analysis.main_feature.is_empty() {
                 eprintln!("  skip: {}: no media files inside", iso_name);
                 continue;
