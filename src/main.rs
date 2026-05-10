@@ -8,6 +8,7 @@ mod util;
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -124,6 +125,93 @@ fn output_stem_for_item(
     _inner_paths: Option<&[String]>,
 ) -> std::path::PathBuf {
     file.to_path_buf()
+}
+
+/// Probe whether the parent directory of `source` allows file creation.
+///
+/// In `--overwrite` mode hvac writes a `.hvac_tmp_*` file alongside the source
+/// and `fs::rename`s it over the original; if the parent directory is
+/// read-only (mounted ro, ACL deny, etc.) that rename fails *after* a
+/// multi-minute encode has already burned GPU time.  This helper performs the
+/// same kind of write up front so we can fail-fast with a clear message.
+///
+/// Creates and immediately removes a uniquely-named probe file.  Returns
+/// `false` if the source has no parent or the create fails for any reason.
+// Convenience wrapper around `dir_is_writable` that resolves the source's
+// parent. The hot path uses `dir_is_writable_cached` directly so this is
+// only exercised by the unit tests today; kept for callers that probe one
+// source at a time without needing the dir cache.
+#[cfg_attr(not(test), allow(dead_code))]
+fn parent_is_writable(source: &Path) -> bool {
+    let parent = match source.parent() {
+        Some(p) => p,
+        None => return false,
+    };
+    dir_is_writable(parent)
+}
+
+/// Probe whether `dir` allows file creation by attempting to create (and
+/// immediately remove) a uniquely-named file inside it.
+///
+/// Two failure modes the naive `File::create(<pid-only path>)` version
+/// glossed over:
+///   - PID isn't unique enough. Two concurrent runs (same host, same
+///     mounted media tree) collide on `.hvac_writable_check_<pid>` if the
+///     OS happens to recycle a PID, and `File::create` would *truncate*
+///     a user-owned file with that exact name. Use `create_new(true)`
+///     plus a nanosecond-resolution timestamp so collisions never silently
+///     win.
+///   - Cleanup failure mustn't be ignored: returning `true` after a
+///     failed `remove_file` would leave stray probe files in the user's
+///     media directory. Treat that as a probe failure and let the caller
+///     surface the directory as non-writable.
+fn dir_is_writable(dir: &Path) -> bool {
+    use std::fs::OpenOptions;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let probe = dir.join(format!(
+        ".hvac_writable_check_{}_{}",
+        std::process::id(),
+        nanos
+    ));
+
+    let create_result = OpenOptions::new().write(true).create_new(true).open(&probe);
+    if create_result.is_err() {
+        return false;
+    }
+
+    match std::fs::remove_file(&probe) {
+        Ok(()) => true,
+        Err(e) => {
+            // We could create but not delete — likely an aggressive ACL
+            // (e.g. SMB share with create-but-not-delete rights) or a
+            // transient lock. Surface the dir as non-writable so the
+            // user gets a pre-flight skip rather than a stray probe file
+            // in their media tree.
+            log::warn!(
+                "dir_is_writable: probe at {:?} created but not removed: {} \
+                 — treating directory as non-writable",
+                probe,
+                e
+            );
+            false
+        }
+    }
+}
+
+/// Cached writable-check: avoid hammering the filesystem when 1000s of files
+/// share the same parent directory.
+fn dir_is_writable_cached(cache: &mut HashMap<PathBuf, bool>, dir: &Path) -> bool {
+    if let Some(&v) = cache.get(dir) {
+        return v;
+    }
+    let v = dir_is_writable(dir);
+    cache.insert(dir.to_path_buf(), v);
+    v
 }
 
 fn detect_symbols() -> &'static Symbols {
@@ -503,6 +591,11 @@ fn main() -> Result<()> {
     let mut to_transcode: Vec<WorkItem> = Vec::new();
     let mut skipped = 0u32;
     let mut resumed = 0u32;
+    // Cache of dir → writable for the pre-flight check.  A typical media
+    // library packs thousands of files into a handful of directories, so a
+    // per-file probe would re-create the same .hvac_writable_check_<pid> file
+    // millions of times.
+    let mut writable_cache: HashMap<PathBuf, bool> = HashMap::new();
 
     for (file, iso_p, inner_p, inner_ps) in &expanded {
         let probe_result = if let (Some(ip), Some(inner)) = (iso_p, inner_p) {
@@ -622,6 +715,78 @@ fn main() -> Result<()> {
                                     continue;
                                 }
                             }
+                        }
+                    }
+
+                    // Pre-flight: confirm the directory we're about to write
+                    // into is actually writable before burning GPU time.
+                    //
+                    // Selection has to mirror the worker exactly. The worker's
+                    // output_path is built like:
+                    //   - overwrite && !iso  →  None (in-place: tmp in source's
+                    //     parent, then rename over source). output_dir is
+                    //     IGNORED in this case — checking it would falsely
+                    //     skip valid work when it's set but unwritable.
+                    //   - else, with output_dir set  →  output_dir
+                    //   - else, no output_dir         →  source's parent
+                    //
+                    // When output_dir is set, the worker's `output_path` will
+                    // `create_dir_all` it before writing, so we mkdir here
+                    // too so the writable probe matches reality (otherwise
+                    // ENOENT skips a dir that would have worked).
+                    //
+                    // Skipped entirely under --dry-run: the probe creates and
+                    // deletes a file in the user's media tree, which violates
+                    // dry-run's "touch nothing" contract. CI / scripted
+                    // dry-run callers can preview the plan without surprise IO.
+                    if !cli.dry_run {
+                        let out_dir = cli.output_dir.as_deref().or(cfg.output_dir.as_deref());
+                        let dest_dir: PathBuf = if overwrite && iso_p.is_none() {
+                            // In-place mode: worker ignores output_dir and writes
+                            // next to the source.
+                            file.parent()
+                                .map(|p| p.to_path_buf())
+                                .unwrap_or_else(|| PathBuf::from("."))
+                        } else if let Some(d) = out_dir {
+                            // Worker will create_dir_all this path before
+                            // writing; do the same so the probe doesn't
+                            // ENOENT on a dir that's about to exist.
+                            if !d.exists() {
+                                if let Err(e) = std::fs::create_dir_all(d) {
+                                    let name =
+                                        file.file_name().unwrap_or_default().to_string_lossy();
+                                    eprintln!(
+                                        "  skip: {}: cannot create output directory {:?}: {}",
+                                        name, d, e
+                                    );
+                                    skipped += 1;
+                                    continue;
+                                }
+                            }
+                            d.to_path_buf()
+                        } else {
+                            // Both ISO with no output_dir and non-ISO no-overwrite
+                            // land here: <source_parent>/<stem>.transcoded.<ext>.
+                            file.parent()
+                                .map(|p| p.to_path_buf())
+                                .unwrap_or_else(|| PathBuf::from("."))
+                        };
+                        if !dir_is_writable_cached(&mut writable_cache, &dest_dir) {
+                            let name = file.file_name().unwrap_or_default().to_string_lossy();
+                            if overwrite && iso_p.is_none() {
+                                eprintln!(
+                                    "  skip: {}: source directory is not writable; \
+                                     use --no-overwrite to write transcodes elsewhere",
+                                    name
+                                );
+                            } else {
+                                eprintln!(
+                                    "  skip: {}: output directory {:?} is not writable",
+                                    name, dest_dir
+                                );
+                            }
+                            skipped += 1;
+                            continue;
                         }
                     }
 
@@ -1817,5 +1982,133 @@ mod tests {
     #[test]
     fn test_min_transcode_duration_default_is_one_second() {
         assert_eq!(MIN_TRANSCODE_DURATION_SECS, 1.0);
+    }
+
+    // ── Writable pre-flight tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_parent_is_writable_for_normal_temp_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("video.mkv");
+        // We don't need the source itself to exist — only its parent.
+        assert!(parent_is_writable(&source));
+    }
+
+    #[test]
+    fn test_parent_is_writable_no_parent() {
+        // The root path "/" has no real parent for our purposes (Path::parent
+        // returns None for "/" on Unix).
+        let root = std::path::Path::new("/");
+        assert!(!parent_is_writable(root));
+    }
+
+    #[test]
+    fn test_dir_is_writable_cached_caches_results() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cache: HashMap<PathBuf, bool> = HashMap::new();
+        assert!(dir_is_writable_cached(&mut cache, tmp.path()));
+        assert_eq!(cache.len(), 1);
+        // Second lookup should hit the cache (same single entry).
+        assert!(dir_is_writable_cached(&mut cache, tmp.path()));
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_parent_is_writable_false_for_readonly_dir() {
+        use std::os::unix::fs::PermissionsExt;
+        // Skip when running as root: root bypasses DAC permissions and can
+        // create files in mode-0o555 directories, which would falsely fail
+        // this test.  The deploy host runs tests as root, so we tolerate that.
+        let is_root = unsafe { libc::geteuid() } == 0;
+        if is_root {
+            eprintln!("skipping read-only check under root (DAC bypass)");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let ro_dir = tmp.path().join("ro");
+        std::fs::create_dir(&ro_dir).unwrap();
+        // r-xr-xr-x: readable + traversable, not writable.
+        std::fs::set_permissions(&ro_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let source = ro_dir.join("video.mkv");
+        let writable = parent_is_writable(&source);
+
+        // Restore writable perms so tempdir cleanup works.
+        let _ = std::fs::set_permissions(&ro_dir, std::fs::Permissions::from_mode(0o755));
+
+        assert!(
+            !writable,
+            "expected read-only parent to report not writable"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_dir_is_writable_cached_remembers_failure() {
+        use std::os::unix::fs::PermissionsExt;
+        let is_root = unsafe { libc::geteuid() } == 0;
+        if is_root {
+            eprintln!("skipping read-only cache check under root (DAC bypass)");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let ro_dir = tmp.path().join("ro");
+        std::fs::create_dir(&ro_dir).unwrap();
+        std::fs::set_permissions(&ro_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let mut cache: HashMap<PathBuf, bool> = HashMap::new();
+        let r1 = dir_is_writable_cached(&mut cache, &ro_dir);
+        let r2 = dir_is_writable_cached(&mut cache, &ro_dir);
+
+        let _ = std::fs::set_permissions(&ro_dir, std::fs::Permissions::from_mode(0o755));
+
+        assert!(!r1);
+        assert!(!r2);
+        assert_eq!(cache.get(&ro_dir).copied(), Some(false));
+    }
+
+    #[test]
+    fn test_dir_is_writable_probe_file_is_cleaned_up() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(dir_is_writable(tmp.path()));
+        // After the probe runs, no .hvac_writable_check_* file should remain.
+        let leftover: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with(".hvac_writable_check_")
+            })
+            .collect();
+        assert!(leftover.is_empty(), "probe file should be removed");
+    }
+
+    #[test]
+    fn test_dir_is_writable_uses_unique_names_per_call() {
+        // With nanosecond timestamps + create_new, two back-to-back probes
+        // pick distinct filenames — protects against PID-collision clobbering
+        // of any user file that happened to be named the same way.
+        let tmp = tempfile::tempdir().unwrap();
+        // Plant a file with the deterministic-PID-only legacy name. The new
+        // probe must not touch it (different name, and create_new wouldn't
+        // truncate it even if it did collide).
+        let user_file = tmp
+            .path()
+            .join(format!(".hvac_writable_check_{}", std::process::id()));
+        std::fs::write(&user_file, b"user content").unwrap();
+
+        for _ in 0..3 {
+            assert!(dir_is_writable(tmp.path()));
+        }
+
+        // User's file was not touched.
+        assert!(user_file.exists(), "probe must not delete user file");
+        assert_eq!(
+            std::fs::read(&user_file).unwrap(),
+            b"user content",
+            "probe must not truncate user file"
+        );
     }
 }
