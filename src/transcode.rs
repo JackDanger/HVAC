@@ -487,13 +487,15 @@ pub fn transcode_iso(
 
     if source_duration_secs > 0.0 && out_info.duration_secs > 0.0 {
         let diff = (source_duration_secs - out_info.duration_secs).abs();
-        if diff > 5.0 {
+        let tolerance = duration_tolerance(source_duration_secs);
+        if diff > tolerance {
             let _ = std::fs::remove_file(&final_output);
             bail!(
-                "Duration mismatch: source {:.1}s vs output {:.1}s (diff {:.1}s)",
+                "Duration mismatch: source {:.1}s vs output {:.1}s (diff {:.1}s, tolerance {:.1}s)",
                 source_duration_secs,
                 out_info.duration_secs,
-                diff
+                diff,
+                tolerance
             );
         }
     }
@@ -563,6 +565,21 @@ fn check_output_size_floor(out_size: u64, source_duration_secs: f64) -> Result<(
     Ok(())
 }
 
+/// Allowed duration drift between source and re-encoded output.
+///
+/// Variable-frame-rate sources (screen recordings, Twitch VODs, VHS captures)
+/// legitimately drift more than a couple seconds when re-encoded to CFR. We
+/// scale the tolerance with source length: 1% of the source duration, with a
+/// 5-second floor. A 5-minute clip allows 5s; a 2-hour VOD allows ~72s.
+fn duration_tolerance(source_duration_secs: f64) -> f64 {
+    let scaled = 0.01 * source_duration_secs;
+    if scaled > 5.0 {
+        scaled
+    } else {
+        5.0
+    }
+}
+
 /// Validate transcoded output to prevent corruption.
 fn validate_output(output: &Path, source: &Path, source_duration_secs: f64) -> Result<()> {
     let out_meta = std::fs::metadata(output).context("Output file does not exist")?;
@@ -580,12 +597,14 @@ fn validate_output(output: &Path, source: &Path, source_duration_secs: f64) -> R
 
     if source_duration_secs > 0.0 && out_info.duration_secs > 0.0 {
         let diff = (source_duration_secs - out_info.duration_secs).abs();
-        if diff > 5.0 {
+        let tolerance = duration_tolerance(source_duration_secs);
+        if diff > tolerance {
             bail!(
-                "Duration mismatch: source {:.1}s vs output {:.1}s (diff {:.1}s)",
+                "Duration mismatch: source {:.1}s vs output {:.1}s (diff {:.1}s, tolerance {:.1}s)",
                 source_duration_secs,
                 out_info.duration_secs,
-                diff
+                diff,
+                tolerance
             );
         }
     }
@@ -1120,5 +1139,37 @@ Conversion failed!
             "heavy compression should not trip the size floor; got: {}",
             msg
         );
+    }
+
+    #[test]
+    fn test_duration_tolerance_floor_for_short_sources() {
+        // 5s minimum applies for anything under 500s (where 1% < 5s).
+        assert_eq!(duration_tolerance(0.0), 5.0);
+        assert_eq!(duration_tolerance(60.0), 5.0); // 1 min
+        assert_eq!(duration_tolerance(300.0), 5.0); // 5 min: 1% = 3s, floor wins
+        assert_eq!(duration_tolerance(499.0), 5.0); // just below crossover
+    }
+
+    #[test]
+    fn test_duration_tolerance_scales_at_long_durations() {
+        // Crossover from floor to 1% scaling happens at 500s.
+        // At 500s exactly, scaled (5.0) is not strictly greater than floor (5.0),
+        // so the floor still applies — both are 5.0 either way.
+        assert_eq!(duration_tolerance(500.0), 5.0);
+
+        // 1 hour: 1% = 36s
+        assert!((duration_tolerance(3600.0) - 36.0).abs() < 1e-9);
+
+        // 2 hours: 1% = 72s
+        assert!((duration_tolerance(7200.0) - 72.0).abs() < 1e-9);
+
+        // 4-hour VOD: 1% = 144s
+        assert!((duration_tolerance(14400.0) - 144.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_duration_tolerance_handles_negative() {
+        // Defensive: a bogus negative source duration should still return the floor.
+        assert_eq!(duration_tolerance(-100.0), 5.0);
     }
 }
