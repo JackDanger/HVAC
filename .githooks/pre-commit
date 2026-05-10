@@ -55,10 +55,13 @@ if ! cargo clippy --version >/dev/null 2>&1; then
     exit 0
 fi
 
+# Mirror CI exactly: .github/workflows/ci.yml runs `cargo clippy -- -D warnings`
+# (no --all-targets — tests aren't lint-gated there). If CI ever broadens to
+# --all-targets, broaden here too in lockstep.
 clippy_log=$(mktemp -t hvac-clippy.XXXXXX)
 trap 'rm -f "$clippy_log"' EXIT
-if ! cargo clippy --all-targets -- -D warnings >"$clippy_log" 2>&1; then
-    echo "✖ cargo clippy --all-targets -- -D warnings failed:" >&2
+if ! cargo clippy -- -D warnings >"$clippy_log" 2>&1; then
+    echo "✖ cargo clippy -- -D warnings failed:" >&2
     cat "$clippy_log" >&2
     echo "" >&2
     echo "Either fix the lints or bypass once with:  HVAC_SKIP_CLIPPY=1 git commit ..." >&2
