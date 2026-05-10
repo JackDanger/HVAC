@@ -474,24 +474,9 @@ pub fn transcode_iso(
     // ISO bytes piped in are not the same as the file's effective payload),
     // so we apply the same bitrate-floor check used for direct files.
     let out_meta = std::fs::metadata(&final_output).context("Output file does not exist")?;
-    if out_meta.len() == 0 {
+    if let Err(e) = check_output_size_floor(out_meta.len(), source_duration_secs) {
         let _ = std::fs::remove_file(&final_output);
-        bail!("Output file is empty");
-    }
-
-    // Lower bound: 50 kbps × duration. See validate_output() for rationale.
-    const MIN_KBPS_FLOOR: u64 = 50;
-    let expected_min_bytes =
-        (source_duration_secs as u64).saturating_mul(MIN_KBPS_FLOOR * 1000 / 8);
-    let floor = expected_min_bytes.max(64 * 1024);
-    if out_meta.len() < floor {
-        let _ = std::fs::remove_file(&final_output);
-        bail!(
-            "Output suspiciously small: {} bytes; expected at least {} bytes for {:.0}s duration",
-            out_meta.len(),
-            floor,
-            source_duration_secs
-        );
+        return Err(e);
     }
 
     let out_info = probe::probe_file(&final_output).context("ffprobe cannot read output file")?;
@@ -544,38 +529,48 @@ fn copy_permissions(source: &Path, dest: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Validate transcoded output to prevent corruption.
-fn validate_output(output: &Path, source: &Path, source_duration_secs: f64) -> Result<()> {
-    let out_meta = std::fs::metadata(output).context("Output file does not exist")?;
-    if out_meta.len() == 0 {
+/// Reject outputs that are too small to be a real encode for their duration.
+///
+/// We deliberately don't compare against source size as a ratio: heavy but
+/// legitimate compression (4K HDR Blu-ray → 1080p mobile profile) can produce
+/// outputs at 1-2 % of source size and would false-trip a ratio check.
+/// Instead we floor at `duration × 50 kbps` (well below the smallest realistic
+/// HEVC video+audio output — even speech-only AAC runs ~32 kbps), with a 64 KB
+/// absolute minimum to catch trivially tiny outputs when duration is unknown
+/// or very short.
+///
+/// Returns `Err` with a clear message when too small; never panics.
+fn check_output_size_floor(out_size: u64, source_duration_secs: f64) -> Result<()> {
+    if out_size == 0 {
         bail!("Output file is empty");
     }
 
-    // Confirm source still exists (we may rely on it later) but don't compare
-    // by size ratio — see the bitrate-floor reasoning below.
-    let _ = std::fs::metadata(source).context("Source file disappeared")?;
-
-    // Lower bound: 50 kbps × duration. A real video+audio HEVC encode never goes
-    // below this even at extreme compression. Pure source-size ratios false-trip
-    // on heavy compression (e.g. 4K HDR Blu-ray → 1080p mobile profile produces
-    // ~1-2% of source size, which is legitimate). 50 kbps is well below the
-    // floor of any real-world HEVC output: even speech-only audio runs ~32 kbps
-    // and HEVC video at any usable quality is at least tens of kbps on top.
-    // Anything below this is almost certainly a truncated/corrupt encode.
     const MIN_KBPS_FLOOR: u64 = 50;
+    const ABSOLUTE_FLOOR_BYTES: u64 = 64 * 1024;
+
     let expected_min_bytes =
         (source_duration_secs as u64).saturating_mul(MIN_KBPS_FLOOR * 1000 / 8);
-    // Also enforce a 64KB absolute floor to catch trivially tiny outputs even
-    // when duration is unknown (0) or very short.
-    let floor = expected_min_bytes.max(64 * 1024);
-    if out_meta.len() < floor {
+    let floor = expected_min_bytes.max(ABSOLUTE_FLOOR_BYTES);
+    if out_size < floor {
         bail!(
             "Output suspiciously small: {} bytes; expected at least {} bytes for {:.0}s duration",
-            out_meta.len(),
+            out_size,
             floor,
             source_duration_secs
         );
     }
+
+    Ok(())
+}
+
+/// Validate transcoded output to prevent corruption.
+fn validate_output(output: &Path, source: &Path, source_duration_secs: f64) -> Result<()> {
+    let out_meta = std::fs::metadata(output).context("Output file does not exist")?;
+    // Confirm source still exists; we don't compare sizes by ratio (see
+    // check_output_size_floor below for why) but a vanished source is a
+    // distinct failure worth surfacing separately.
+    let _ = std::fs::metadata(source).context("Source file disappeared")?;
+    check_output_size_floor(out_meta.len(), source_duration_secs)?;
 
     let out_info = probe::probe_file(output).context("ffprobe cannot read output file")?;
 
