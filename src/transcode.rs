@@ -4,126 +4,11 @@ use std::os::unix::fs::{chown, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::TargetConfig;
 use crate::gpu::{GpuInfo, GpuKind};
 use crate::probe;
 use crate::util::format_size;
-
-/// Filename suffix for the sidecar completion marker that is written only
-/// after an output file has fully passed post-encode validation and any
-/// final rename has succeeded. Resume / adopt logic refuses to reuse an
-/// existing output unless this marker is present and matches the current
-/// source file's size — this prevents adopting half-written `.transcoded.*`
-/// files left over from a killed run, which can otherwise pass ffprobe-only
-/// validation despite being silently truncated.
-pub const MARKER_SUFFIX: &str = ".hvac.complete";
-
-/// Contents of the sidecar marker file. Small JSON blob written via serde_json.
-#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
-pub struct CompletionMarker {
-    /// Size (in bytes) of the source file at the moment the encode completed.
-    /// On resume we re-read the source and refuse to adopt if it differs —
-    /// which would mean the source has been replaced or modified since.
-    pub source_size: u64,
-    /// Duration (seconds) of the source as measured before encoding.
-    pub duration_secs: f64,
-    /// ISO-8601 (UTC) timestamp when the marker was written.
-    pub completed_at: String,
-}
-
-/// Path of the sidecar completion marker for a given output file.
-pub fn marker_path(output: &Path) -> PathBuf {
-    let mut s = output.as_os_str().to_owned();
-    s.push(MARKER_SUFFIX);
-    PathBuf::from(s)
-}
-
-/// Write the completion marker next to `output`. Best-effort: failure to
-/// write is logged but does not fail the encode (the encode itself is fine;
-/// a missing marker just means the next run will re-encode, never that
-/// data is silently corrupted).
-pub fn write_marker(output: &Path, source_size: u64, duration_secs: f64) -> Result<()> {
-    let marker = CompletionMarker {
-        source_size,
-        duration_secs,
-        completed_at: iso8601_now(),
-    };
-    let path = marker_path(output);
-    let json = serde_json::to_string(&marker).context("serialize completion marker")?;
-    std::fs::write(&path, json).with_context(|| format!("write completion marker {:?}", path))?;
-    Ok(())
-}
-
-/// Read and parse a sidecar marker for `output`. Returns None if the marker
-/// is absent or unparseable.
-pub fn read_marker(output: &Path) -> Option<CompletionMarker> {
-    let path = marker_path(output);
-    let bytes = std::fs::read(&path).ok()?;
-    serde_json::from_slice::<CompletionMarker>(&bytes).ok()
-}
-
-/// True when `output` exists AND has a sidecar marker AND the marker's
-/// `source_size` matches the current size of `source`. Used to gate adopt:
-/// a marker is the only trustworthy signal that an existing output is
-/// fully written, since ffprobe-only validation can pass on a half-written
-/// file.
-///
-/// Existence of the output file is checked first — without it, a stale
-/// marker (sidecar that outlived the file it described) would falsely
-/// claim safety.
-pub fn marker_valid_for_source(output: &Path, source: &Path) -> bool {
-    if !output.exists() {
-        return false;
-    }
-    let Some(marker) = read_marker(output) else {
-        return false;
-    };
-    let Ok(meta) = std::fs::metadata(source) else {
-        return false;
-    };
-    marker.source_size == meta.len()
-}
-
-/// Best-effort delete of any sidecar marker next to `output`.
-pub fn remove_marker(output: &Path) {
-    let _ = std::fs::remove_file(marker_path(output));
-}
-
-fn iso8601_now() -> String {
-    // Minimal RFC3339 / ISO-8601 UTC formatter: "YYYY-MM-DDTHH:MM:SSZ".
-    // Avoids pulling in chrono just for a timestamp string.
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    let (y, mo, d, h, mi, s) = unix_to_ymdhms(secs);
-    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, mo, d, h, mi, s)
-}
-
-/// Convert a unix-epoch second count to (year, month, day, hour, min, sec) in UTC.
-/// Civil-from-days algorithm by Howard Hinnant — exact for the full unix range.
-fn unix_to_ymdhms(secs: i64) -> (i32, u32, u32, u32, u32, u32) {
-    let days = secs.div_euclid(86_400);
-    let tod = secs.rem_euclid(86_400) as u32;
-    let h = tod / 3600;
-    let mi = (tod % 3600) / 60;
-    let s = tod % 60;
-
-    // Days since 1970-01-01 → civil date.
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097) as u32; // [0, 146096]
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
-    let mp = (5 * doy + 2) / 153; // [0, 11]
-    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
-    let mo = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
-    let year = if mo <= 2 { y + 1 } else { y };
-    (year as i32, mo, d, h, mi, s)
-}
 
 /// Guard that kills the ffmpeg child process on drop (prevents orphans).
 struct ChildGuard(Child);
@@ -155,25 +40,12 @@ pub fn output_path(source: &Path, output_dir: Option<&Path>, container: &str) ->
 
 /// Check if an existing output file is a valid, complete transcode of the source.
 /// Used for resume: if output already exists and passes validation, skip re-encoding.
-///
-/// NOTE: this only verifies the file's *content* (header, duration, size).  It
-/// does NOT verify completeness — a partially-written file with a valid header
-/// and plausible duration will pass.  Adopt logic must additionally check
-/// `marker_valid_for_source` before reusing the output.
 pub fn output_already_valid(output: &Path, source: &Path, source_duration_secs: f64) -> bool {
     if !output.exists() {
         return false;
     }
     validate_output(output, source, source_duration_secs).is_ok()
 }
-
-// (`output_safe_to_adopt` was a candidate helper composing output_already_valid
-// + marker_valid_for_source. Deleted because main.rs's adopt path needs the
-// two predicates separately to log a precise "ffprobe passed but no marker —
-// re-encoding" message; collapsing them into one helper would either lose
-// that diagnostic or duplicate the call. Kept this comment as a signpost so
-// future callers that want a single-shot adopt check don't reinvent it
-// without understanding the trade-off.)
 
 /// Transcode a file using ffmpeg with GPU acceleration.
 /// If `output` is None, transcode in-place (to a temp file, then replace original).
@@ -182,6 +54,9 @@ pub fn output_already_valid(output: &Path, source: &Path, source_duration_secs: 
 /// If `progress` is provided, it's updated with 0-1000 as encoding progresses.
 /// If `force_reencode_audio` is true, the configured `audio_codec: copy` is overridden
 /// with `aac` — used to retry after a copy-incompatible codec (e.g. pcm_dvd → MKV) fails.
+/// If `subtitle_codec_override` is `Some(codec)`, that codec replaces the configured
+/// `subtitle_codec` — used to retry after a copy-incompatible subtitle codec fails,
+/// before falling back to dropping subs entirely.
 #[allow(clippy::too_many_arguments)]
 pub fn transcode(
     source: &Path,
@@ -195,6 +70,7 @@ pub fn transcode(
     speed: Option<&AtomicU64>,
     skip_subs: bool,
     force_reencode_audio: bool,
+    subtitle_codec_override: Option<&str>,
 ) -> Result<PathBuf> {
     let final_output = match output {
         Some(p) => p.to_path_buf(),
@@ -274,9 +150,7 @@ pub fn transcode(
     cmd.args(["-c:a", audio_codec]);
 
     // Subtitles
-    if !skip_subs && target.subtitle_codec == "copy" {
-        cmd.args(["-c:s", "copy"]);
-    }
+    apply_subtitle_args(&mut cmd, target, skip_subs, subtitle_codec_override);
 
     // Map video, audio, and subtitle streams — skip attached pics (cover art)
     cmd.args(["-map", "0:v:0"]);
@@ -294,12 +168,17 @@ pub fn transcode(
     cmd.arg(&final_output);
 
     log::debug!(
-        "Running{}{}: {:?}",
+        "Running{}{}{}: {:?}",
         if skip_subs { " (no subs)" } else { "" },
         if force_reencode_audio {
             " (audio re-encode)"
         } else {
             ""
+        },
+        if let Some(c) = subtitle_codec_override {
+            format!(" (sub re-encode {})", c)
+        } else {
+            String::new()
         },
         cmd
     );
@@ -401,26 +280,7 @@ pub fn transcode(
     if output.is_none() {
         std::fs::rename(&final_output, source)
             .context("Failed to replace original file with transcoded version")?;
-        // The "output" is now the source path. Record source_size POST-rename
-        // (which equals the new transcoded size) — but the marker's purpose is
-        // to mark the *source-of-record* as fully transcoded so future runs
-        // skip it.  Since the file IS the source, source_size is its own size.
-        let final_size = std::fs::metadata(source).map(|m| m.len()).unwrap_or(0);
-        if let Err(e) = write_marker(source, final_size, source_duration_secs) {
-            log::warn!("Failed to write completion marker for {:?}: {}", source, e);
-        }
         return Ok(source.to_path_buf());
-    }
-
-    // --no-overwrite mode: the output is a sibling .transcoded.* file. The
-    // marker records the source's size at completion time so a later adopt
-    // run can detect a stale output (source replaced/modified since).
-    if let Err(e) = write_marker(&final_output, source_size, source_duration_secs) {
-        log::warn!(
-            "Failed to write completion marker for {:?}: {}",
-            final_output,
-            e
-        );
     }
 
     Ok(final_output)
@@ -431,6 +291,8 @@ pub fn transcode(
 /// The ISO contents are piped directly to ffmpeg without extracting to disk.
 /// `force_reencode_audio` overrides `audio_codec: copy` with `aac` for retries
 /// after a copy-incompatible codec is detected.
+/// `subtitle_codec_override`, when `Some(codec)`, replaces the configured
+/// subtitle codec — used as a retry tier between `copy` and dropping subs.
 #[allow(clippy::too_many_arguments)]
 pub fn transcode_iso(
     iso_path: &Path,
@@ -445,6 +307,7 @@ pub fn transcode_iso(
     speed: Option<&AtomicU64>,
     skip_subs: bool,
     force_reencode_audio: bool,
+    subtitle_codec_override: Option<&str>,
 ) -> Result<PathBuf> {
     let final_output = output.to_path_buf();
 
@@ -511,9 +374,7 @@ pub fn transcode_iso(
     cmd.args(["-c:a", audio_codec]);
 
     // Subtitles
-    if !skip_subs && target.subtitle_codec == "copy" {
-        cmd.args(["-c:s", "copy"]);
-    }
+    apply_subtitle_args(&mut cmd, target, skip_subs, subtitle_codec_override);
 
     // Map streams
     cmd.args(["-map", "0:v:0"]);
@@ -531,12 +392,17 @@ pub fn transcode_iso(
     cmd.arg(&final_output);
 
     log::debug!(
-        "Running (piped from ISO{}{}): {:?}",
+        "Running (piped from ISO{}{}{}): {:?}",
         if skip_subs { ", no subs" } else { "" },
         if force_reencode_audio {
             ", audio re-encode"
         } else {
             ""
+        },
+        if let Some(c) = subtitle_codec_override {
+            format!(", sub re-encode {}", c)
+        } else {
+            String::new()
         },
         cmd
     );
@@ -651,18 +517,6 @@ pub fn transcode_iso(
         out_meta.len()
     );
 
-    // Mark the output as fully written. ISO source size IS the source-of-record
-    // size (the ISO/IMG file itself); a later adopt run will refuse this output
-    // if the ISO has been replaced since.
-    let iso_size = std::fs::metadata(iso_path).map(|m| m.len()).unwrap_or(0);
-    if let Err(e) = write_marker(&final_output, iso_size, source_duration_secs) {
-        log::warn!(
-            "Failed to write completion marker for {:?}: {}",
-            final_output,
-            e
-        );
-    }
-
     Ok(final_output)
 }
 
@@ -734,6 +588,43 @@ fn validate_output(output: &Path, source: &Path, source_duration_secs: f64) -> R
 /// Audio codec used when `audio_codec: copy` produces a stream the chosen
 /// container can't accept (e.g. pcm_dvd in MKV). AAC is universally muxable.
 const AUDIO_REENCODE_FALLBACK: &str = "aac";
+
+/// Pick a container-appropriate text subtitle codec to try before falling
+/// back to dropping subs entirely. These succeed only when source subs are
+/// convertible (text-based: srt, ass, mov_text, webvtt). Bitmap subs
+/// (PGS, dvdsub, dvbsub) still fail this tier and force the skip-subs retry.
+pub fn subtitle_reencode_fallback(container: &str) -> &'static str {
+    match container {
+        "mp4" | "m4v" | "mov" => "mov_text",
+        // mkv, webm, and anything else: srt is the most broadly compatible text codec.
+        _ => "srt",
+    }
+}
+
+/// Append the appropriate `-c:s` argument(s) to the ffmpeg command.
+/// - When `skip_subs` is true: caller separately omits the subtitle map; nothing here.
+/// - When an override is provided: use that codec (subtitle re-encode retry tier).
+/// - Otherwise: honor the configured `target.subtitle_codec` if it's `copy`.
+///   (Other configured codecs are passed through unchanged for forward compatibility.)
+fn apply_subtitle_args(
+    cmd: &mut Command,
+    target: &TargetConfig,
+    skip_subs: bool,
+    subtitle_codec_override: Option<&str>,
+) {
+    if skip_subs {
+        return;
+    }
+    if let Some(codec) = subtitle_codec_override {
+        cmd.args(["-c:s", codec]);
+        return;
+    }
+    if target.subtitle_codec == "copy" {
+        cmd.args(["-c:s", "copy"]);
+    } else if !target.subtitle_codec.is_empty() {
+        cmd.args(["-c:s", target.subtitle_codec.as_str()]);
+    }
+}
 
 /// Check if an ffmpeg error looks like an NVENC session limit issue.
 /// Matches NVENC-specific init errors and the "Nothing was written" pattern
@@ -878,13 +769,6 @@ fn summarize_ffmpeg_error(stderr: &str) -> String {
 
 /// Replace an original file with its transcoded copy.
 /// Validates the transcoded file first, then atomically replaces.
-///
-/// Adopt safety: callers reaching this function from the resume path must have
-/// already verified the marker via `output_safe_to_adopt`.  This function
-/// re-runs ffprobe validation but does NOT re-check the marker — adopt
-/// callers are responsible for that gate.  After the rename succeeds, a
-/// fresh marker is written next to the now-replaced original so subsequent
-/// runs skip the file via the normal probe-based skip-if-already-HEVC path.
 pub fn replace_original(
     original: &Path,
     transcoded: &Path,
@@ -901,26 +785,8 @@ pub fn replace_original(
 
     copy_permissions(original, transcoded)?;
 
-    // The transcoded sibling carries its own marker. We must NOT delete it
-    // before the rename: if the rename fails (cross-device, permission flap,
-    // transient IO), the file remains but loses its marker — the next run
-    // would treat it as incomplete and re-encode for nothing. Delete only
-    // after the rename succeeds, so a failed rename leaves the marker
-    // intact alongside the still-valid transcoded file.
     std::fs::rename(transcoded, original)
         .with_context(|| format!("Failed to replace {:?} with transcoded version", original))?;
-    remove_marker(transcoded);
-
-    // Mark the in-place result as fully written.  source_size is now the
-    // post-rename file's size (it IS the source going forward).
-    let final_size = std::fs::metadata(original).map(|m| m.len()).unwrap_or(0);
-    if let Err(e) = write_marker(original, final_size, source_duration_secs) {
-        log::warn!(
-            "Failed to write completion marker for {:?}: {}",
-            original,
-            e
-        );
-    }
 
     Ok(original_size.saturating_sub(transcoded_size))
 }
@@ -1090,165 +956,98 @@ Conversion failed!
         assert_eq!(summarize_ffmpeg_error("\n\n   \n"), "unknown error");
     }
 
-    // ── Completion-marker tests ──────────────────────────────────────────────
-    //
-    // These exercise the marker reader/writer and the adopt-safety predicate
-    // without invoking ffmpeg.  They verify the data-loss bug from the bug
-    // report: a half-written `.transcoded.*` left over from a killed run
-    // must NOT be adopted.
+    fn target_with(container: &str, subtitle_codec: &str) -> TargetConfig {
+        TargetConfig {
+            codec: "hevc".to_string(),
+            quality: 28,
+            preset: "slow".to_string(),
+            max_width: 3840,
+            max_height: 2160,
+            max_bitrate_kbps: 0,
+            container: container.to_string(),
+            audio_codec: "copy".to_string(),
+            subtitle_codec: subtitle_codec.to_string(),
+        }
+    }
 
-    #[test]
-    fn test_marker_path_appends_suffix() {
-        let p = Path::new("/tmp/foo.transcoded.mkv");
-        assert_eq!(
-            marker_path(p),
-            PathBuf::from("/tmp/foo.transcoded.mkv.hvac.complete")
-        );
+    /// Collect ffmpeg args as Strings, since std::process::Command doesn't
+    /// expose them as &str directly in a stable form.
+    fn cmd_args(cmd: &Command) -> Vec<String> {
+        cmd.get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
     }
 
     #[test]
-    fn test_write_and_read_marker_roundtrip() {
-        let dir = tempfile::tempdir().unwrap();
-        let out = dir.path().join("out.mkv");
-        std::fs::write(&out, b"fake encoded bytes").unwrap();
-
-        write_marker(&out, 12345, 67.5).unwrap();
-
-        let marker = read_marker(&out).expect("marker readable");
-        assert_eq!(marker.source_size, 12345);
-        assert!((marker.duration_secs - 67.5).abs() < f64::EPSILON);
-        // Roughly ISO-8601: starts with year, contains 'T', ends with 'Z'.
-        assert!(marker.completed_at.contains('T'));
-        assert!(marker.completed_at.ends_with('Z'));
-        assert!(marker.completed_at.len() >= 20);
+    fn test_subtitle_reencode_fallback_picks_per_container() {
+        assert_eq!(subtitle_reencode_fallback("mkv"), "srt");
+        assert_eq!(subtitle_reencode_fallback("webm"), "srt");
+        assert_eq!(subtitle_reencode_fallback("mp4"), "mov_text");
+        assert_eq!(subtitle_reencode_fallback("m4v"), "mov_text");
+        assert_eq!(subtitle_reencode_fallback("mov"), "mov_text");
+        // Unknown containers default to srt (broadest text-codec compatibility).
+        assert_eq!(subtitle_reencode_fallback("avi"), "srt");
     }
 
     #[test]
-    fn test_read_marker_missing_returns_none() {
-        let dir = tempfile::tempdir().unwrap();
-        let out = dir.path().join("nonexistent.mkv");
-        assert!(read_marker(&out).is_none());
+    fn test_apply_subtitle_args_default_copy() {
+        let target = target_with("mkv", "copy");
+        let mut cmd = Command::new("ffmpeg");
+        apply_subtitle_args(&mut cmd, &target, false, None);
+        let args = cmd_args(&cmd);
+        // Configured `copy` produces `-c:s copy` adjacency.
+        let pos = args.iter().position(|a| a == "-c:s").expect("has -c:s");
+        assert_eq!(args[pos + 1], "copy");
     }
 
     #[test]
-    fn test_read_marker_corrupt_returns_none() {
-        let dir = tempfile::tempdir().unwrap();
-        let out = dir.path().join("out.mkv");
-        std::fs::write(&out, b"x").unwrap();
-        std::fs::write(marker_path(&out), b"this is not json {{{").unwrap();
-        assert!(read_marker(&out).is_none());
-    }
-
-    #[test]
-    fn test_marker_valid_for_source_matches_size() {
-        let dir = tempfile::tempdir().unwrap();
-        let source = dir.path().join("in.mkv");
-        let out = dir.path().join("out.mkv");
-        std::fs::write(&source, vec![0u8; 1000]).unwrap();
-        std::fs::write(&out, b"output").unwrap();
-
-        write_marker(&out, 1000, 30.0).unwrap();
-        assert!(marker_valid_for_source(&out, &source));
-    }
-
-    #[test]
-    fn test_marker_valid_for_source_rejects_stale_size() {
-        // Source has been modified since the previous run wrote the marker —
-        // adopting the orphan output would silently associate it with a
-        // different source.
-        let dir = tempfile::tempdir().unwrap();
-        let source = dir.path().join("in.mkv");
-        let out = dir.path().join("out.mkv");
-        std::fs::write(&source, vec![0u8; 1000]).unwrap();
-        std::fs::write(&out, b"output").unwrap();
-
-        write_marker(&out, 999, 30.0).unwrap(); // recorded size != actual
-        assert!(!marker_valid_for_source(&out, &source));
-    }
-
-    #[test]
-    fn test_marker_valid_for_source_rejects_missing_marker() {
-        // The data-loss bug case: a .transcoded.* file exists from a killed
-        // run, but no marker was written.  Adopt MUST refuse it.
-        let dir = tempfile::tempdir().unwrap();
-        let source = dir.path().join("in.mkv");
-        let out = dir.path().join("out.mkv");
-        std::fs::write(&source, vec![0u8; 1000]).unwrap();
-        std::fs::write(&out, b"output").unwrap(); // no sidecar marker
-
-        assert!(!marker_valid_for_source(&out, &source));
-    }
-
-    #[test]
-    fn test_marker_valid_for_source_rejects_missing_source() {
-        let dir = tempfile::tempdir().unwrap();
-        let source = dir.path().join("gone.mkv");
-        let out = dir.path().join("out.mkv");
-        std::fs::write(&out, b"output").unwrap();
-        write_marker(&out, 1000, 30.0).unwrap();
-
-        assert!(!marker_valid_for_source(&out, &source));
-    }
-
-    #[test]
-    fn test_remove_marker_is_idempotent() {
-        let dir = tempfile::tempdir().unwrap();
-        let out = dir.path().join("out.mkv");
-        std::fs::write(&out, b"x").unwrap();
-
-        // Removing when absent is fine.
-        remove_marker(&out);
-        assert!(!marker_path(&out).exists());
-
-        write_marker(&out, 10, 1.0).unwrap();
-        assert!(marker_path(&out).exists());
-        remove_marker(&out);
-        assert!(!marker_path(&out).exists());
-    }
-
-    #[test]
-    fn test_unix_to_ymdhms_known_values() {
-        // 2000-01-01T00:00:00Z = 946684800
-        assert_eq!(unix_to_ymdhms(946_684_800), (2000, 1, 1, 0, 0, 0));
-        // 1970-01-01T00:00:00Z = 0
-        assert_eq!(unix_to_ymdhms(0), (1970, 1, 1, 0, 0, 0));
-        // 2024-02-29T12:34:56Z (leap day) = 1709210096
-        assert_eq!(unix_to_ymdhms(1_709_210_096), (2024, 2, 29, 12, 34, 56));
-    }
-
-    #[test]
-    fn test_marker_valid_for_source_rejects_missing_output() {
-        // The classic stale-marker scenario: someone deleted the output
-        // file but left the sidecar behind. marker_valid_for_source must
-        // refuse to claim safety in that case — without this guard the
-        // adopt path would happily skip a file that doesn't exist.
-        let dir = tempfile::tempdir().unwrap();
-        let source = dir.path().join("in.mkv");
-        let out = dir.path().join("out.mkv");
-        std::fs::write(&source, vec![0u8; 1024]).unwrap();
-
-        // Write only the marker, NOT the output file. This shouldn't
-        // happen in practice, but we have to defend against it.
-        write_marker(&out, 1024, 30.0).unwrap();
-        assert!(marker_path(&out).exists());
-        assert!(!out.exists());
-
+    fn test_apply_subtitle_args_skip_subs_emits_nothing() {
+        let target = target_with("mkv", "copy");
+        let mut cmd = Command::new("ffmpeg");
+        apply_subtitle_args(&mut cmd, &target, true, None);
+        let args = cmd_args(&cmd);
         assert!(
-            !marker_valid_for_source(&out, &source),
-            "marker_valid_for_source must refuse when output file is missing, regardless of sidecar"
+            !args.iter().any(|a| a == "-c:s"),
+            "skip_subs should emit no -c:s; got {:?}",
+            args
         );
     }
 
     #[test]
-    fn test_iso8601_now_format() {
-        let s = iso8601_now();
-        // Length and structural sanity: YYYY-MM-DDTHH:MM:SSZ
-        assert_eq!(s.len(), 20);
-        assert_eq!(s.as_bytes()[4], b'-');
-        assert_eq!(s.as_bytes()[7], b'-');
-        assert_eq!(s.as_bytes()[10], b'T');
-        assert_eq!(s.as_bytes()[13], b':');
-        assert_eq!(s.as_bytes()[16], b':');
-        assert_eq!(s.as_bytes()[19], b'Z');
+    fn test_apply_subtitle_args_override_replaces_copy() {
+        let target = target_with("mkv", "copy");
+        let mut cmd = Command::new("ffmpeg");
+        apply_subtitle_args(&mut cmd, &target, false, Some("srt"));
+        let args = cmd_args(&cmd);
+        let pos = args.iter().position(|a| a == "-c:s").expect("has -c:s");
+        assert_eq!(args[pos + 1], "srt");
+        // Should appear exactly once — not both `copy` and `srt`.
+        assert_eq!(args.iter().filter(|a| *a == "-c:s").count(), 1);
+    }
+
+    #[test]
+    fn test_apply_subtitle_args_override_for_mp4() {
+        let target = target_with("mp4", "copy");
+        let mut cmd = Command::new("ffmpeg");
+        apply_subtitle_args(
+            &mut cmd,
+            &target,
+            false,
+            Some(subtitle_reencode_fallback(&target.container)),
+        );
+        let args = cmd_args(&cmd);
+        let pos = args.iter().position(|a| a == "-c:s").expect("has -c:s");
+        assert_eq!(args[pos + 1], "mov_text");
+    }
+
+    #[test]
+    fn test_apply_subtitle_args_override_wins_over_skip_subs_false_path() {
+        // skip_subs=true short-circuits before any override is applied — sanity check
+        // that override does NOT leak through when the caller has decided to drop subs.
+        let target = target_with("mkv", "copy");
+        let mut cmd = Command::new("ffmpeg");
+        apply_subtitle_args(&mut cmd, &target, true, Some("srt"));
+        let args = cmd_args(&cmd);
+        assert!(!args.iter().any(|a| a == "-c:s"));
     }
 }

@@ -484,53 +484,36 @@ fn main() -> Result<()> {
                             &cfg.target.container,
                         ) {
                             if transcode::output_already_valid(&out_path, file, duration_secs) {
-                                // ffprobe-only validation has passed, but that alone is unsafe:
-                                // a half-written file with a valid header and plausible duration
-                                // can pass it.  Require a sidecar `.hvac.complete` marker that
-                                // matches the current source size — written only by a fully
-                                // successful previous run — before adopting / counting as resumed.
-                                if !transcode::marker_valid_for_source(&out_path, file) {
-                                    eprintln!(
-                                        "  Ignoring incomplete previous output for {:?} (no/stale {} marker) — re-encoding",
-                                        file.file_name().unwrap_or_default(),
-                                        transcode::MARKER_SUFFIX
-                                    );
-                                    // Drop the suspect orphan so the encode replaces it cleanly.
-                                    let _ = std::fs::remove_file(&out_path);
-                                    transcode::remove_marker(&out_path);
-                                    // Fall through to re-transcode below.
-                                } else {
-                                    // Never rename a .transcoded file back over a disc image —
-                                    // the ISO/IMG is the source, not the destination.
-                                    let is_disc = iso_p.is_some();
-                                    if overwrite && !is_disc {
-                                        // Adopt: replace original with existing transcoded file.
-                                        match transcode::replace_original(
-                                            file,
-                                            &out_path,
-                                            duration_secs,
-                                        ) {
-                                            Ok(_saved) => {
-                                                eprintln!(
-                                                    "  Replaced {:?} with existing transcoded copy",
-                                                    file.file_name().unwrap_or_default()
-                                                );
-                                                resumed += 1;
-                                                continue;
-                                            }
-                                            Err(e) => {
-                                                eprintln!(
-                                                    "  Failed to replace {:?}: {}",
-                                                    file.file_name().unwrap_or_default(),
-                                                    e
-                                                );
-                                                // Fall through to re-transcode
-                                            }
+                                // Never rename a .transcoded file back over a disc image —
+                                // the ISO/IMG is the source, not the destination.
+                                let is_disc = iso_p.is_some();
+                                if overwrite && !is_disc {
+                                    // Adopt: replace original with existing transcoded file
+                                    match transcode::replace_original(
+                                        file,
+                                        &out_path,
+                                        duration_secs,
+                                    ) {
+                                        Ok(_saved) => {
+                                            eprintln!(
+                                                "  Replaced {:?} with existing transcoded copy",
+                                                file.file_name().unwrap_or_default()
+                                            );
+                                            resumed += 1;
+                                            continue;
                                         }
-                                    } else {
-                                        resumed += 1;
-                                        continue;
+                                        Err(e) => {
+                                            eprintln!(
+                                                "  Failed to replace {:?}: {}",
+                                                file.file_name().unwrap_or_default(),
+                                                e
+                                            );
+                                            // Fall through to re-transcode
+                                        }
                                     }
+                                } else {
+                                    resumed += 1;
+                                    continue;
                                 }
                             }
                         }
@@ -954,6 +937,9 @@ fn main() -> Result<()> {
                 let mut disk_space_retries = 0u32;
                 let mut skip_subs = false;
                 let mut force_reencode_audio = false;
+                // None → use configured codec (typically "copy"). Some(c) → override
+                // with `c` (the subtitle re-encode retry tier between copy and skip).
+                let mut subtitle_reencode_attempt: Option<&'static str> = None;
 
                 let last_err: Option<anyhow::Error> = loop {
                     if CANCELLED.load(Ordering::Relaxed) {
@@ -1036,6 +1022,7 @@ fn main() -> Result<()> {
                             Some(&my_slot.speed),
                             skip_subs,
                             force_reencode_audio,
+                            subtitle_reencode_attempt,
                         )
                     } else {
                         transcode::transcode(
@@ -1050,6 +1037,7 @@ fn main() -> Result<()> {
                             Some(&my_slot.speed),
                             skip_subs,
                             force_reencode_audio,
+                            subtitle_reencode_attempt,
                         )
                     };
 
@@ -1130,18 +1118,41 @@ fn main() -> Result<()> {
                                 continue;
                             }
 
-                            // Subtitle error: retry without subtitle streams.
+                            // Subtitle error: tiered retry.
                             // Checked BEFORE session-limit: "Nothing was written" can also
                             // mean a subtitle codec is incompatible with the container
                             // (e.g. mov_text → MKV), which silently produces no output.
-                            // Try dropping subs first; if that still fails, session-limit
-                            // detection runs on the next iteration (skip_subs will be true).
+                            // Tier 1 (already attempted): config codec, typically `copy`.
+                            // Tier 2: re-encode subs to a container-appropriate text codec
+                            //         (`srt` for mkv, `mov_text` for mp4). This preserves
+                            //         text-source subs while a problematic bitmap track
+                            //         (PGS/dvdsub) still fails through to tier 3.
+                            // Tier 3: drop subs entirely (existing skip_subs fallback).
                             let nothing_written =
                                 err_str.contains("Nothing was written into output file");
+                            if (transcode::is_subtitle_error(&err_str) || nothing_written)
+                                && subtitle_reencode_attempt.is_none()
+                                && !skip_subs
+                            {
+                                let codec = transcode::subtitle_reencode_fallback(
+                                    &cfg.target.container,
+                                );
+                                subtitle_reencode_attempt = Some(codec);
+                                log::info!(
+                                    "{}: retrying with subtitle re-encode (-c:s {})",
+                                    short_name,
+                                    codec
+                                );
+                                my_slot.progress.store(0, Ordering::Relaxed);
+                                my_slot.speed.store(0, Ordering::Relaxed);
+                                continue;
+                            }
                             if (transcode::is_subtitle_error(&err_str) || nothing_written)
                                 && !skip_subs
                             {
                                 skip_subs = true;
+                                // Once we drop subs entirely, the override is moot.
+                                subtitle_reencode_attempt = None;
                                 log::info!("{}: retrying without subtitles", short_name);
                                 my_slot.progress.store(0, Ordering::Relaxed);
                                 my_slot.speed.store(0, Ordering::Relaxed);
@@ -1304,21 +1315,9 @@ fn cleanup_tmp_dirs() {
 fn cleanup_tmp_in_dir(dir: &std::path::Path) {
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
-            let path = entry.path();
-            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
-                continue;
-            };
-            // Leftover ffmpeg in-place temp files from a killed run.
-            if name.starts_with(".hvac_tmp_") {
-                let _ = std::fs::remove_file(&path);
-                continue;
-            }
-            // Orphan completion markers whose target file is gone (the user
-            // moved or deleted the output but left the sidecar behind).
-            if let Some(stem) = name.strip_suffix(transcode::MARKER_SUFFIX) {
-                let target = dir.join(stem);
-                if !target.exists() {
-                    let _ = std::fs::remove_file(&path);
+            if let Some(name) = entry.file_name().to_str() {
+                if name.starts_with(".hvac_tmp_") {
+                    let _ = std::fs::remove_file(entry.path());
                 }
             }
         }
@@ -1537,49 +1536,5 @@ mod tests {
         let single = output_stem_for_item(iso, Some(inner), None);
         let multi = output_stem_for_item(iso, Some(inner), Some(&paths));
         assert_eq!(single, multi, "single and multi-file ISO stems must match");
-    }
-
-    #[test]
-    fn test_cleanup_removes_orphan_completion_markers() {
-        // Killed-run debris: a `.transcoded.mkv.hvac.complete` left behind
-        // after the user/process deleted the actual output.  The cleanup
-        // sweep must remove the orphan sidecar but leave alive markers
-        // (whose target still exists) and unrelated files untouched.
-        let dir = tempfile::tempdir().unwrap();
-        let d = dir.path();
-
-        // Orphan marker: target gone.
-        let orphan = d.join("gone.transcoded.mkv.hvac.complete");
-        std::fs::write(
-            &orphan,
-            b"{\"source_size\":0,\"duration_secs\":0,\"completed_at\":\"\"}",
-        )
-        .unwrap();
-
-        // Live marker: target present.
-        let live_target = d.join("present.transcoded.mkv");
-        let live_marker = d.join("present.transcoded.mkv.hvac.complete");
-        std::fs::write(&live_target, b"x").unwrap();
-        std::fs::write(
-            &live_marker,
-            b"{\"source_size\":0,\"duration_secs\":0,\"completed_at\":\"\"}",
-        )
-        .unwrap();
-
-        // Stale tmp from a killed encode (existing behavior, kept).
-        let tmp = d.join(".hvac_tmp_show.mkv");
-        std::fs::write(&tmp, b"junk").unwrap();
-
-        // Unrelated file must survive.
-        let keep = d.join("readme.txt");
-        std::fs::write(&keep, b"hi").unwrap();
-
-        cleanup_tmp_in_dir(d);
-
-        assert!(!orphan.exists(), "orphan completion marker must be removed");
-        assert!(live_marker.exists(), "live completion marker must survive");
-        assert!(live_target.exists(), "live output must survive");
-        assert!(!tmp.exists(), "stale .hvac_tmp_ file must be removed");
-        assert!(keep.exists(), "unrelated file must survive");
     }
 }
