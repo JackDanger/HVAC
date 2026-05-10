@@ -211,6 +211,52 @@ struct WorkItem {
     inner_paths: Option<Vec<String>>,
 }
 
+/// Combine the representative probe (the first inner file of an ISO main
+/// feature) with optional per-file probes of the remaining inner files into
+/// `(bitrate_kbps, duration_secs)` for the WorkItem.
+///
+/// - `bitrate_kbps` is the maximum across all successful probes. Using max
+///   ensures `-maxrate` doesn't throttle later, higher-bitrate VOBs.
+/// - `duration_secs` is the sum of every probe's duration. If any per-file
+///   probe failed (None) we fall back to `representative.duration_secs *
+///   total_file_count` since the sum would otherwise undercount.
+/// - `total_file_count` should be the total number of inner files in the
+///   feature (including the representative). 0 or 1 means "not multi-file"
+///   and we just return the representative's values unchanged.
+fn aggregate_iso_probes(
+    representative: &probe::MediaInfo,
+    extra_probes: &[Option<probe::MediaInfo>],
+    total_file_count: usize,
+) -> (u32, f64) {
+    if total_file_count <= 1 {
+        return (representative.bitrate_kbps, representative.duration_secs);
+    }
+
+    let mut max_bitrate = representative.bitrate_kbps;
+    let mut sum_duration = representative.duration_secs;
+    let mut all_succeeded = true;
+
+    for p in extra_probes {
+        match p {
+            Some(info) => {
+                if info.bitrate_kbps > max_bitrate {
+                    max_bitrate = info.bitrate_kbps;
+                }
+                sum_duration += info.duration_secs;
+            }
+            None => all_succeeded = false,
+        }
+    }
+
+    let duration_secs = if all_succeeded {
+        sum_duration
+    } else {
+        representative.duration_secs * total_file_count as f64
+    };
+
+    (max_bitrate, duration_secs)
+}
+
 /// Per-worker display slot for the render thread.
 struct WorkerSlot {
     info: Mutex<Option<(String, String)>>,
@@ -495,19 +541,39 @@ fn main() -> Result<()> {
                         std::fs::metadata(file).map(|m| m.len()).unwrap_or(0)
                     };
 
-                    // For multi-file ISO features, estimate total duration
-                    // by scaling probe duration by file count ratio
-                    let duration_secs = if let Some(ref paths) = inner_ps {
+                    // For multi-file ISO features the initial probe only saw the
+                    // representative (first) inner file. The first VOB on a DVD is
+                    // often a low-bitrate intro/credits sequence; using its bitrate
+                    // as the `-maxrate` cap for the entire concatenated stream
+                    // would throttle later, higher-bitrate scenes and degrade
+                    // quality. Probe each additional inner file and take the
+                    // maximum bitrate (and sum durations for a more accurate
+                    // estimate). N extra ffprobe calls per disc is a few seconds
+                    // — small price for correct rate-control.
+                    let mut extra_probes: Vec<Option<probe::MediaInfo>> = Vec::new();
+                    if let (Some(ref ip), Some(ref paths)) = (iso_p, inner_ps) {
                         if paths.len() > 1 {
-                            // Probe was for just the first file; scale by count
-                            // This is approximate but avoids probing every file
-                            info.duration_secs * paths.len() as f64
-                        } else {
-                            info.duration_secs
+                            // Skip index 0 — it's the representative we already probed.
+                            for inner in paths.iter().skip(1) {
+                                match probe::probe_iso_file(ip, inner) {
+                                    Ok(extra) => extra_probes.push(Some(extra)),
+                                    Err(e) => {
+                                        log::debug!(
+                                            "  per-file probe failed for {}:{}: {}",
+                                            ip.display(),
+                                            inner,
+                                            e
+                                        );
+                                        extra_probes.push(None);
+                                    }
+                                }
+                            }
                         }
-                    } else {
-                        info.duration_secs
-                    };
+                    }
+
+                    let multi_file_count = inner_ps.as_ref().map(|p| p.len()).unwrap_or(0);
+                    let (bitrate_kbps, duration_secs) =
+                        aggregate_iso_probes(&info, &extra_probes, multi_file_count);
 
                     // Resume / adopt: check if .transcoded output already exists.
                     // Output path logic must match what the worker thread computes:
@@ -561,7 +627,7 @@ fn main() -> Result<()> {
 
                     to_transcode.push(WorkItem {
                         path: file.clone(),
-                        bitrate_kbps: info.bitrate_kbps,
+                        bitrate_kbps,
                         duration_secs,
                         pix_fmt: info.pix_fmt,
                         source_size,
@@ -1416,6 +1482,69 @@ fn cleanup_tmp_in_dir(dir: &std::path::Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn make_info(bitrate_kbps: u32, duration_secs: f64) -> probe::MediaInfo {
+        probe::MediaInfo {
+            codec: "mpeg2video".to_string(),
+            width: 720,
+            height: 480,
+            bitrate_kbps,
+            duration_secs,
+            pix_fmt: "yuv420p".to_string(),
+            has_audio: true,
+            has_subtitles: false,
+        }
+    }
+
+    #[test]
+    fn aggregate_iso_probes_single_file_returns_representative() {
+        let rep = make_info(4000, 1500.0);
+        let (b, d) = aggregate_iso_probes(&rep, &[], 1);
+        assert_eq!(b, 4000);
+        assert!((d - 1500.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn aggregate_iso_probes_zero_count_returns_representative() {
+        // Defensive: 0 should also short-circuit to the rep (no-op safe).
+        let rep = make_info(4000, 1500.0);
+        let (b, d) = aggregate_iso_probes(&rep, &[], 0);
+        assert_eq!(b, 4000);
+        assert!((d - 1500.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn aggregate_iso_probes_takes_max_bitrate_across_inner_files() {
+        // First VOB is a 2 Mbps intro; later VOBs are 9 Mbps action scenes.
+        let rep = make_info(2000, 60.0);
+        let extras = vec![Some(make_info(9000, 600.0)), Some(make_info(7500, 500.0))];
+        let (b, _) = aggregate_iso_probes(&rep, &extras, 3);
+        assert_eq!(b, 9000, "should pick the max, not the first VOB's bitrate");
+    }
+
+    #[test]
+    fn aggregate_iso_probes_sums_durations_when_all_probes_succeed() {
+        let rep = make_info(2000, 60.0);
+        let extras = vec![Some(make_info(9000, 600.0)), Some(make_info(7500, 500.0))];
+        let (_, d) = aggregate_iso_probes(&rep, &extras, 3);
+        assert!(
+            (d - 1160.0).abs() < 1e-9,
+            "expected 60+600+500=1160, got {d}"
+        );
+    }
+
+    #[test]
+    fn aggregate_iso_probes_falls_back_to_count_multiplier_on_probe_failure() {
+        // If any per-file probe fails the sum would undercount, so we
+        // fall back to representative * total_count.
+        let rep = make_info(2000, 60.0);
+        let extras = vec![Some(make_info(9000, 600.0)), None];
+        let (b, d) = aggregate_iso_probes(&rep, &extras, 3);
+        // Bitrate max is still computed from successful probes.
+        assert_eq!(b, 9000);
+        // Duration falls back to 60 * 3 = 180.
+        assert!((d - 180.0).abs() < 1e-9, "expected fallback 180, got {d}");
+    }
 
     #[test]
     fn test_should_freeze_threshold() {
