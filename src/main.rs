@@ -33,6 +33,18 @@ fn is_too_short(duration_secs: f64, min_duration_secs: f64) -> bool {
     duration_secs > 0.0 && duration_secs < min_duration_secs
 }
 
+/// After this many cumulative NVENC session-limit hits across the entire run,
+/// permanently freeze `max_encoders` at the lowest observed working value and
+/// disable auto-ramping. This stops the climb-fail-retry-climb cycle on
+/// consumer GeForce cards (3-session NVENC cap).
+const MAX_SESSION_LIMIT_BEFORE_FREEZE: u32 = 3;
+
+/// Returns true once the cumulative session-limit hit count reaches the
+/// freeze threshold. `hits` is the post-increment count.
+fn should_freeze(hits: u32) -> bool {
+    hits >= MAX_SESSION_LIMIT_BEFORE_FREEZE
+}
+
 /// Display symbols — ASCII fallbacks when locale doesn't support UTF-8.
 struct Symbols {
     ellipsis: &'static str,
@@ -659,6 +671,14 @@ fn main() -> Result<()> {
     let ramping = Arc::new(AtomicBool::new(auto_ramp));
     // How many workers are still alive (decremented on retirement)
     let worker_count = Arc::new(AtomicU32::new(jobs as u32));
+    // Cumulative NVENC session-limit hits across the entire run.  After
+    // MAX_SESSION_LIMIT_BEFORE_FREEZE we permanently disable ramping and
+    // pin max_encoders at the lowest observed working concurrency.
+    let session_limit_hits = Arc::new(AtomicU32::new(0));
+    let session_limit_frozen = Arc::new(AtomicBool::new(false));
+    // Lowest concurrency that successfully ran an encode after a session-limit
+    // hit.  Initialised to u32::MAX as a sentinel meaning "no observation yet".
+    let min_observed_max = Arc::new(AtomicU32::new(u32::MAX));
 
     // Disk space limiter: tracks estimated bytes reserved by in-flight encodes.
     // We estimate output at source_size/2 (conservative for HEVC compression).
@@ -687,6 +707,7 @@ fn main() -> Result<()> {
             let render_errors = Arc::clone(&error_count);
             let render_max = Arc::clone(&max_encoders);
             let render_ramping = Arc::clone(&ramping);
+            let render_frozen = Arc::clone(&session_limit_frozen);
 
             s.spawn(move || {
                 let start = Instant::now();
@@ -805,7 +826,13 @@ fn main() -> Result<()> {
                     }
 
                     // --- Auto-ramp: add workers while total throughput improves ---
+                    // If we've permanently frozen the max after repeated NVENC
+                    // session-limit hits, force ramping off and skip entirely.
+                    if render_frozen.load(Ordering::SeqCst) {
+                        render_ramping.store(false, Ordering::SeqCst);
+                    }
                     if render_ramping.load(Ordering::SeqCst)
+                        && !render_frozen.load(Ordering::SeqCst)
                         && last_ramp_time.elapsed().as_secs() >= 5
                     {
                         let current_max = render_max.load(Ordering::SeqCst);
@@ -889,6 +916,9 @@ fn main() -> Result<()> {
             let ramping = Arc::clone(&ramping);
             let worker_count = Arc::clone(&worker_count);
             let disk_reserved = Arc::clone(&disk_reserved);
+            let session_limit_hits = Arc::clone(&session_limit_hits);
+            let session_limit_frozen = Arc::clone(&session_limit_frozen);
+            let min_observed_max = Arc::clone(&min_observed_max);
 
             s.spawn(move || 'outer: loop {
                 if CANCELLED.load(Ordering::Relaxed) {
@@ -1196,6 +1226,37 @@ fn main() -> Result<()> {
                                 // Lower the discovered max to current active count
                                 let active = active_encoders.load(Ordering::SeqCst).max(1);
                                 lower_max(&max_encoders, active);
+
+                                // Track the lowest concurrency we've ever
+                                // had to fall back to during a session-limit
+                                // event.  After repeated hits we'll pin the
+                                // max here permanently.
+                                min_observed_max.fetch_min(active, Ordering::SeqCst);
+
+                                // Count this hit across the whole run.  Once
+                                // we cross the freeze threshold, ramping is
+                                // permanently disabled and the max is pinned
+                                // at the lowest observed working value.
+                                let hits =
+                                    session_limit_hits.fetch_add(1, Ordering::SeqCst) + 1;
+                                if should_freeze(hits)
+                                    && !session_limit_frozen.swap(true, Ordering::SeqCst)
+                                {
+                                    let pin = min_observed_max
+                                        .load(Ordering::SeqCst)
+                                        .min(active)
+                                        .max(1);
+                                    lower_max(&max_encoders, pin);
+                                    ramping.store(false, Ordering::SeqCst);
+                                    log::info!(
+                                        "NVENC session limit hit {} times; \
+                                         freezing max parallel encoders at {} \
+                                         for the rest of this run.",
+                                        hits,
+                                        pin,
+                                    );
+                                }
+
                                 // Hide this slot while retrying
                                 *my_slot.info.lock().unwrap() = None;
                                 my_slot.progress.store(0, Ordering::Relaxed);
@@ -1355,6 +1416,26 @@ fn cleanup_tmp_in_dir(dir: &std::path::Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_should_freeze_threshold() {
+        // Below threshold: keep ramping/retrying.
+        assert!(!should_freeze(0));
+        assert!(!should_freeze(1));
+        assert!(!should_freeze(MAX_SESSION_LIMIT_BEFORE_FREEZE - 1));
+        // At and above the threshold: freeze permanently.
+        assert!(should_freeze(MAX_SESSION_LIMIT_BEFORE_FREEZE));
+        assert!(should_freeze(MAX_SESSION_LIMIT_BEFORE_FREEZE + 1));
+        assert!(should_freeze(u32::MAX));
+    }
+
+    #[test]
+    fn test_should_freeze_threshold_is_small() {
+        // Sanity: the threshold is meant to be small (a handful of hits),
+        // not so high that a long run still cycles indefinitely.
+        assert!(MAX_SESSION_LIMIT_BEFORE_FREEZE >= 2);
+        assert!(MAX_SESSION_LIMIT_BEFORE_FREEZE <= 10);
+    }
 
     #[test]
     fn test_banner_contains_key_instructions() {
