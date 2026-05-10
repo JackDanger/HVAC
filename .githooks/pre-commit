@@ -1,13 +1,22 @@
 #!/usr/bin/env bash
-# Pre-commit hook: refuse the commit if `cargo fmt --check` would change anything.
+# Pre-commit hook: enforce CI's blocking checks locally so a bad commit
+# never reaches the remote.
 #
-# This hook lives in .githooks/ (committed) instead of .git/hooks/ (untracked) so
-# every clone gets the same enforcement. Each contributor wires it up once with:
+#   1. cargo fmt --all -- --check    (fast: <1s)
+#   2. cargo clippy -- -D warnings   (slow: 5-30s cold, <2s incrementally)
+#
+# This hook lives in .githooks/ (committed) instead of .git/hooks/ (untracked)
+# so every clone gets the same enforcement. Each contributor wires it up once:
 #
 #   git config core.hooksPath .githooks
 #
-# README's "Development" section repeats this. The hook is silent on success and
-# prints the offending diff on failure so you can pipe `cargo fmt --all` and retry.
+# README's "Development" section repeats this. The hook is silent on success
+# and prints the offending output on failure. Bypass with `git commit --no-verify`
+# when you need to (for fix-it-up commits before squash, etc.).
+#
+# `HVAC_SKIP_CLIPPY=1 git commit ...` skips just the slow check while keeping
+# fmt enforcement — useful when you've already run clippy manually and just
+# want to amend a comment.
 
 set -eu
 
@@ -21,15 +30,37 @@ if ! cargo fmt --version >/dev/null 2>&1; then
 fi
 
 # Only run when at least one .rs file is staged. Pure-docs / config commits
-# don't need to wait for rustfmt to start up.
+# don't need to wait for the Rust toolchain to start up.
 if ! git diff --cached --name-only --diff-filter=ACMR | grep -q '\.rs$'; then
     exit 0
 fi
 
+# ── 1. cargo fmt ─────────────────────────────────────────────────────────────
 if ! cargo fmt --all -- --check >/dev/null 2>&1; then
     echo "✖ cargo fmt --check failed. Offending diff:" >&2
     cargo fmt --all -- --check >&2 || true
     echo "" >&2
     echo "Fix with:  cargo fmt --all" >&2
+    exit 1
+fi
+
+# ── 2. cargo clippy ──────────────────────────────────────────────────────────
+if [[ "${HVAC_SKIP_CLIPPY:-0}" == "1" ]]; then
+    exit 0
+fi
+if ! cargo clippy --version >/dev/null 2>&1; then
+    # clippy not installed — warn once and let the commit through. CI will
+    # catch anything we miss; blocking here would punish minimal toolchains.
+    echo "⚠ cargo clippy not installed; skipping (CI will still check)." >&2
+    exit 0
+fi
+
+clippy_log=$(mktemp -t hvac-clippy.XXXXXX)
+trap 'rm -f "$clippy_log"' EXIT
+if ! cargo clippy --all-targets -- -D warnings >"$clippy_log" 2>&1; then
+    echo "✖ cargo clippy --all-targets -- -D warnings failed:" >&2
+    cat "$clippy_log" >&2
+    echo "" >&2
+    echo "Either fix the lints or bypass once with:  HVAC_SKIP_CLIPPY=1 git commit ..." >&2
     exit 1
 fi
