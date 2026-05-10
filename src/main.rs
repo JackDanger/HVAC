@@ -18,6 +18,21 @@ use util::format_size;
 
 const MAX_SESSION_RETRIES: u32 = 5;
 
+/// Skip files shorter than this duration (seconds).  Animated GIFs, single-frame
+/// WebP-as-mp4 stubs, and similar artefacts pass the extension scan but produce
+/// unusable output (or fail validation) when transcoded — skip them with a clear
+/// message instead.  Override per-run with `--min-duration <SECS>`.
+const MIN_TRANSCODE_DURATION_SECS: f64 = 1.0;
+
+/// Returns true when `duration_secs` is a valid, positive measurement that is
+/// strictly below `min_duration_secs` — i.e. the file is short enough to skip.
+/// A duration of `0.0` (or negative) means ffprobe could not determine the
+/// duration; those files fall through to the normal codepath rather than being
+/// silently skipped here.
+fn is_too_short(duration_secs: f64, min_duration_secs: f64) -> bool {
+    duration_secs > 0.0 && duration_secs < min_duration_secs
+}
+
 /// Display symbols — ASCII fallbacks when locale doesn't support UTF-8.
 struct Symbols {
     ellipsis: &'static str,
@@ -163,6 +178,10 @@ struct Cli {
     /// Replace originals with transcoded copies after all encodes complete
     #[arg(long, default_value_t = false)]
     replace: bool,
+
+    /// Skip files shorter than this many seconds (animated GIFs, single-frame stubs)
+    #[arg(long, default_value_t = MIN_TRANSCODE_DURATION_SECS)]
+    min_duration: f64,
 }
 
 /// File ready to transcode, with pre-probed metadata.
@@ -436,6 +455,15 @@ fn main() -> Result<()> {
 
         match probe_result {
             Ok(info) => {
+                if is_too_short(info.duration_secs, cli.min_duration) {
+                    eprintln!(
+                        "  skip: {}: duration too short ({:.2}s)",
+                        file.display(),
+                        info.duration_secs
+                    );
+                    skipped += 1;
+                    continue;
+                }
                 if probe::meets_target(&info, &cfg.target) {
                     skipped += 1;
                 } else {
@@ -1536,5 +1564,48 @@ mod tests {
         let single = output_stem_for_item(iso, Some(inner), None);
         let multi = output_stem_for_item(iso, Some(inner), Some(&paths));
         assert_eq!(single, multi, "single and multi-file ISO stems must match");
+    }
+
+    // ── Short-duration skip logic ────────────────────────────────────────────
+
+    #[test]
+    fn test_is_too_short_below_threshold() {
+        // Animated GIF re-muxed as mp4: duration 0.04s — should skip.
+        assert!(is_too_short(0.04, 1.0));
+        assert!(is_too_short(0.5, 1.0));
+        assert!(is_too_short(0.999, 1.0));
+    }
+
+    #[test]
+    fn test_is_too_short_at_or_above_threshold() {
+        // Boundary: duration equal to threshold is NOT too short (strict <).
+        assert!(!is_too_short(1.0, 1.0));
+        assert!(!is_too_short(1.5, 1.0));
+        assert!(!is_too_short(3600.0, 1.0));
+    }
+
+    #[test]
+    fn test_is_too_short_zero_duration_falls_through() {
+        // ffprobe couldn't determine duration → 0.0 → fall through to existing
+        // logic (don't silently skip; let the normal path handle it).
+        assert!(!is_too_short(0.0, 1.0));
+        assert!(!is_too_short(-1.0, 1.0));
+    }
+
+    #[test]
+    fn test_is_too_short_custom_threshold() {
+        // Paranoid user: --min-duration 30 to skip anything under 30 seconds.
+        assert!(is_too_short(15.0, 30.0));
+        assert!(!is_too_short(45.0, 30.0));
+
+        // Aggressive user: --min-duration 0 disables the skip entirely
+        // (no positive duration is < 0).
+        assert!(!is_too_short(0.04, 0.0));
+        assert!(!is_too_short(1.0, 0.0));
+    }
+
+    #[test]
+    fn test_min_transcode_duration_default_is_one_second() {
+        assert_eq!(MIN_TRANSCODE_DURATION_SECS, 1.0);
     }
 }
