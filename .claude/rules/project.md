@@ -12,7 +12,7 @@ A Rust CLI tool that scans media directories and transcodes video files to highl
 - Never run locally. All compilation and testing happens on the remote host via `./deploy.sh`
 - Remote host: `ssh -J neurotic root@10.30.0.199`
 - Media directory: `/mnt/media/dumb-tv`
-- Never overwrite source files unless `--overwrite` flag is provided. Default is to create copies.
+- Overwriting source files in place is the default. `--no-overwrite` writes `.transcoded.<ext>` copies alongside instead. `--dry-run` previews without touching anything. The transcode pipeline still verifies each output (duration, codec, min size) via ffprobe before replacing the original.
 - Must detect GPU (NVIDIA CUDA / Intel QSV) and exit nonzero with clear message if none found.
 - Uses ffmpeg for transcoding and isomage (https://github.com/JackDanger/isomage.git) for extracting media from .iso/.img disc images.
 - isomage is only used for .iso and .img files. Regular media files go straight to ffmpeg.
