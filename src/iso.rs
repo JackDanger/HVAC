@@ -24,6 +24,9 @@ pub enum DiscType {
     Avchd,
     /// No recognized structure — just media files scattered in the image
     BareMedia,
+    /// Encrypted commercial Blu-ray (AACS or BD+). Cannot be decoded by ffmpeg.
+    /// `reason` describes what protection marker was detected.
+    Encrypted { reason: String },
 }
 
 /// A media file inside an ISO, with its path and size.
@@ -62,6 +65,17 @@ pub fn analyze_disc(iso_path: &Path) -> Result<DiscAnalysis> {
     let root = isomage::detect_and_parse_filesystem(&mut file, &filename)
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
+    // Bail early for encrypted commercial discs: ffmpeg can't decode AACS or BD+
+    // protected streams, so we'd otherwise feed garbage to the encoder mid-run.
+    if let Some(reason) = detect_encryption(&root) {
+        return Ok(DiscAnalysis {
+            disc_type: DiscType::Encrypted { reason },
+            main_feature: Vec::new(),
+            main_feature_size: 0,
+            extras: Vec::new(),
+        });
+    }
+
     let disc_type = detect_disc_type(&root);
 
     match disc_type {
@@ -70,7 +84,24 @@ pub fn analyze_disc(iso_path: &Path) -> Result<DiscAnalysis> {
         DiscType::Dvd => analyze_dvd(&root),
         DiscType::Avchd => analyze_avchd(&root),
         DiscType::BareMedia => analyze_bare_media(&root),
+        DiscType::Encrypted { .. } => unreachable!("handled above"),
     }
+}
+
+/// Detect commercial-disc encryption markers on a parsed ISO root.
+///
+/// AACS-protected Blu-rays carry an `AACS/` directory at the disc root with
+/// files like `Unit_Key_RO.inf`, `MKB_RO.inf`, and `Content000.cer`. BD+
+/// adds a `BDSVM/` directory. Either marker means ffmpeg can't decode the
+/// streams, so we return a human-readable reason and let the caller skip.
+fn detect_encryption(root: &isomage::TreeNode) -> Option<String> {
+    if find_dir(root, "AACS").is_some() {
+        return Some("AACS-encrypted Blu-ray detected (AACS/ directory present); hvac cannot decrypt commercial discs. Use makemkv to rip first.".to_string());
+    }
+    if find_dir(root, "BDSVM").is_some() {
+        return Some("BD+-protected Blu-ray detected (BDSVM/ directory present); hvac cannot decrypt commercial discs. Use makemkv to rip first.".to_string());
+    }
+    None
 }
 
 /// Detect the type of disc from the filesystem tree.
@@ -899,6 +930,84 @@ mod tests {
                 size
             );
         }
+    }
+
+    // ---- AACS / BD+ encryption detection ----
+
+    fn bluray_root_with_dir(extra_dir: &str) -> isomage::TreeNode {
+        // Minimal Blu-ray-shaped tree: BDMV/STREAM/00000.m2ts plus an extra
+        // directory at the root (e.g. AACS or BDSVM) to simulate encryption.
+        let mut root = isomage::TreeNode::new_directory("ROOT".to_string());
+
+        let mut bdmv = isomage::TreeNode::new_directory("BDMV".to_string());
+        let mut stream = isomage::TreeNode::new_directory("STREAM".to_string());
+        stream.add_child(isomage::TreeNode::new_file(
+            "00000.m2ts".to_string(),
+            10_000_000,
+        ));
+        bdmv.add_child(stream);
+        root.add_child(bdmv);
+
+        let mut protected = isomage::TreeNode::new_directory(extra_dir.to_string());
+        protected.add_child(isomage::TreeNode::new_file(
+            "Unit_Key_RO.inf".to_string(),
+            4096,
+        ));
+        root.add_child(protected);
+
+        root
+    }
+
+    #[test]
+    fn test_detect_encryption_aacs() {
+        let root = bluray_root_with_dir("AACS");
+        let reason = detect_encryption(&root).expect("should detect AACS");
+        assert!(
+            reason.contains("AACS"),
+            "Reason should mention AACS: {}",
+            reason
+        );
+        assert!(
+            reason.contains("makemkv"),
+            "Reason should suggest makemkv: {}",
+            reason
+        );
+    }
+
+    #[test]
+    fn test_detect_encryption_aacs_case_insensitive() {
+        let root = bluray_root_with_dir("aacs");
+        assert!(
+            detect_encryption(&root).is_some(),
+            "Lowercase aacs/ directory should still be detected"
+        );
+    }
+
+    #[test]
+    fn test_detect_encryption_bdsvm() {
+        let root = bluray_root_with_dir("BDSVM");
+        let reason = detect_encryption(&root).expect("should detect BD+");
+        assert!(
+            reason.contains("BD+") || reason.contains("BDSVM"),
+            "Reason should mention BD+ or BDSVM: {}",
+            reason
+        );
+    }
+
+    #[test]
+    fn test_detect_encryption_clean_disc() {
+        // Plain Blu-ray with no AACS/BDSVM directory — should not flag.
+        let mut root = isomage::TreeNode::new_directory("ROOT".to_string());
+        let mut bdmv = isomage::TreeNode::new_directory("BDMV".to_string());
+        let mut stream = isomage::TreeNode::new_directory("STREAM".to_string());
+        stream.add_child(isomage::TreeNode::new_file(
+            "00000.m2ts".to_string(),
+            10_000_000,
+        ));
+        bdmv.add_child(stream);
+        root.add_child(bdmv);
+
+        assert!(detect_encryption(&root).is_none());
     }
 
     // ---- VTS title parsing ----
