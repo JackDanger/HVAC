@@ -614,27 +614,83 @@ pub fn is_disk_space_error(error_msg: &str) -> bool {
         || error_msg.contains("ENOSPC")
 }
 
+/// Audio codec names that ffmpeg uses in its "Could not find tag for codec X"
+/// message. Used by `is_audio_copy_error` to distinguish audio mismatches from
+/// subtitle ones (mov_text, hdmv_pgs_subtitle, dvd_subtitle, …) without
+/// over-matching.
+///
+/// Common offenders:
+/// - `truehd`, `dts`, `eac3`, `ac3` — Blu-ray / DVD lossy & lossless tracks
+///   that don't fit in MP4 without a re-encode.
+/// - `flac`, `opus`, `vorbis` — open codecs older MP4 builds reject.
+/// - `pcm_dvd`, `pcm_bluray`, `pcm_s16le`, `pcm_s24le` — raw PCM variants
+///   that matroska/MP4 won't take via `-c:a copy`.
+/// - `mp3`, `aac`, `alac` — included for completeness; rare but seen with
+///   exotic container choices.
+const AUDIO_COPY_CODECS: &[&str] = &[
+    "truehd",
+    "dts",
+    "eac3",
+    "ac3",
+    "flac",
+    "opus",
+    "vorbis",
+    "pcm_dvd",
+    "pcm_bluray",
+    "pcm_s16le",
+    "pcm_s24le",
+    "pcm_s16be",
+    "pcm_s24be",
+    "pcm_f32le",
+    "mp3",
+    "aac",
+    "alac",
+];
+
 /// Check if an ffmpeg error indicates `-c:a copy` produced a stream the chosen
 /// container can't accept. The classic case is a DVD's pcm_dvd audio being
 /// stream-copied into MKV: the matroska muxer fails the header write, then
 /// every other stream stalls and ffmpeg ends with the generic
 /// "Nothing was written into output file" cascade. Recoverable by re-encoding.
 ///
-/// We deliberately match only patterns that are unambiguously audio. The
-/// generic "Could not find tag for codec X" message can be either audio
-/// or subtitle (mov_text, hdmv_pgs_subtitle) — that one is left to
-/// `is_subtitle_error` and the skip-subs retry.
+/// "Could not find tag for codec X" is the most common form for MP4 muxers
+/// (TrueHD/DTS/E-AC-3 from Blu-ray, FLAC in older ffmpeg). That message is
+/// also emitted for subtitle codecs, so we only treat it as an audio-copy
+/// error when X appears in `AUDIO_COPY_CODECS` — subtitle codecs (mov_text,
+/// hdmv_pgs_subtitle, dvd_subtitle) are deliberately excluded and stay with
+/// `is_subtitle_error` / the skip-subs retry.
 pub fn is_audio_copy_error(error_msg: &str) -> bool {
     let lower = error_msg.to_lowercase();
+
     // matroska's wav-tag rejection — only emitted for PCM-family audio codecs
     // (pcm_dvd, pcm_bluray) being stream-copied into MKV. Unambiguous.
-    lower.contains("no wav codec tag found")
-        // Header-write failure with "incorrect codec parameters". This *can* be
-        // triggered by other stream types, but if a subtitle codec is the cause
-        // is_subtitle_error catches it first via the muxer's specific message;
-        // by the time we land here, audio re-encode is the right next step.
-        || (lower.contains("could not write header")
-            && lower.contains("incorrect codec parameters"))
+    if lower.contains("no wav codec tag found") {
+        return true;
+    }
+
+    // Header-write failure with "incorrect codec parameters". This *can* be
+    // triggered by other stream types, but if a subtitle codec is the cause
+    // is_subtitle_error catches it first via the muxer's specific message;
+    // by the time we land here, audio re-encode is the right next step.
+    if lower.contains("could not write header") && lower.contains("incorrect codec parameters") {
+        return true;
+    }
+
+    // "Could not find tag for codec X ..." — match only when X is a known
+    // audio codec. Subtitle codecs (mov_text, hdmv_pgs_subtitle) deliberately
+    // do not appear in AUDIO_COPY_CODECS so they don't trigger here.
+    if let Some(rest) = lower.split("could not find tag for codec ").nth(1) {
+        // Codec name is the next whitespace-delimited token.
+        let codec = rest
+            .split(|c: char| c.is_whitespace() || c == ',')
+            .next()
+            .unwrap_or("");
+        if AUDIO_COPY_CODECS.contains(&codec) {
+            return true;
+        }
+    }
+
+    false
 }
 
 /// Distill multi-line ffmpeg stderr into the most informative error context.
@@ -821,18 +877,57 @@ mod tests {
         assert!(is_audio_copy_error(
             "[matroska @ 0x123] No wav codec tag found for codec pcm_dvd"
         ));
+        // pcm_bluray sister case: matroska rejects raw PCM the same way
+        assert!(is_audio_copy_error(
+            "[matroska @ 0x123] No wav codec tag found for codec pcm_bluray"
+        ));
         assert!(is_audio_copy_error(
             "[out#0/matroska @ 0x123] Could not write header (incorrect codec parameters ?): Invalid argument"
         ));
-        // PGS / mov_text "Could not find tag for codec X" is subtitle-side and ambiguous;
-        // we deliberately leave it to is_subtitle_error / skip-subs retry.
+
+        // MP4 muxer rejecting Blu-ray / DVD audio that won't fit in MOV/MP4.
+        // These are the cases the broadened predicate is meant to catch.
+        assert!(is_audio_copy_error(
+            "[mp4 @ 0x123] Could not find tag for codec truehd in stream #0:1, codec not currently supported in container"
+        ));
+        assert!(is_audio_copy_error(
+            "[mp4 @ 0x123] Could not find tag for codec dts in stream #0:1, codec not currently supported in container"
+        ));
+        assert!(is_audio_copy_error(
+            "[mp4 @ 0x123] Could not find tag for codec eac3 in stream #0:1"
+        ));
+        assert!(is_audio_copy_error(
+            "[mp4 @ 0x123] Could not find tag for codec ac3 in stream #0:1"
+        ));
+        assert!(is_audio_copy_error(
+            "[mp4 @ 0x123] Could not find tag for codec flac in stream #0:1"
+        ));
+        assert!(is_audio_copy_error(
+            "[mp4 @ 0x123] Could not find tag for codec opus in stream #0:1"
+        ));
+
+        // PGS / mov_text "Could not find tag for codec X" is subtitle-side; the
+        // retry path for those is `force_skip_subs`, not audio re-encode. These
+        // MUST stay false even after broadening — that's the whole point of
+        // the AUDIO_COPY_CODECS allow-list.
         assert!(!is_audio_copy_error(
-            "Could not find tag for codec hdmv_pgs_subtitle"
+            "Could not find tag for codec hdmv_pgs_subtitle in stream #0:2"
         ));
         assert!(!is_audio_copy_error(
             "Could not find tag for codec mov_text in stream #0:2, codec not currently supported in container"
         ));
+        assert!(!is_audio_copy_error(
+            "Could not find tag for codec dvd_subtitle in stream #0:2"
+        ));
+        assert!(!is_audio_copy_error(
+            "Could not find tag for codec dvb_subtitle in stream #0:2"
+        ));
+
+        // Generic / unrelated noise should never match.
         assert!(!is_audio_copy_error("some unrelated ffmpeg error"));
+        assert!(!is_audio_copy_error(
+            "Could not find tag for codec h264 in stream #0:0"
+        ));
     }
 
     #[test]
