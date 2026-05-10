@@ -1,3 +1,5 @@
+I couldn't figure out Tdarr. And I hated that `.iso` and `.img` images needed me to manually extract videos. `hvac` compresses everything in a given directory to HEVC and uses [isomage](https://github.com/JackDanger/isomage) to even extract from image files.
+
 <p align="center">
   <img src="logo.svg" alt="hvac" width="700"/>
 </p>
