@@ -95,13 +95,18 @@ hvac --config config.yaml /path/to/movies
 
 ## Development
 
-Hook formatting enforcement up once per clone:
+Hook the lint checks up once per clone:
 
 ```bash
 git config core.hooksPath .githooks
 ```
 
-After that, every commit that touches a `.rs` file is rejected if `cargo fmt --all -- --check` would change anything. Fix it with `cargo fmt --all` and retry.
+After that, every commit that touches a `.rs` file runs:
+
+1. `cargo fmt --all -- --check` — sub-second; the commit is rejected if any file would be reformatted. Fix with `cargo fmt --all`.
+2. `cargo clippy -- -D warnings` — slower (5-30s cold, <2s incremental); rejected if any lint fires. Both checks mirror exactly what CI enforces.
+
+To bypass the slow check for a quick fix-up commit (you've already run clippy yourself or are about to squash anyway): `HVAC_SKIP_CLIPPY=1 git commit ...`. To bypass both: `git commit --no-verify`.
 
 ---
 
