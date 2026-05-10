@@ -1,12 +1,13 @@
-I couldn't figure out Tdarr. And I hated that `.iso` and `.img` images needed me to manually extract videos. `hvac` compresses everything in a given directory to HEVC and uses [isomage](https://github.com/JackDanger/isomage) to even extract from image files.
+# Get your TBs back
+
+Point `hvac` at a directory that contains videos — even ones hidden inside `.img` and `.iso` files - and it'll compress them to h.265 (HEVC) using reasonable defaults. You can overwrite these defaults with a small config file.
 
 <p align="center">
   <img src="logo.svg" alt="hvac" width="700"/>
 </p>
 
 <p align="center">
-  <b>Shrink your entire video library to h265, on your GPU.</b><br/>
-  One binary. No web UI, no nodes, no database.
+  <b>Shrink your entire video library to h265.</b><br/>
 </p>
 
 ---
@@ -17,7 +18,7 @@ I couldn't figure out Tdarr. And I hated that `.iso` and `.img` images needed me
 curl -fsSL https://raw.githubusercontent.com/JackDanger/hvac/main/install.sh | sh
 ```
 
-You also need `ffmpeg` (`apt install ffmpeg` / `brew install ffmpeg`) and a GPU — see [below](#gpu-required).
+You also need `ffmpeg` (`apt install ffmpeg` / `brew install ffmpeg`) and any hardware acceleration — see [below](#gpu-required).
 
 Other ways: `brew install JackDanger/tap/hvac` &middot; `cargo install hvac-transcoder` &middot; [`.deb`, AUR, tarballs](https://github.com/JackDanger/hvac/releases)
 
