@@ -138,11 +138,20 @@ info "extracting"
 chmod +x "$tmp/hvac"
 
 info "installing to $PREFIX/hvac"
+# Try install(1) first, fall back to cp + chmod for hosts that lack it.
+# Use an explicit if/elif chain rather than `install || cp && chmod`:
+# that pattern parses as `(install || cp) && chmod`, and POSIX set -e is
+# suppressed for non-final commands of an AND-OR list, so a `cp` failure
+# would not exit the script.
 if [ "${USE_SUDO:-0}" = "1" ]; then
-    sudo install -m 755 "$tmp/hvac" "$PREFIX/hvac"
+    sudo install -m 755 "$tmp/hvac" "$PREFIX/hvac" \
+        || err "failed to install hvac to $PREFIX (sudo install)"
+elif install -m 755 "$tmp/hvac" "$PREFIX/hvac" 2>/dev/null; then
+    :
+elif cp "$tmp/hvac" "$PREFIX/hvac" 2>/dev/null && chmod 755 "$PREFIX/hvac"; then
+    :
 else
-    install -m 755 "$tmp/hvac" "$PREFIX/hvac" 2>/dev/null \
-        || cp "$tmp/hvac" "$PREFIX/hvac" && chmod 755 "$PREFIX/hvac"
+    err "failed to install hvac to $PREFIX (no write access, no install(1), and cp failed)"
 fi
 
 # ---- post-install hints ----------------------------------------------------
@@ -185,19 +194,19 @@ detect_linux_distro() {
     printf 'other\n'
 }
 
-# Detect GPU vendor on Linux via lspci. Echoes a space-separated list of
-# detected vendors, drawn from {nvidia, intel, amd}. Empty if lspci is
-# missing or nothing video-related shows up.
-detect_linux_gpus() {
-    command -v lspci >/dev/null 2>&1 || return 0
-    pci=$(lspci 2>/dev/null) || return 0
-    # Filter to display-class devices (VGA / 3D / Display controllers).
-    display=$(printf '%s\n' "$pci" | grep -Ei 'vga compatible|3d controller|display controller' || true)
-    vendors=
-    case "$display" in *NVIDIA*|*nVidia*|*nvidia*) vendors="$vendors nvidia" ;; esac
-    case "$display" in *Intel*|*intel*)            vendors="$vendors intel" ;;  esac
-    case "$display" in *AMD*|*ATI*|*amd*|*Advanced\ Micro*) vendors="$vendors amd" ;; esac
-    printf '%s' "${vendors# }"
+# All apt packages installed? Used to short-circuit `apt-get update` +
+# `install` when there's nothing to do — the common case for re-runs.
+debs_all_installed() {
+    for d in "$@"; do
+        # dpkg-query is faster and quieter than `dpkg -s`. "ok installed"
+        # is the canonical "fully installed" status.
+        status=$(dpkg-query -W -f='${Status}' "$d" 2>/dev/null || true)
+        case "$status" in
+            "install ok installed") ;;
+            *) return 1 ;;
+        esac
+    done
+    return 0
 }
 
 confirm() {
@@ -232,45 +241,44 @@ install_macos() {
 install_debian_ubuntu() {
     distro="$1"
 
-    # Packages: ffmpeg always; plus userspace driver libraries for whatever
-    # GPUs we can see. We do *not* try to auto-install the NVIDIA kernel
-    # driver — that requires reboots and conflicts with vendor-specific
-    # setups (Optimus, Tesla repos, container hosts, etc.). We just point
-    # at it if the card is present without a driver.
-    pkgs="ffmpeg"
-    gpus=$(detect_linux_gpus)
-    case " $gpus " in
-        *" intel "*|*" amd "*)
-            # vainfo is useful both for diagnostics and so hvac's startup
-            # check can see VAAPI is alive. intel-media-va-driver covers
-            # Broadwell+ Intel iGPUs; mesa-va-drivers covers AMD + older Intel.
-            pkgs="$pkgs vainfo intel-media-va-driver mesa-va-drivers"
-            ;;
-    esac
+    # Install ffmpeg + the VAAPI driver stack unconditionally. The drivers
+    # are ~5 MB combined, harmless on hosts without a matching GPU, and
+    # dropping the lspci-based gating means this also works in minimal
+    # containers where pciutils isn't installed. NVIDIA's kernel driver is
+    # *not* auto-installed — reboots + Optimus/Tesla/container-host quirks
+    # make that too invasive to do silently; we hint instead if the device
+    # is present without a driver.
+    #
+    # intel-media-va-driver: Broadwell+ Intel iGPUs.
+    # mesa-va-drivers:       AMD + older Intel (i965, ironlake).
+    # vainfo:                diagnostics + hvac's startup VAAPI probe.
+    pkgs="ffmpeg vainfo intel-media-va-driver mesa-va-drivers"
 
-    info "will install via apt: $pkgs"
-    if ! confirm "Proceed with 'apt-get install' for the packages above?"; then
-        info "skipped ffmpeg install; re-run with HVAC_ASSUME_YES=1 to auto-confirm"
-        return 0
+    if debs_all_installed $pkgs; then
+        info "ffmpeg + VAAPI drivers already installed (skipping apt)"
+    else
+        info "will install via apt: $pkgs"
+        if ! confirm "Proceed with 'apt-get install' for the packages above?"; then
+            info "skipped ffmpeg install; re-run with HVAC_ASSUME_YES=1 to auto-confirm"
+            return 0
+        fi
+        as_root env DEBIAN_FRONTEND=noninteractive apt-get update -qq
+        # shellcheck disable=SC2086
+        as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $pkgs
     fi
 
-    as_root env DEBIAN_FRONTEND=noninteractive apt-get update -qq
-    # shellcheck disable=SC2086
-    as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $pkgs
+    # Use /dev/nvidia0 (not lspci) so this works in containers that pass the
+    # device through without pciutils. If the device is exposed but the
+    # userland driver isn't visible, point the user at the right package.
+    if [ -e /dev/nvidia0 ] && ! command -v nvidia-smi >/dev/null 2>&1; then
+        cat <<EOF
 
-    case " $gpus " in
-        *" nvidia "*)
-            if ! command -v nvidia-smi >/dev/null 2>&1; then
-                cat <<EOF
-
-NVIDIA GPU detected but the NVIDIA driver does not appear to be installed
-(no nvidia-smi). hvac needs the proprietary driver for hevc_nvenc:
+Note: /dev/nvidia0 exists but nvidia-smi is not on PATH, so the proprietary
+driver does not look installed. hvac needs it for hevc_nvenc:
   $distro: sudo apt install nvidia-driver       # then reboot
 Cloud / container hosts: install the matching driver from your provider.
 EOF
-            fi
-            ;;
-    esac
+    fi
 }
 
 install_other_linux_hint() {
@@ -300,4 +308,41 @@ if [ "${HVAC_SKIP_FFMPEG:-0}" != "1" ]; then
     esac
 fi
 
-printf '\nInstalled %s. Try:\n  hvac --help\n' "$("$PREFIX/hvac" --version 2>/dev/null || echo hvac)"
+# ---- final summary ---------------------------------------------------------
+#
+# A bare "Installed hvac" doesn't tell the user whether the install is
+# actually usable. Probe ffmpeg's encoder list and report which HEVC
+# hardware encoders the just-installed ffmpeg can hand to hvac, so a
+# misconfigured host (e.g. ffmpeg-free without nvenc) is caught here
+# instead of on first run. We never *fail* on a missing encoder — the
+# user may be installing hvac on a build host or a NAS scheduler that
+# proxies work elsewhere — but we make it loud.
+
+probe_hevc_encoders() {
+    command -v ffmpeg >/dev/null 2>&1 || { printf ''; return; }
+    # `ffmpeg -encoders` prints one encoder per line; filter to the three
+    # HEVC hardware encoders hvac drives (nvenc/vaapi/videotoolbox — see
+    # the "GPU required" table in the README).
+    ffmpeg -hide_banner -encoders 2>/dev/null \
+        | awk '/ hevc_(nvenc|vaapi|videotoolbox) / {print $2}' \
+        | paste -sd ',' -
+}
+
+hvac_version=$("$PREFIX/hvac" --version 2>/dev/null || printf 'hvac')
+ffmpeg_version=$(ffmpeg -version 2>/dev/null | awk 'NR==1 {print $1" "$3}')
+encoders=$(probe_hevc_encoders)
+
+printf '\n'
+info "$hvac_version installed at $PREFIX/hvac"
+if [ -n "$ffmpeg_version" ]; then
+    if [ -n "$encoders" ]; then
+        info "$ffmpeg_version — HEVC encoders available: $encoders"
+    else
+        printf 'warning: %s found, but none of hevc_nvenc/hevc_vaapi/hevc_videotoolbox\n' "$ffmpeg_version" >&2
+        printf '         are compiled in. hvac will refuse to start. Reinstall ffmpeg\n' >&2
+        printf '         from a build that enables your platform encoder.\n' >&2
+    fi
+else
+    printf 'warning: ffmpeg not on PATH — hvac requires it at runtime.\n' >&2
+fi
+printf '\nTry:\n  hvac --help\n'
