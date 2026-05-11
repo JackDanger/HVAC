@@ -4,11 +4,121 @@ use std::os::unix::fs::{chown, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::TargetConfig;
 use crate::gpu::{GpuInfo, GpuKind};
 use crate::probe;
 use crate::util::format_size;
+
+// ── Completion-marker side-car ──────────────────────────────────────────────
+//
+// A successful transcode writes `<output>.hvac.complete` alongside the output
+// file. The marker is the only trustworthy signal that the previous run
+// finished writing — ffprobe-only validation can pass on a half-written file
+// with a plausible header and duration, which is how the adopt path silently
+// loses data when a killed run left a partial `.transcoded.*` behind.
+
+/// Filename suffix for the sidecar completion marker.
+pub const MARKER_SUFFIX: &str = ".hvac.complete";
+
+/// Contents of the sidecar marker file. Small JSON blob via serde_json.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+pub struct CompletionMarker {
+    /// Size (in bytes) of the source file at the moment the encode completed.
+    /// On resume we re-read the source and refuse to adopt if it differs.
+    pub source_size: u64,
+    /// Duration (seconds) of the source as measured before encoding.
+    pub duration_secs: f64,
+    /// ISO-8601 (UTC) timestamp when the marker was written.
+    pub completed_at: String,
+}
+
+/// Path of the sidecar completion marker for a given output file.
+pub fn marker_path(output: &Path) -> PathBuf {
+    let mut s = output.as_os_str().to_owned();
+    s.push(MARKER_SUFFIX);
+    PathBuf::from(s)
+}
+
+/// Write the completion marker next to `output`. Best-effort: failure to
+/// write is logged but does not fail the encode (the encode itself is fine;
+/// a missing marker just means the next run will re-encode, never that
+/// data is silently corrupted).
+pub fn write_marker(output: &Path, source_size: u64, duration_secs: f64) -> Result<()> {
+    let marker = CompletionMarker {
+        source_size,
+        duration_secs,
+        completed_at: iso8601_now(),
+    };
+    let path = marker_path(output);
+    let json = serde_json::to_string(&marker).context("serialize completion marker")?;
+    std::fs::write(&path, json).with_context(|| format!("write completion marker {:?}", path))?;
+    Ok(())
+}
+
+/// Read and parse a sidecar marker for `output`. Returns None if the marker
+/// is absent or unparseable.
+pub fn read_marker(output: &Path) -> Option<CompletionMarker> {
+    let path = marker_path(output);
+    let bytes = std::fs::read(&path).ok()?;
+    serde_json::from_slice::<CompletionMarker>(&bytes).ok()
+}
+
+/// True when `output` exists AND has a sidecar marker AND the marker's
+/// `source_size` matches the current size of `source`. Existence of the
+/// output file is checked first — without it, a stale marker (sidecar that
+/// outlived the file it described) would falsely claim safety.
+pub fn marker_valid_for_source(output: &Path, source: &Path) -> bool {
+    if !output.exists() {
+        return false;
+    }
+    let Some(marker) = read_marker(output) else {
+        return false;
+    };
+    let Ok(meta) = std::fs::metadata(source) else {
+        return false;
+    };
+    marker.source_size == meta.len()
+}
+
+/// Best-effort delete of any sidecar marker next to `output`.
+pub fn remove_marker(output: &Path) {
+    let _ = std::fs::remove_file(marker_path(output));
+}
+
+fn iso8601_now() -> String {
+    // Minimal RFC3339 / ISO-8601 UTC formatter: "YYYY-MM-DDTHH:MM:SSZ".
+    // Avoids pulling in chrono just for a timestamp string.
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let (y, mo, d, h, mi, s) = unix_to_ymdhms(secs);
+    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, mo, d, h, mi, s)
+}
+
+/// Convert a unix-epoch second count to (year, month, day, hour, min, sec) in UTC.
+/// Civil-from-days algorithm by Howard Hinnant — exact for the full unix range.
+fn unix_to_ymdhms(secs: i64) -> (i32, u32, u32, u32, u32, u32) {
+    let days = secs.div_euclid(86_400);
+    let tod = secs.rem_euclid(86_400) as u32;
+    let h = tod / 3600;
+    let mi = (tod % 3600) / 60;
+    let s = tod % 60;
+
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097) as u32;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let mo = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if mo <= 2 { y + 1 } else { y };
+    (year as i32, mo, d, h, mi, s)
+}
 
 /// Color / HDR metadata to forward from source to output. All fields optional;
 /// only present ones are emitted as ffmpeg flags. Without these, HDR10/HLG
@@ -354,9 +464,23 @@ pub fn transcode(
     if output.is_none() {
         std::fs::rename(&final_output, source)
             .context("Failed to replace original file with transcoded version")?;
+        // Write the completion marker only AFTER the rename succeeds so a
+        // failed rename doesn't orphan a markerless `.hvac_tmp_*` file.
+        let final_size = std::fs::metadata(source).map(|m| m.len()).unwrap_or(0);
+        if let Err(e) = write_marker(source, final_size, source_duration_secs) {
+            log::warn!("Failed to write completion marker for {:?}: {}", source, e);
+        }
         return Ok(source.to_path_buf());
     }
 
+    // --no-overwrite path: marker sits next to the new output file.
+    if let Err(e) = write_marker(&final_output, source_size, source_duration_secs) {
+        log::warn!(
+            "Failed to write completion marker for {:?}: {}",
+            final_output,
+            e
+        );
+    }
     Ok(final_output)
 }
 
@@ -594,6 +718,22 @@ pub fn transcode_iso(
         out_info.duration_secs,
         out_meta.len()
     );
+
+    // For ISO encodes the marker's `source_size` is the size of the .iso/.img
+    // file itself. `marker_valid_for_source` compares it against the current
+    // size of whatever path partition.rs hands in as the "source", and for
+    // disc images that's the disc image path — *not* the inner stream we
+    // actually piped to ffmpeg. Storing the ISO's size keeps that comparison
+    // consistent so a future resume adopts the output iff the disc is byte-
+    // identical to the one we encoded from.
+    let iso_size = std::fs::metadata(iso_path).map(|m| m.len()).unwrap_or(0);
+    if let Err(e) = write_marker(&final_output, iso_size, source_duration_secs) {
+        log::warn!(
+            "Failed to write completion marker for {:?}: {}",
+            final_output,
+            e
+        );
+    }
 
     Ok(final_output)
 }
@@ -863,8 +1003,21 @@ pub fn replace_original(
 
     copy_permissions(original, transcoded)?;
 
+    // Delete the transcoded sibling's marker AFTER the rename succeeds. A
+    // failed rename leaves the marker intact alongside the still-valid file
+    // so the next run can adopt it; a pre-rename delete would orphan it.
     std::fs::rename(transcoded, original)
         .with_context(|| format!("Failed to replace {:?} with transcoded version", original))?;
+    remove_marker(transcoded);
+
+    let final_size = std::fs::metadata(original).map(|m| m.len()).unwrap_or(0);
+    if let Err(e) = write_marker(original, final_size, source_duration_secs) {
+        log::warn!(
+            "Failed to write completion marker for {:?}: {}",
+            original,
+            e
+        );
+    }
 
     Ok(original_size.saturating_sub(transcoded_size))
 }
