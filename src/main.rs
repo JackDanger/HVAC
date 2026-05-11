@@ -139,12 +139,16 @@ fn main() -> Result<()> {
     let mut errors = scan_result.errors;
     eprintln!("Scanning {} files...", scan_result.items.len());
 
-    let total_bytes: u64 = scan_result
-        .items
-        .iter()
-        .filter_map(|item| std::fs::metadata(&item.file).ok())
-        .map(|m| m.len())
-        .sum();
+    let total_bytes: u64 = {
+        let mut seen = std::collections::HashSet::new();
+        scan_result
+            .items
+            .iter()
+            .filter(|item| seen.insert(&item.file))
+            .filter_map(|item| std::fs::metadata(&item.file).ok())
+            .map(|m| m.len())
+            .sum()
+    };
     flags.track_scan_completed(scan_result.items.len(), total_bytes);
 
     // ── Phase 2: probe + filter ────────────────────────────────────────────
@@ -445,18 +449,30 @@ fn run_transcode_phase(
     }
 }
 
-/// Install the SIGINT handler: first press cancels gracefully, second press
-/// force-exits with tmp cleanup.
+/// First Ctrl-C cancels gracefully; second Ctrl-C force-exits.
+extern "C" fn sigint_handler(_: libc::c_int) {
+    const RESET: &[u8] = b"\x1b[0m\r\n";
+    const MSG: &[u8] = b"Cancelling after current encodes finish... (Ctrl-C again to force quit)\n";
+    // SAFETY: write(2) is async-signal-safe.
+    unsafe { libc::write(2, RESET.as_ptr() as *const libc::c_void, RESET.len()) };
+    if pipeline::CANCELLED.load(Ordering::Relaxed) {
+        // Skip cleanup — Mutex + I/O are not async-signal-safe. In-progress
+        // .hvac_tmp_* files are detected and removed on the next run.
+        // SAFETY: _exit is async-signal-safe.
+        unsafe { libc::_exit(130) };
+    }
+    pipeline::CANCELLED.store(true, Ordering::Relaxed);
+    unsafe { libc::write(2, MSG.as_ptr() as *const libc::c_void, MSG.len()) };
+}
+
 fn install_sigint_handler() {
-    ctrlc::set_handler(move || {
-        // Reset attributes and move to a fresh line.
-        eprint!("\x1b[0m\r\n");
-        if pipeline::CANCELLED.load(Ordering::Relaxed) {
-            pipeline::cleanup_tmp_dirs();
-            std::process::exit(130);
-        }
-        pipeline::CANCELLED.store(true, Ordering::Relaxed);
-        eprintln!("Cancelling after current encodes finish... (Ctrl-C again to force quit)");
-    })
-    .ok();
+    // SAFETY: sigint_handler only touches a static AtomicBool and
+    // async-signal-safe libc functions.
+    unsafe {
+        let mut sa: libc::sigaction = std::mem::zeroed();
+        sa.sa_sigaction = sigint_handler as *const () as libc::sighandler_t;
+        libc::sigemptyset(&mut sa.sa_mask);
+        sa.sa_flags = libc::SA_RESTART;
+        libc::sigaction(libc::SIGINT, &sa, std::ptr::null_mut());
+    }
 }
