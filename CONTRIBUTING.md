@@ -15,9 +15,10 @@ cargo build
 cargo test
 ```
 
-The pre-commit hook runs `cargo fmt --all -- --check` and `cargo clippy --
--D warnings`. Both are also enforced by CI. `HVAC_SKIP_CLIPPY=1` skips the
-slow check for fix-up commits; `--no-verify` skips both (use sparingly).
+The pre-commit hook runs `cargo fmt --all -- --check` and
+`cargo clippy -- -D warnings`. Both are also enforced by CI.
+`HVAC_SKIP_CLIPPY=1` skips the slow check for fix-up commits;
+`--no-verify` skips both (use sparingly).
 
 ## Where the code lives
 
