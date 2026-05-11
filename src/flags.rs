@@ -4,8 +4,19 @@ use launchdarkly_server_sdk::{
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// LaunchDarkly feature-flag client. All methods are no-ops when
-/// LAUNCHDARKLY_SDK_KEY is unset; the app runs normally with defaults.
+/// LaunchDarkly feature-flag client. All methods are no-ops when no SDK key
+/// is supplied; the app runs normally with defaults.
+///
+/// The SDK key is **CLI-only** by design — it is never read from the
+/// environment. Pass it explicitly per invocation via
+/// `hvac --launchdarkly-sdk-key <KEY> ...`. This prevents a key in a shell
+/// rc from silently controlling every run.
+// Fields are populated for use as evaluation-context targeting attributes
+// (hostname, username, GPU details) when the SDK actually evaluates flags
+// against rules. The current binary doesn't yet build a context that
+// references them — they're carried forward so flag-rule expansion
+// doesn't require constructor changes later.
+#[allow(dead_code)]
 pub struct Flags {
     client: Option<Arc<Client>>,
     hostname: String,
@@ -15,15 +26,23 @@ pub struct Flags {
     gpu_kind: Option<String>,
 }
 
+// As with the struct above: the methods on Flags are the public surface
+// for future flag-evaluation calls (set_gpu, plus whatever boolean/string
+// flag readers the binary will use). They aren't called from the current
+// run-loop yet; clippy's -D warnings would otherwise reject the unused
+// methods as dead code.
+#[allow(dead_code)]
 impl Flags {
-    /// Read LAUNCHDARKLY_SDK_KEY and connect. Blocks up to 2 s for initialization.
-    pub fn new() -> Self {
+    /// Connect to LaunchDarkly using the supplied SDK key. Pass `None`
+    /// (or an empty string) to get a no-op client. Blocks up to 2 s for
+    /// initialization when a key is present.
+    pub fn new(sdk_key: Option<&str>) -> Self {
         let hostname = get_hostname();
         let username = std::env::var("USER")
             .or_else(|_| std::env::var("LOGNAME"))
             .unwrap_or_else(|_| "unknown".to_string());
 
-        let client = build_client();
+        let client = sdk_key.filter(|k| !k.is_empty()).and_then(build_client);
         Flags {
             client,
             hostname,
@@ -570,13 +589,12 @@ impl Flags {
     }
 }
 
-fn build_client() -> Option<Arc<Client>> {
-    let sdk_key = std::env::var("LAUNCHDARKLY_SDK_KEY").ok()?;
+fn build_client(sdk_key: &str) -> Option<Arc<Client>> {
     if sdk_key.is_empty() {
         return None;
     }
 
-    let config = match ConfigBuilder::new(&sdk_key).build() {
+    let config = match ConfigBuilder::new(sdk_key).build() {
         Ok(c) => c,
         Err(e) => {
             log::warn!("LaunchDarkly config error: {e}");
@@ -628,4 +646,25 @@ fn get_hostname() -> String {
         }
     }
     "unknown".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flags_new_with_none_is_noop() {
+        // No SDK key → no client → all flag reads return defaults.
+        let flags = Flags::new(None);
+        assert!(flags.client.is_none());
+        assert!(flags.enable_transcoding()); // default: true
+        assert!(!flags.pause_transcoding()); // default: false
+    }
+
+    #[test]
+    fn flags_new_with_empty_str_is_noop() {
+        // Empty string is treated identically to None.
+        let flags = Flags::new(Some(""));
+        assert!(flags.client.is_none());
+    }
 }

@@ -23,8 +23,19 @@ pub fn run(api_key: &str) -> Result<()> {
         "\nToggle pause: https://app.launchdarkly.com/{}/production/features/pause-transcoding",
         PROJECT_KEY
     );
-    // stdout only — lets `eval $(hvac --setup-launchdarkly ...)` set the var directly
-    println!("export LAUNCHDARKLY_SDK_KEY={}", sdk_key);
+
+    // The SDK key is printed on its own line on stdout (greppable) followed
+    // by a usage hint. We deliberately do NOT print `export FOO=...` for
+    // shell-eval: an exported key in a shell rc would silently apply to
+    // every subsequent run, and hvac controls expensive GPU/disk resources.
+    // Users must pass the key explicitly per invocation via
+    // `hvac --launchdarkly-sdk-key <KEY> ...`.
+    println!("SDK key: {}", sdk_key);
+    eprintln!();
+    eprintln!("Use it on the next run with:");
+    eprintln!("  hvac --launchdarkly-sdk-key {} /path/to/media", sdk_key);
+    eprintln!();
+    eprintln!("Hold the key — anyone with it can pause/halt your transcodes.");
 
     Ok(())
 }

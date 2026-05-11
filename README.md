@@ -93,6 +93,23 @@ hvac --config config.yaml /path/to/movies
 
 ---
 
+## Controlling resource usage during multi-day transcodes
+
+For long-running batch transcodes (a media library of thousands of files takes days) you may want a way to observe progress, push tuning changes, or kill the process from outside without losing partial work. hvac integrates with LaunchDarkly to support that — the binary connects to your project at startup if you pass an SDK key:
+
+1. Provision the LaunchDarkly project once: `hvac --setup-launchdarkly --ld-api-key <YOUR_LD_API_KEY>`
+2. Note the SDK key it prints. Pass it on each long-running invocation:
+   ```
+   hvac --launchdarkly-sdk-key <SDK_KEY> /path/to/media
+   ```
+3. With a key supplied, hvac connects to LaunchDarkly's evaluation endpoint and exports per-encode OpenTelemetry spans to LaunchDarkly Observability, so you can watch live progress and timing in the LD dashboard.
+
+> **Status note.** The wiring is in place but flag *evaluation* (toggles like `pause-transcoding`, `enable-transcoding`, `dry-run`, `max-parallel-jobs`, `transcode-preset` overriding the run while it's in flight) is not yet read by the run-loop — those flags exist in the `--setup-launchdarkly` provisioner but flipping them today does not affect a running encode. Telemetry export and the kill-switch wiring are the next milestones; track this on the issues page.
+
+The SDK key is **CLI-only** by design — it does not read from any environment variable. This is deliberate: hvac controls expensive GPU/disk resources, and a key that lives in your shell rc would silently apply to every run. Keep the key in a secure location and pass it explicitly when you want remote observability/control to be active.
+
+---
+
 ## Development
 
 Hook the lint checks up once per clone:

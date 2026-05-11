@@ -1,8 +1,11 @@
 mod config;
+mod flags;
 mod gpu;
 mod iso;
 mod probe;
 mod scanner;
+mod setup;
+mod telemetry;
 mod transcode;
 mod util;
 
@@ -240,11 +243,14 @@ static CANCELLED: AtomicBool = AtomicBool::new(false);
 /// read by the CTRL-C handler for cleanup on force-quit.
 static TMP_DIRS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
-#[derive(Parser, Debug)]
+// NOTE: deliberately no `Debug` derive — CLI fields include the LaunchDarkly
+// SDK key, and a stray `dbg!(cli)` would leak it into logs. Keep this struct
+// off Debug so accidental prints fail to compile.
+#[derive(Parser)]
 #[command(name = "hvac", version, about = "GPU-accelerated media transcoder")]
 struct Cli {
     /// Directory to scan for media files
-    #[arg(required_unless_present = "dump_config")]
+    #[arg(required_unless_present_any = ["dump_config", "setup_launchdarkly"])]
     path: Option<PathBuf>,
 
     /// Path to YAML config file (uses built-in defaults if omitted)
@@ -287,6 +293,25 @@ struct Cli {
     /// Protects against hangs caused by stale NFS / unresponsive SMB mounts.
     #[arg(long, default_value_t = 30)]
     probe_timeout: u64,
+
+    /// LaunchDarkly SDK key for runtime feature-flag control (pause, kill,
+    /// dry-run, NVENC tuning). Omit to disable remote control entirely.
+    ///
+    /// CLI-only by design: hvac never reads this from the environment, so a
+    /// key in your shell rc cannot silently affect every run. Pass it
+    /// explicitly per invocation when you want remote control to be active.
+    #[arg(long, value_name = "KEY")]
+    launchdarkly_sdk_key: Option<String>,
+
+    /// Provision a LaunchDarkly project + all flags using your LD account
+    /// API key, then print the SDK key. Idempotent: re-runs on an existing
+    /// project just reuse the SDK key. Pair with --ld-api-key.
+    #[arg(long, default_value_t = false)]
+    setup_launchdarkly: bool,
+
+    /// LaunchDarkly account API key (used only with --setup-launchdarkly).
+    #[arg(long, value_name = "KEY")]
+    ld_api_key: Option<String>,
 }
 
 /// File ready to transcode, with pre-probed metadata.
@@ -460,11 +485,49 @@ fn main() -> Result<()> {
     env_logger::init();
     let cli = Cli::parse();
 
+    // --setup-launchdarkly: provision project + flags and print SDK key.
+    // Runs before GPU detection and path validation since it doesn't touch media.
+    if cli.setup_launchdarkly {
+        let api_key = cli
+            .ld_api_key
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("--setup-launchdarkly requires --ld-api-key <KEY>"))?;
+        return setup::run(api_key);
+    }
+
     // --dump-config: print embedded defaults to stdout and exit (no GPU or path needed)
     if cli.dump_config {
         print!("{}", config::EMBEDDED);
         return Ok(());
     }
+
+    // LaunchDarkly client (no-op when --launchdarkly-sdk-key is omitted).
+    // SDK key is **CLI-only**: never read from the environment.
+    //
+    // Wrap the clients in an RAII guard so their shutdown runs on EVERY
+    // exit path — early `return Ok(())`s for empty scans, --dry-run, no
+    // files-to-transcode, panics, anywhere else. Without this, flags /
+    // OTel spans buffered for a short run could be lost when `main` bails
+    // before the explicit end-of-run flush.
+    let sdk_key = cli.launchdarkly_sdk_key.as_deref();
+    struct LdGuard {
+        flags: flags::Flags,
+        telemetry: telemetry::Telemetry,
+    }
+    impl Drop for LdGuard {
+        fn drop(&mut self) {
+            // Both methods are idempotent / no-op on already-shutdown clients.
+            self.flags.close();
+            self.telemetry.shutdown();
+        }
+    }
+    let mut ld_guard = LdGuard {
+        flags: flags::Flags::new(sdk_key),
+        telemetry: telemetry::Telemetry::new(sdk_key),
+    };
+    // ld_guard.flags / ld_guard.telemetry will be the call surface once
+    // the run-loop wires per-encode flag evaluations and OTel spans.
+    // Until then the guard's only job is the Drop-on-early-return shutdown.
 
     // Safety: clap enforces `path` is present unless --dump-config is set
     let path = cli.path.as_deref().unwrap();
@@ -1665,6 +1728,13 @@ fn main() -> Result<()> {
             pct
         );
     }
+
+    // Explicit flush before exit — duplicates the LdGuard's Drop but is
+    // harmless because both close()/shutdown() are idempotent. Keeping the
+    // explicit call documents intent at end-of-main; the guard exists for
+    // the early-return / panic paths.
+    ld_guard.flags.close();
+    ld_guard.telemetry.shutdown();
 
     if final_errors > 0 {
         std::process::exit(1);
