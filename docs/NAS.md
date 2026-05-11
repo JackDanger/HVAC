@@ -139,21 +139,29 @@ Unraid's rootfs is a RAM-loaded squashfs that resets every boot, so
 the only durable install path is Docker. Plugins handle the
 GPU userland.
 
+There's no Community Applications template for hvac yet (PRs to
+[Squidly271/AppFeed](https://github.com/Squidly271/AppFeed) welcome),
+so the path today is **Docker → Add Container** with the fields below,
+or the equivalent `docker run` further down.
+
 ### Intel iGPU (most common)
 
-1. Apps tab → install **Intel-GPU-TOP** (exposes `/dev/dri`).
-2. Apps tab → search **hvac** → install. The community template
-   pre-fills the iGPU passthrough and a `/media` mount.
-3. Edit the template's **Post Arguments** to `--dry-run /media` for
-   the first run.
+1. Apps tab → install **Intel-GPU-TOP** (this exposes `/dev/dri`).
+2. Docker tab → **Add Container**:
+   - **Repository:** `ghcr.io/jackdanger/hvac:latest`
+   - **Network Type:** Bridge
+   - **Add another Path:** Container Path `/media`, Host Path `/mnt/user/media`
+   - **Add another Device:** `/dev/dri`
+   - **Post Arguments:** `--dry-run /media` for the first run.
 
 ### NVIDIA
 
 1. Apps tab → install **Nvidia-Driver** (this needs a reboot).
 2. Verify with `nvidia-smi` on the Unraid console.
-3. Apps tab → search **hvac** → install. In the template:
+3. Docker tab → **Add Container**, same fields as above except:
    - **Extra Parameters:** `--gpus all --runtime=nvidia`
    - **Variable:** `NVIDIA_VISIBLE_DEVICES=all`
+   - (no `/dev/dri` device — that's the Intel path)
 
 ### docker run equivalent
 
