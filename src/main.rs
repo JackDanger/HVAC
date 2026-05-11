@@ -513,6 +513,12 @@ fn main() -> Result<()> {
 
     let gpu = gpu::detect_gpu()?;
     eprintln!("GPU: {} ({})", gpu.name, gpu.encoder);
+    if !gpu.supports_10bit_hevc {
+        eprintln!(
+            "  note: this GPU's NVENC does not support 10-bit HEVC; \
+             10-bit sources will be skipped."
+        );
+    }
 
     if let Ok(avail) = util::available_disk_space(path) {
         eprintln!("Disk: {} available", format_size(avail));
@@ -639,6 +645,20 @@ fn main() -> Result<()> {
                     continue;
                 }
                 if probe::meets_target(&info, &cfg.target) {
+                    skipped += 1;
+                } else if probe::is_10bit(&info.pix_fmt) && !gpu.supports_10bit_hevc {
+                    // Pre-flight gate: this card's NVENC can't encode 10-bit HEVC.
+                    // Feeding p010le to it produces a confusing init failure several
+                    // minutes into the encode — better to skip up front.
+                    // Two explicit lines so the message wraps cleanly even
+                    // on narrow terminals — backslash line continuations
+                    // collapse the newline and produce one ~150-char line.
+                    let name = file.file_name().unwrap_or_default().to_string_lossy();
+                    eprintln!(
+                        "  skip: {}: source is 10-bit; this GPU's NVENC doesn't support 10-bit HEVC.\n\
+                         \tUse a Turing (RTX 20xx) or newer card, or convert to 8-bit first.",
+                        name
+                    );
                     skipped += 1;
                 } else {
                     let source_size = if let Some(ref ip) = iso_p {
