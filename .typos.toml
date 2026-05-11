@@ -16,6 +16,10 @@ extend-identifiers = { hvac = "hvac", hvac_tmp = "hvac_tmp", ofreal = "ofreal" }
 "tdorr" = "tdorr"   # old name; mentioned in CHANGELOG / git history
 "slimarr" = "slimarr" # ditto
 "HVECuum" = "HVECuum" # earlier project name
+# HDR / video-codec terms typos doesn't recognise:
+"cll" = "cll"               # HDR10 ContentLightLevel; field name in probe.rs
+"CLL" = "CLL"
+"unparseable" = "unparseable"  # British/preferred spelling we use in docs
 
 # Skip paths that contain generated content or vendored fixtures.
 [files]

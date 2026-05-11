@@ -3,4 +3,5 @@
 *.swp
 *.swo
 .DS_Store
-Cargo.lock
+# Cargo.lock is committed (see CONTRIBUTING.md): this is an application
+# crate, and `cargo audit` + reproducible-builds need the lockfile in tree.
