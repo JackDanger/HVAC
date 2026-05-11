@@ -8,9 +8,9 @@
 Point `hvac` at a directory that contains videos — even ones hidden inside `.img` and `.iso` files — and it'll compress them to `h.265` (`HEVC`) using reasonable defaults. You can overwrite these defaults with a small config file.
 
 You need a GPU with an HEVC encoder (NVIDIA NVENC, Intel VAAPI, or
-Apple VideoToolbox) and an ffmpeg built with it. `install.sh` handles
-both on macOS and Debian/Ubuntu; for everywhere else see [Install](#install),
-[Docker](#docker), or [NAS-specific notes](docs/NAS.md).
+Apple VideoToolbox) and an ffmpeg built against it. The installer below
+handles both on macOS and Debian/Ubuntu; for everything else there's
+[Docker](#docker) or the [NAS-specific notes](docs/NAS.md).
 
 ---
 

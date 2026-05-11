@@ -69,10 +69,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /src/target/release/hvac /usr/local/bin/hvac
 
 # Match the typical NAS admin UID/GID so files written back to bind-mounts
-# don't end up root-owned. Override with `--user $(id -u):$(id -g)` if
-# your NAS uses different values.
-RUN groupadd -g 100 hvac && useradd -m -u 1026 -g 100 hvac
-USER hvac:hvac
+# don't end up root-owned. GID 100 is the pre-existing "users" group on
+# Debian (and on Synology / Unraid / OMV — the value was chosen because
+# their admin accounts already sit there), so we just reuse it rather
+# than create a parallel "hvac" group at the same number.
+# Override with `--user $(id -u):$(id -g)` if your NAS uses different values.
+RUN useradd -m -u 1026 -g 100 hvac
+USER hvac:users
 WORKDIR /media
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/hvac"]
