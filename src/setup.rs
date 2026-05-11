@@ -192,12 +192,11 @@ fn ld_message(body: &str) -> String {
 
 fn flag_specs() -> Vec<Value> {
     vec![
-        // ── Remote control ────────────────────────────────────────────────────
         json!({
             "key": "pause-transcoding",
             "name": "Pause Transcoding",
             "kind": "boolean",
-            "description": "Halt all active workers mid-run. Toggle back to resume.",
+            "description": "Halt all active workers mid-run. Toggle back to resume. In-flight encodes finish before pausing.",
             "temporary": false,
             "variations": [{"value": true, "name": "Paused"}, {"value": false, "name": "Running"}],
             "defaults": {"onVariation": 0, "offVariation": 1}
@@ -206,145 +205,22 @@ fn flag_specs() -> Vec<Value> {
             "key": "enable-transcoding",
             "name": "Enable Transcoding",
             "kind": "boolean",
-            "description": "Master kill-switch. Serve false to any context to abort at startup.",
+            "description": "Master kill-switch. Set false to stop workers from picking up new files.",
             "temporary": false,
             "variations": [{"value": true, "name": "Enabled"}, {"value": false, "name": "Disabled"}],
-            "defaults": {"onVariation": 0, "offVariation": 0}
-        }),
-        json!({
-            "key": "dry-run",
-            "name": "Dry Run",
-            "kind": "boolean",
-            "description": "Show what would be transcoded without encoding. Toggle on to enable.",
-            "temporary": false,
-            "variations": [{"value": true, "name": "Enabled"}, {"value": false, "name": "Disabled"}],
-            "defaults": {"onVariation": 0, "offVariation": 1}
-        }),
-        // ── Worker behaviour ──────────────────────────────────────────────────
-        json!({
-            "key": "enable-auto-ramp",
-            "name": "Enable Auto Ramp",
-            "kind": "boolean",
-            "description": "Discover optimal parallel job count at runtime. Disable to use fixed -j.",
-            "temporary": false,
-            "variations": [{"value": true, "name": "Enabled"}, {"value": false, "name": "Disabled"}],
-            "defaults": {"onVariation": 0, "offVariation": 0}
-        }),
-        json!({
-            "key": "enable-iso-support",
-            "name": "Enable ISO Support",
-            "kind": "boolean",
-            "description": "Process .iso and .img disc images via isomage.",
-            "temporary": false,
-            "variations": [{"value": true, "name": "Enabled"}, {"value": false, "name": "Disabled"}],
-            "defaults": {"onVariation": 0, "offVariation": 0}
-        }),
-        json!({
-            "key": "enable-subtitle-retry",
-            "name": "Enable Subtitle Retry",
-            "kind": "boolean",
-            "description": "Retry failed encodes without subtitle streams.",
-            "temporary": false,
-            "variations": [{"value": true, "name": "Enabled"}, {"value": false, "name": "Disabled"}],
-            "defaults": {"onVariation": 0, "offVariation": 0}
-        }),
-        // ── Tuning (multivariate) ─────────────────────────────────────────────
-        json!({
-            "key": "gpu-encoder-override",
-            "name": "GPU Encoder Override",
-            "kind": "multivariate",
-            "description": "Override detected GPU encoder. Empty string = auto-detect.",
-            "temporary": false,
-            "variations": [
-                {"value": "",                    "name": "Auto (default)"},
-                {"value": "hevc_nvenc",          "name": "NVIDIA NVENC"},
-                {"value": "hevc_vaapi",          "name": "Intel VAAPI"},
-                {"value": "hevc_videotoolbox",   "name": "Apple VideoToolbox"}
-            ],
-            "defaults": {"onVariation": 0, "offVariation": 0}
-        }),
-        json!({
-            "key": "transcode-preset",
-            "name": "Transcode Preset",
-            "kind": "multivariate",
-            "description": "Override ffmpeg quality preset. Empty string = use config file.",
-            "temporary": false,
-            "variations": [
-                {"value": "",       "name": "Config default"},
-                {"value": "fast",   "name": "Fast"},
-                {"value": "medium", "name": "Medium"},
-                {"value": "slow",   "name": "Slow"},
-                {"value": "p1",     "name": "NVENC P1 (fastest)"},
-                {"value": "p7",     "name": "NVENC P7 (best quality)"}
-            ],
             "defaults": {"onVariation": 0, "offVariation": 0}
         }),
         json!({
             "key": "max-parallel-jobs",
             "name": "Max Parallel Jobs",
             "kind": "multivariate",
-            "description": "Override parallel job count. 0 = auto-detect from GPU.",
+            "description": "Override parallel job count while the run is in flight. 0 = auto-detect from GPU.",
             "temporary": false,
             "variations": [
                 {"value": 0, "name": "Auto (default)"},
-                {"value": 2, "name": "2"},
-                {"value": 4, "name": "4"},
-                {"value": 8, "name": "8"}
-            ],
-            "defaults": {"onVariation": 0, "offVariation": 0}
-        }),
-        json!({
-            "key": "max-bitrate-kbps",
-            "name": "Max Bitrate (kbps)",
-            "kind": "multivariate",
-            "description": "Override max output bitrate in kbps. 0 = use config value.",
-            "temporary": false,
-            "variations": [
-                {"value": 0,     "name": "Config default"},
-                {"value": 4000,  "name": "4 Mbps"},
-                {"value": 8000,  "name": "8 Mbps"},
-                {"value": 12000, "name": "12 Mbps"}
-            ],
-            "defaults": {"onVariation": 0, "offVariation": 0}
-        }),
-        json!({
-            "key": "max-session-retries",
-            "name": "Max Session Retries",
-            "kind": "multivariate",
-            "description": "Max retries on NVENC session-limit errors.",
-            "temporary": false,
-            "variations": [
-                {"value": 5, "name": "5 (default)"},
                 {"value": 1, "name": "1"},
-                {"value": 10, "name": "10"},
-                {"value": 0, "name": "No retries"}
-            ],
-            "defaults": {"onVariation": 0, "offVariation": 0}
-        }),
-        json!({
-            "key": "disk-headroom-extra-gb",
-            "name": "Disk Headroom Extra (GB)",
-            "kind": "multivariate",
-            "description": "Extra GB disk reserve beyond the base 2 GB safety margin.",
-            "temporary": false,
-            "variations": [
-                {"value": 0.0,  "name": "0 GB (default)"},
-                {"value": 5.0,  "name": "5 GB"},
-                {"value": 10.0, "name": "10 GB"},
-                {"value": 20.0, "name": "20 GB"}
-            ],
-            "defaults": {"onVariation": 0, "offVariation": 0}
-        }),
-        json!({
-            "key": "extra-ffmpeg-args",
-            "name": "Extra ffmpeg Args",
-            "kind": "multivariate",
-            "description": "Extra args appended to every ffmpeg encode command (JSON array of strings).",
-            "temporary": false,
-            "variations": [
-                {"value": [],                                   "name": "None (default)"},
-                {"value": ["-tune", "hq"],                     "name": "NVENC HQ tune"},
-                {"value": ["-rc", "vbr", "-cq", "28"],         "name": "NVENC VBR CQ28"}
+                {"value": 2, "name": "2"},
+                {"value": 4, "name": "4"}
             ],
             "defaults": {"onVariation": 0, "offVariation": 0}
         }),

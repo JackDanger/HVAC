@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::config::Config;
+use crate::flags::Flags;
 use crate::gpu::GpuInfo;
 use crate::transcode;
 use crate::ui::{truncate_name, Symbols};
@@ -210,6 +211,7 @@ pub struct WorkerCtx {
     pub session_limit_frozen: Arc<AtomicBool>,
     pub min_observed_max: Arc<AtomicU32>,
     pub disk_reserved: Arc<AtomicU64>,
+    pub flags: Arc<Flags>,
 }
 
 /// Run one worker iteration for the slot bound to `my_slot`. Exits when the
@@ -218,6 +220,28 @@ pub fn run_worker(ctx: WorkerCtx, my_slot: Arc<WorkerSlot>) {
     'outer: loop {
         if CANCELLED.load(Ordering::Relaxed) {
             return;
+        }
+
+        // Kill-switch: stop picking up new files.
+        if !ctx.flags.enable_transcoding() {
+            log::info!("LaunchDarkly enable-transcoding=false: worker stopping");
+            CANCELLED.store(true, Ordering::Relaxed);
+            return;
+        }
+
+        // Pause: spin-wait while paused; in-flight encodes finish first.
+        let mut was_paused = false;
+        while ctx.flags.pause_transcoding() && !CANCELLED.load(Ordering::Relaxed) {
+            if !was_paused {
+                let active = ctx.active_encoders.load(Ordering::Relaxed) as usize;
+                ctx.flags.track_transcoding_paused(active);
+                was_paused = true;
+            }
+            std::thread::sleep(Duration::from_secs(1));
+        }
+        if was_paused {
+            let active = ctx.active_encoders.load(Ordering::Relaxed) as usize;
+            ctx.flags.track_transcoding_resumed(active);
         }
 
         let idx = ctx.next_idx.fetch_add(1, Ordering::Relaxed) as usize;
@@ -397,7 +421,14 @@ fn encode_with_retry(
         // stay invisible until we have a slot.
         if !try_acquire(&ctx.active_encoders, &ctx.max_encoders) {
             if !ctx.auto_ramp {
-                my_slot.queued.store(true, Ordering::Relaxed);
+                if !my_slot.queued.swap(true, Ordering::Relaxed) {
+                    // Just became queued — track it once.
+                    ctx.flags.track_transcode_queued(
+                        short_name,
+                        0,
+                        ctx.max_encoders.load(Ordering::Relaxed),
+                    );
+                }
                 my_slot.progress.store(0, Ordering::Relaxed);
                 my_slot.speed.store(0, Ordering::Relaxed);
             }
@@ -413,6 +444,14 @@ fn encode_with_retry(
             my_slot.progress.store(0, Ordering::Relaxed);
             my_slot.speed.store(0, Ordering::Relaxed);
         }
+
+        ctx.flags.track_transcode_started(
+            short_name,
+            item.bitrate_kbps,
+            item.duration_secs,
+            item.source_size,
+            &item.pix_fmt,
+        );
 
         let encode_result = run_one_encode(item, output_path.as_deref(), state, ctx, my_slot);
 
@@ -432,6 +471,7 @@ fn encode_with_retry(
                 if !apply_retry(
                     decision, &err_str, state, ctx, my_slot, short_name, size_str,
                 ) {
+                    ctx.flags.track_transcode_failed(short_name, &err_str);
                     return Some(e);
                 }
             }
@@ -464,7 +504,15 @@ fn wait_for_disk(
     };
 
     if !has_disk {
-        my_slot.disk_wait.store(true, Ordering::Relaxed);
+        if !my_slot.disk_wait.swap(true, Ordering::Relaxed) {
+            // First time hitting disk pressure for this file — track it once.
+            let avail_gb = if let Ok(a) = util::available_disk_space(check_dir) {
+                a as f64 / (1024 * 1024 * 1024) as f64
+            } else {
+                0.0
+            };
+            ctx.flags.track_disk_wait(short_name, avail_gb);
+        }
         if !ctx.auto_ramp {
             let mut info = my_slot.info.lock().unwrap();
             *info = Some((short_name.to_string(), size_str.to_string()));
@@ -574,6 +622,9 @@ fn apply_retry(
             state.skip_subs = true;
             state.subtitle_reencode_attempt = None;
             log::info!("{}: retrying without subtitles", short_name);
+            ctx.flags.track_subtitle_retry(short_name);
+            ctx.flags
+                .track_transcode_retry(short_name, state.session_retries, "skip-subtitles");
             my_slot.progress.store(0, Ordering::Relaxed);
             my_slot.speed.store(0, Ordering::Relaxed);
             true
@@ -586,6 +637,9 @@ fn apply_retry(
             ctx.min_observed_max.fetch_min(active, Ordering::SeqCst);
 
             let hits = ctx.session_limit_hits.fetch_add(1, Ordering::SeqCst) + 1;
+            ctx.flags.track_session_limit_hit(hits);
+            ctx.flags
+                .track_transcode_retry(short_name, state.session_retries, "session-limit");
             if should_freeze(hits) && !ctx.session_limit_frozen.swap(true, Ordering::SeqCst) {
                 let pin = ctx
                     .min_observed_max
@@ -632,6 +686,9 @@ fn record_success(
     } else {
         0
     };
+
+    ctx.flags
+        .track_transcode_completed(short_name, item.source_size, out_size, saved_pct);
 
     *my_slot.info.lock().unwrap() = None;
     my_slot.progress.store(0, Ordering::Relaxed);

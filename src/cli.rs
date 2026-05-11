@@ -61,8 +61,8 @@ pub struct Cli {
     #[arg(long, default_value_t = 30)]
     pub probe_timeout: u64,
 
-    /// LaunchDarkly SDK key for runtime feature-flag control (pause, kill,
-    /// dry-run, NVENC tuning). Omit to disable remote control entirely.
+    /// LaunchDarkly SDK key for runtime feature-flag control (pause, kill-switch,
+    /// parallel-job throttle). Omit to disable remote control entirely.
     ///
     /// CLI-only by design: hvac never reads this from the environment, so a
     /// key in your shell rc cannot silently affect every run. Pass it

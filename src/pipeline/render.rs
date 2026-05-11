@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::flags::Flags;
 use crate::ui::{progress_bar_str, Symbols};
 
 use super::worker::lower_max;
@@ -33,6 +34,7 @@ pub struct RenderCtx {
     pub total_units: u64,
     pub file_count: u64,
     pub sym: &'static Symbols,
+    pub flags: Arc<Flags>,
 }
 
 /// Run the render loop until all files are accounted for (or the run was
@@ -55,6 +57,14 @@ pub fn run_render(ctx: RenderCtx) {
             && last_ramp_time.elapsed().as_secs() >= 5
         {
             try_ramp(&ctx, &mut ramp_baseline_speed, &mut last_ramp_time);
+        }
+
+        // max-parallel-jobs flag: override max_encoders every tick when set.
+        // Also disables auto-ramp so the two don't fight each other.
+        let flag_max = ctx.flags.max_parallel_jobs();
+        if flag_max > 0 {
+            ctx.ramping.store(false, Ordering::SeqCst);
+            ctx.max_encoders.store(flag_max as u32, Ordering::SeqCst);
         }
 
         let completed = ctx.transcoded.load(Ordering::Relaxed);
@@ -264,15 +274,21 @@ fn try_ramp(ctx: &RenderCtx, baseline: &mut u64, last_ramp: &mut Instant) {
         RampAction::Wait => {}
         RampAction::RampUp { new_baseline } => {
             *baseline = new_baseline;
-            ctx.max_encoders.store(current_max + 1, Ordering::SeqCst);
+            let new_max = current_max + 1;
+            ctx.max_encoders.store(new_max, Ordering::SeqCst);
+            ctx.flags
+                .track_auto_ramp_increased(current_max, new_max, total_speed);
             *last_ramp = Instant::now();
         }
         RampAction::Stall => {
             ctx.ramping.store(false, Ordering::SeqCst);
+            ctx.flags.track_auto_ramp_stopped(current_max, false);
         }
         RampAction::StallAndRevert => {
             ctx.ramping.store(false, Ordering::SeqCst);
-            lower_max(&ctx.max_encoders, current_max.saturating_sub(1).max(1));
+            let reverted = current_max.saturating_sub(1).max(1);
+            lower_max(&ctx.max_encoders, reverted);
+            ctx.flags.track_auto_ramp_stopped(current_max, true);
         }
     }
 }
