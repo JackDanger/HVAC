@@ -63,15 +63,20 @@ jobs:
             echo "rust-version not declared in Cargo.toml"; exit 1
           fi
           echo "msrv=$msrv" >> "$GITHUB_OUTPUT"
-      - uses: dtolnay/rust-toolchain@master
+      # dtolnay/rust-toolchain has no @stable-equivalent ref for arbitrary
+      # toolchain inputs — @master is the documented entry point. Pin to a
+      # tagged release of the action itself for reproducibility.
+      - uses: dtolnay/rust-toolchain@5fa12dde88ade6df0c93e8c2f4d59fc2e9b48b87 # 1.13.0
         with:
           toolchain: ${{ steps.msrv.outputs.msrv }}
       - uses: Swatinem/rust-cache@v2
         with:
           key: msrv-${{ steps.msrv.outputs.msrv }}
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg
-      - run: cargo build --bin hvac
-      - run: cargo test --bin hvac
+      - run: cargo build
+      # Run the full suite (unit + integration). MSRV regressions in a
+      # test target should fail here too.
+      - run: cargo test --all-targets
 
   # ── Doc build: catches broken intra-doc links + missing `///` on pub ─────
   doc:
@@ -142,7 +147,9 @@ jobs:
         with:
           tool: cargo-llvm-cov
       - name: Collect coverage
-        run: cargo llvm-cov --lcov --output-path lcov.info --bin hvac
+        # `--all-targets` so the lcov reflects both unit and integration
+        # tests; otherwise tests/cli_smoke.rs coverage is invisible.
+        run: cargo llvm-cov --all-targets --lcov --output-path lcov.info
       - name: Upload to codecov.io
         uses: codecov/codecov-action@v5
         with:
@@ -164,15 +171,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # Need at least two commits to diff against the previous push,
-          # so we can find which promptlog files changed.
-          fetch-depth: 2
+          # `0` fetches the full history. We diff `before..sha` to catch
+          # promptlog touches anywhere in the pushed range (batch merges,
+          # manual pushes of several commits) rather than just the tip.
+          fetch-depth: 0
       - name: Find changed promptlog files
         id: changed
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.sha }}
         run: |
-          # Compare against the parent of HEAD. On a fast-forward push
-          # this gives us the merged PR's promptlog/ touches.
-          changed=$(git diff --name-only --diff-filter=AM HEAD~1..HEAD \
+          # For the very first push to a branch BEFORE_SHA is all zeros
+          # (no prior commit on this ref). Fall back to HEAD~1 there;
+          # the workflow only runs on main so the fallback is safe.
+          if [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ] || [ -z "$BEFORE_SHA" ]; then
+            BEFORE_SHA="${AFTER_SHA}~1"
+          fi
+          changed=$(git diff --name-only --diff-filter=AM "$BEFORE_SHA".."$AFTER_SHA" \
                     | grep -E '^promptlog/.+\.md$' \
                     | grep -v '^promptlog/README\.md$' || true)
           if [ -z "$changed" ]; then
@@ -199,7 +214,14 @@ jobs:
             [ -z "$file" ] && continue
             slug=$(basename "$file" .md)
             echo "→ POST $file → https://jackdanger.com/promptlog/$slug"
+            # --retry handles transient network blips so a 5xx burst
+            # doesn't fail an otherwise-green main build. --retry-all-errors
+            # so curl also retries connection-level failures, not just
+            # HTTP status codes. --max-time guards against an endpoint
+            # that hangs holding the connection.
             curl --fail-with-body -sS \
+                 --retry 5 --retry-all-errors --retry-delay 5 \
+                 --max-time 60 \
                  -X POST "https://jackdanger.com/promptlog/$slug" \
                  -H "Authorization: Bearer $PROMPTLOG_TOKEN" \
                  -H "Content-Type: text/markdown" \

@@ -24,10 +24,15 @@ to make sense to a reader of the repo.
 ## Publishing
 
 The `publish-promptlog` CI job picks up any session file that's added or
-modified in a push to `main` and POSTs it to
-<https://jackdanger.com/promptlog/> as `text/markdown`. Authentication
-is via the `PROMPTLOG_TOKEN` repository secret (`Authorization: Bearer
-<token>`).
+modified in a push to `main` and POSTs each one to
+`https://jackdanger.com/promptlog/<slug>` (one URL per file, where
+`<slug>` is the filename without `.md`) as `text/markdown`. The diff
+range is `${{ github.event.before }}..${{ github.sha }}` so multi-commit
+pushes are covered, not just the tip commit.
+
+Authentication is via the `PROMPTLOG_TOKEN` repository secret
+(`Authorization: Bearer <token>`); the request retries up to 5 times
+on transient failures.
 
 If the secret isn't configured, the job logs the upload it *would* have
 made and exits zero — non-publishing forks of the repo aren't punished.

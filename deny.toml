@@ -23,7 +23,13 @@ version = 2
 # yanked = "deny" means a yanked dep fails the build. RustSec doesn't
 # auto-yank for vulnerabilities — fail those via the advisories DB.
 yanked = "deny"
-ignore = []
+ignore = [
+    # rustls-pemfile is unmaintained as of 2025; functionality moved into
+    # rustls-pki-types. We pull it transitively via launchdarkly-server-sdk
+    # → hyper-rustls. Track upstream and drop this ignore once LD ships a
+    # release that doesn't use it.
+    "RUSTSEC-2025-0134",
+]
 
 [licenses]
 version = 2
@@ -46,8 +52,12 @@ allow = [
 # `clarify` entry below.
 confidence-threshold = 0.8
 
-# Treat unlicensed crates as a build failure.  GPL / AGPL would also
-# fail the `allow` list above (they're not listed).
+# `unused-allowed-license = "warn"` flags entries in the `allow` list
+# above that nothing in the graph actually uses — purely a hygiene check
+# on this config file, not a check on the crates themselves. The real
+# guardrail against unlicensed crates is the `allow` list: anything
+# without a matching license-id (or a `clarify` override) fails the
+# build automatically.
 unused-allowed-license = "warn"
 
 [bans]

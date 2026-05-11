@@ -9,10 +9,11 @@ edition = "2021"
 # build + tests on exactly this toolchain so silently-newer-Rust feature
 # usage doesn't sneak in. Bump cautiously and bump CHANGELOG with it.
 #
-# 1.82 (Oct 2024): we use C-string literals (c"foo", 1.77+), `let ... else`
-# (1.65+), and standard 2024-era features in the LD / OTel transitive deps.
-# 1.82 is comfortably above all of those.
-rust-version = "1.82"
+# 1.85 (Feb 2025): the cargo-audit install pulls in `time-core` which
+# requires the `edition2024` Cargo feature, stabilised in 1.85. We also
+# use C-string literals (1.77+) and `let ... else` (1.65+); 1.85 sits
+# comfortably above those and covers transitive dep MSRVs.
+rust-version = "1.85"
 description = "GPU-accelerated media transcoder (HEVC/h265 via NVENC, VAAPI, VideoToolbox). Single-binary Tdarr alternative."
 license = "MIT"
 repository = "https://github.com/JackDanger/hvac"
