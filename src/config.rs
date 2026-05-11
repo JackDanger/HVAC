@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 /// The default `config.yaml` baked in at compile time.
 pub const EMBEDDED: &str = include_str!("../config.yaml");
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct Config {
     pub target: TargetConfig,
     pub media_extensions: Vec<String>,
