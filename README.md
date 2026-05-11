@@ -92,7 +92,7 @@ hvac --config config.yaml /path/to/movies
 
 For long-running batch transcodes (a media library of thousands of files takes days) you may want a way to observe progress, push tuning changes, or kill the process from outside without losing partial work. hvac integrates with LaunchDarkly to support that — the binary connects to your project at startup if you pass an SDK key:
 
-**Full disclosure:** At the time of writing I work at LaunchDarkly. I drive my whole homelab config with it.
+**Full disclosure:** At the time of writing, I work at LaunchDarkly. I drive my whole homelab config with it.
 
 1. Provision the LaunchDarkly project once: `hvac --setup-launchdarkly --ld-api-key <YOUR_LD_API_KEY>`
 2. Note the SDK key it prints. Pass it on each long-running invocation:
