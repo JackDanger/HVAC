@@ -23,13 +23,7 @@ version = 2
 # yanked = "deny" means a yanked dep fails the build. RustSec doesn't
 # auto-yank for vulnerabilities — fail those via the advisories DB.
 yanked = "deny"
-ignore = [
-    # rustls-pemfile is unmaintained as of 2025; functionality moved into
-    # rustls-pki-types. We pull it transitively via launchdarkly-server-sdk
-    # → hyper-rustls. Track upstream and drop this ignore once LD ships a
-    # release that doesn't use it.
-    "RUSTSEC-2025-0134",
-]
+ignore = []
 
 [licenses]
 version = 2
