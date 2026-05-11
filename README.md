@@ -8,10 +8,6 @@
 Point `hvac` at a directory that contains videos — even ones hidden inside `.img` and `.iso` files - and it'll compress them to h.265 (HEVC) using reasonable defaults. You can overwrite these defaults with a small config file.
 
 <p align="center">
-  <img src="logo.svg" alt="hvac" width="700"/>
-</p>
-
-<p align="center">
   <b>Shrink your entire video library to h265.</b><br/>
 </p>
 
