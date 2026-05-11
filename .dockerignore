@@ -1,0 +1,13 @@
+target/
+.git/
+.github/
+.claude/
+.hooks/
+.githooks/
+promptlog/
+docs/
+tests/fixtures/
+*.iso
+*.img
+*.mkv
+*.mp4

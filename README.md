@@ -7,6 +7,11 @@
 
 Point `hvac` at a directory that contains videos — even ones hidden inside `.img` and `.iso` files — and it'll compress them to `h.265` (`HEVC`) using reasonable defaults. You can overwrite these defaults with a small config file.
 
+You need a GPU with an HEVC encoder (NVIDIA NVENC, Intel VAAPI, or
+Apple VideoToolbox) and an ffmpeg built with it. `install.sh` handles
+both on macOS and Debian/Ubuntu; for everywhere else see [Install](#install),
+[Docker](#docker), or [NAS-specific notes](docs/NAS.md).
+
 ---
 
 ## Install
@@ -15,22 +20,30 @@ Point `hvac` at a directory that contains videos — even ones hidden inside `.i
 curl -fsSL https://raw.githubusercontent.com/JackDanger/hvac/main/install.sh | sh
 ```
 
-Other ways: `brew install JackDanger/tap/hvac` &middot; `cargo install hvac-transcoder` &middot; [`.deb`, AUR, tarballs](https://github.com/JackDanger/hvac/releases)
+Other ways: `brew install JackDanger/tap/hvac` &middot; `cargo install hvac-transcoder` &middot; [`.deb`, AUR, tarballs](https://github.com/JackDanger/hvac/releases) &middot; [Docker](#docker) &middot; [Synology / QNAP / Unraid](docs/NAS.md)
 
 ---
 
 ## Use
 
-```bash
-hvac /path/to/movies
-```
-
-It scans the directory, skips files that are already h.265, and re-encodes the rest. Re-running picks up where you left off.
+First time on a library you care about, do a dry run:
 
 ```bash
 hvac --dry-run /path/to/movies        # preview, change nothing
+```
+
+Once you've eyeballed the list, drop `--dry-run`:
+
+```bash
+hvac /path/to/movies                  # overwrite in place (default)
 hvac --no-overwrite /path/to/movies   # write .transcoded.mkv copies, keep originals
 ```
+
+It scans the directory, skips files that already meet the target, and re-encodes
+the rest. Re-running picks up where you left off — there's a sidecar
+`.hvac.complete` next to each output that records source size + duration so the
+next run knows whether to adopt it or re-encode. Ctrl-C is safe; in-progress
+encodes leave a `.hvac_tmp_*` file that the next run sweeps.
 
 ---
 
@@ -85,6 +98,80 @@ hvac --dump-config > config.yaml
 $EDITOR config.yaml
 hvac --config config.yaml /path/to/movies
 ```
+
+---
+
+## Docker
+
+If you'd rather not install ffmpeg + drivers + the binary on the host —
+or if the host is a NAS where those don't behave — there's a container
+image with everything pre-wired.
+
+```bash
+# Intel iGPU (Broadwell+)
+docker run --rm \
+  --device /dev/dri:/dev/dri \
+  -v /path/to/media:/media \
+  ghcr.io/jackdanger/hvac:latest --dry-run /media
+
+# NVIDIA (needs nvidia-container-toolkit on the host)
+docker run --rm \
+  --gpus all --runtime=nvidia \
+  -v /path/to/media:/media \
+  ghcr.io/jackdanger/hvac:latest --dry-run /media
+```
+
+For compose, copy [`compose.example.yml`](compose.example.yml) and edit
+the volume path. The image is built from this repo's
+[`Dockerfile`](Dockerfile) — `docker build -t hvac .` works if you'd
+rather build locally.
+
+NAS-specific instructions (Synology Container Manager, QNAP Container
+Station, Unraid Community Applications, TrueNAS SCALE, OpenMediaVault)
+live in [`docs/NAS.md`](docs/NAS.md). If your NAS has no GPU, that doc
+also covers the "mount over NFS and transcode off-box" pattern.
+
+---
+
+## Troubleshooting
+
+**"No GPU found for h265 encoding!"**
+- macOS: nothing to do — Apple Silicon and all post-2017 Macs have
+  VideoToolbox built in. If you still see this, your shell is missing
+  `ffmpeg`; `brew install ffmpeg`.
+- Linux + Intel iGPU: `ls -la /dev/dri` — if `renderD128` isn't there,
+  load the driver (`sudo modprobe i915` on most distros) and install
+  `intel-media-va-driver` + `vainfo`.
+- Linux + NVIDIA: `nvidia-smi` should print your card. If it doesn't,
+  install the proprietary driver and reboot. The open-source `nouveau`
+  driver has no NVENC.
+- Docker / NAS: pass the device. `--device /dev/dri:/dev/dri` for
+  Intel; `--gpus all --runtime=nvidia` for NVIDIA. See
+  [`docs/NAS.md`](docs/NAS.md).
+
+**"Can I do CPU encoding instead?"** No, by design. x265 at the quality
+the defaults target runs at ~5 fps on a fast desktop CPU. A 2-hour
+movie is 6+ hours of wall time vs. 5 minutes on a $50 used Quadro. If
+you're on a NAS without a GPU, see [`docs/NAS.md`](docs/NAS.md) for
+the off-box pattern.
+
+**"Will it touch my files?"** It overwrites by default — only after
+the new encode has passed an ffprobe duration + codec + min-size
+check, and only via an atomic rename of a `.hvac_tmp_…` sidecar over
+the original. The first run on a library you care about should be
+`hvac --dry-run`, then `hvac --no-overwrite`; the latter writes
+`.transcoded.<ext>` copies you can compare before committing with
+`--replace`.
+
+**"It's stuck on a single file."** ffprobe has a watchdog
+(`--probe-timeout`, default 30 s); the directory walk doesn't. If
+your media lives on a flaky NFS / SMB mount and the scan hangs, that
+hang is on the kernel's mount layer, not hvac. Raise the probe
+timeout on slow NAS shares: `hvac --probe-timeout 120 /path`.
+
+**"I want to stop it cleanly."** Ctrl-C once — workers finish their
+current file, then exit. Ctrl-C twice — force quit; in-progress
+`.hvac_tmp_*` files are swept on the next run. Resume is automatic.
 
 ---
 

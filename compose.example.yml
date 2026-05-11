@@ -1,0 +1,38 @@
+# Copy this file to compose.yml and edit the media path / GPU section.
+# Intended as a starting point for NAS users who'd rather not memorize
+# the equivalent `docker run` flags.
+#
+# Quickstart:
+#   cp compose.example.yml compose.yml
+#   $EDITOR compose.yml          # change /path/to/media → your library
+#   docker compose run --rm hvac --dry-run /media
+#   docker compose run --rm hvac /media     # for the real pass
+
+services:
+  hvac:
+    image: ghcr.io/jackdanger/hvac:latest
+    container_name: hvac
+    # Bind-mount your media. The container side is /media; pass /media as
+    # the argument to hvac. Replace /path/to/media with /volume1/video on
+    # Synology, /share/Multimedia on QNAP, /mnt/user/media on Unraid, etc.
+    volumes:
+      - /path/to/media:/media
+
+    # GPU passthrough — pick exactly one of the two blocks below.
+
+    # ── Intel iGPU (Broadwell or newer) ──────────────────────────────
+    devices:
+      - /dev/dri:/dev/dri
+
+    # ── NVIDIA (uncomment, and comment out the Intel block above) ───
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+    # Override the default --help so `docker compose up` does something
+    # useful. Switch to ["/media"] (no --dry-run) when you're ready.
+    command: ["--dry-run", "/media"]
