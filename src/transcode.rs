@@ -10,6 +10,76 @@ use crate::gpu::{GpuInfo, GpuKind};
 use crate::probe;
 use crate::util::format_size;
 
+/// Color / HDR metadata to forward from source to output. All fields optional;
+/// only present ones are emitted as ffmpeg flags. Without these, HDR10/HLG
+/// sources transcode with the wrong color tags and play back washed out.
+#[derive(Debug, Clone, Default)]
+pub struct ColorMetadata {
+    pub color_primaries: Option<String>,
+    pub color_transfer: Option<String>,
+    pub color_space: Option<String>,
+    pub color_range: Option<String>,
+    pub master_display: Option<String>,
+    pub max_cll: Option<String>,
+}
+
+impl ColorMetadata {
+    /// Pull color fields off a probed MediaInfo.
+    pub fn from_media_info(info: &probe::MediaInfo) -> Self {
+        ColorMetadata {
+            color_primaries: info.color_primaries.clone(),
+            color_transfer: info.color_transfer.clone(),
+            color_space: info.color_space.clone(),
+            color_range: info.color_range.clone(),
+            master_display: info.master_display.clone(),
+            max_cll: info.max_cll.clone(),
+        }
+    }
+}
+
+/// Build the list of color/HDR ffmpeg args to forward.
+/// `-color_primaries`, `-color_trc`, `-colorspace`, `-color_range` work with
+/// every encoder we use (NVENC, VAAPI, VideoToolbox); `-master_display` and
+/// `-max_cll` are NVENC-specific HDR10 passthrough flags so we emit them
+/// only when targeting an Nvidia GPU. Pure function — easy to unit-test.
+fn build_color_args(color: &ColorMetadata, gpu_kind: &GpuKind) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some(v) = color.color_primaries.as_deref() {
+        args.push("-color_primaries".to_string());
+        args.push(v.to_string());
+    }
+    if let Some(v) = color.color_transfer.as_deref() {
+        args.push("-color_trc".to_string());
+        args.push(v.to_string());
+    }
+    if let Some(v) = color.color_space.as_deref() {
+        args.push("-colorspace".to_string());
+        args.push(v.to_string());
+    }
+    if let Some(v) = color.color_range.as_deref() {
+        args.push("-color_range".to_string());
+        args.push(v.to_string());
+    }
+    if matches!(gpu_kind, GpuKind::Nvidia) {
+        if let Some(v) = color.master_display.as_deref() {
+            args.push("-master_display".to_string());
+            args.push(v.to_string());
+        }
+        if let Some(v) = color.max_cll.as_deref() {
+            args.push("-max_cll".to_string());
+            args.push(v.to_string());
+        }
+    }
+    args
+}
+
+/// Append color/HDR ffmpeg args to `cmd` based on what's present in `color`.
+fn append_color_args(cmd: &mut Command, color: &ColorMetadata, gpu_kind: &GpuKind) {
+    for a in build_color_args(color, gpu_kind) {
+        cmd.arg(a);
+    }
+}
+
 /// Guard that kills the ffmpeg child process on drop (prevents orphans).
 struct ChildGuard(Child);
 
@@ -66,6 +136,7 @@ pub fn transcode(
     source_bitrate_kbps: u32,
     source_duration_secs: f64,
     source_pix_fmt: &str,
+    color: &ColorMetadata,
     progress: Option<&AtomicU64>,
     speed: Option<&AtomicU64>,
     skip_subs: bool,
@@ -140,6 +211,9 @@ pub fn transcode(
             }
         }
     }
+
+    // Forward color/HDR metadata so HDR10/HLG sources don't lose their tags.
+    append_color_args(&mut cmd, color, &gpu.kind);
 
     // Audio
     let audio_codec = if force_reencode_audio && target.audio_codec == "copy" {
@@ -303,6 +377,7 @@ pub fn transcode_iso(
     source_bitrate_kbps: u32,
     source_duration_secs: f64,
     source_pix_fmt: &str,
+    color: &ColorMetadata,
     progress: Option<&AtomicU64>,
     speed: Option<&AtomicU64>,
     skip_subs: bool,
@@ -364,6 +439,9 @@ pub fn transcode_iso(
             }
         }
     }
+
+    // Forward color/HDR metadata (same as transcode())
+    append_color_args(&mut cmd, color, &gpu.kind);
 
     // Audio
     let audio_codec = if force_reencode_audio && target.audio_codec == "copy" {
@@ -1049,5 +1127,120 @@ Conversion failed!
         apply_subtitle_args(&mut cmd, &target, true, Some("srt"));
         let args = cmd_args(&cmd);
         assert!(!args.iter().any(|a| a == "-c:s"));
+    }
+
+    // ── Color metadata arg-building tests ────────────────────────────────────
+    //
+    // build_color_args is the single source of truth for which ffmpeg flags get
+    // emitted for a given source's color metadata. These tests pin the exact
+    // wire format so a refactor can't accidentally drop tags or use the wrong
+    // flag name (a common ffmpeg gotcha: `-color_trc` not `-color_transfer`).
+
+    #[test]
+    fn test_build_color_args_empty_when_no_metadata() {
+        let color = ColorMetadata::default();
+        let args = build_color_args(&color, &GpuKind::Nvidia);
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn test_build_color_args_basic_tags_emitted() {
+        let color = ColorMetadata {
+            color_primaries: Some("bt2020".to_string()),
+            color_transfer: Some("smpte2084".to_string()),
+            color_space: Some("bt2020nc".to_string()),
+            color_range: Some("tv".to_string()),
+            ..ColorMetadata::default()
+        };
+        let args = build_color_args(&color, &GpuKind::Nvidia);
+        assert_eq!(
+            args,
+            vec![
+                "-color_primaries",
+                "bt2020",
+                "-color_trc",
+                "smpte2084",
+                "-colorspace",
+                "bt2020nc",
+                "-color_range",
+                "tv",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_build_color_args_nvenc_emits_hdr10() {
+        let color = ColorMetadata {
+            color_primaries: Some("bt2020".to_string()),
+            color_transfer: Some("smpte2084".to_string()),
+            color_space: Some("bt2020nc".to_string()),
+            master_display: Some(
+                "G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(40000000,1)".to_string(),
+            ),
+            max_cll: Some("1000,400".to_string()),
+            ..ColorMetadata::default()
+        };
+        let args = build_color_args(&color, &GpuKind::Nvidia);
+        assert!(args.iter().any(|a| a == "-master_display"));
+        assert!(args.iter().any(|a| a == "-max_cll"));
+        assert!(args.iter().any(|a| a == "1000,400"));
+    }
+
+    #[test]
+    fn test_build_color_args_vaapi_skips_hdr10_flags() {
+        // -master_display and -max_cll are NVENC-specific. Other encoders
+        // would error on these flags, so they must NOT be emitted.
+        let color = ColorMetadata {
+            color_primaries: Some("bt2020".to_string()),
+            master_display: Some("G(0,0)B(0,0)R(0,0)WP(0,0)L(1,0)".to_string()),
+            max_cll: Some("1000,400".to_string()),
+            ..ColorMetadata::default()
+        };
+        let intel_args = build_color_args(&color, &GpuKind::Intel);
+        assert!(intel_args.iter().any(|a| a == "-color_primaries"));
+        assert!(!intel_args.iter().any(|a| a == "-master_display"));
+        assert!(!intel_args.iter().any(|a| a == "-max_cll"));
+
+        let apple_args = build_color_args(&color, &GpuKind::Apple);
+        assert!(!apple_args.iter().any(|a| a == "-master_display"));
+        assert!(!apple_args.iter().any(|a| a == "-max_cll"));
+    }
+
+    #[test]
+    fn test_build_color_args_partial_metadata() {
+        // Source with only primaries set (e.g. SDR BT.709) — emit just that.
+        let color = ColorMetadata {
+            color_primaries: Some("bt709".to_string()),
+            ..ColorMetadata::default()
+        };
+        let args = build_color_args(&color, &GpuKind::Nvidia);
+        assert_eq!(args, vec!["-color_primaries", "bt709"]);
+    }
+
+    #[test]
+    fn test_color_metadata_from_media_info() {
+        // Sanity: ColorMetadata::from_media_info copies the right fields.
+        let info = probe::MediaInfo {
+            codec: "hevc".to_string(),
+            width: 3840,
+            height: 2160,
+            bitrate_kbps: 0,
+            duration_secs: 0.0,
+            pix_fmt: "yuv420p10le".to_string(),
+            has_audio: false,
+            has_subtitles: false,
+            color_primaries: Some("bt2020".to_string()),
+            color_transfer: Some("smpte2084".to_string()),
+            color_space: Some("bt2020nc".to_string()),
+            color_range: Some("tv".to_string()),
+            master_display: Some("G(0,0)B(0,0)R(0,0)WP(0,0)L(1,0)".to_string()),
+            max_cll: Some("1000,400".to_string()),
+        };
+        let cm = ColorMetadata::from_media_info(&info);
+        assert_eq!(cm.color_primaries.as_deref(), Some("bt2020"));
+        assert_eq!(cm.color_transfer.as_deref(), Some("smpte2084"));
+        assert_eq!(cm.color_space.as_deref(), Some("bt2020nc"));
+        assert_eq!(cm.color_range.as_deref(), Some("tv"));
+        assert_eq!(cm.max_cll.as_deref(), Some("1000,400"));
     }
 }
