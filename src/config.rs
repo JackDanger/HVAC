@@ -12,8 +12,8 @@ pub struct Config {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct TargetConfig {
+    #[allow(dead_code)]
     pub codec: String,
     pub quality: u32,
     pub preset: String,
@@ -244,5 +244,34 @@ media_extensions:
         assert_eq!(config.target.preset, "slow");
         assert_eq!(config.target.max_width, 3840);
         assert_eq!(config.target.container, "mkv");
+    }
+
+    #[test]
+    fn test_blank_codec_value_is_an_error() {
+        let yaml = r#"
+target:
+  codec:
+media_extensions:
+  - mkv
+"#;
+        let result = parse_config(yaml);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("target.codec"));
+    }
+
+    #[test]
+    fn test_unknown_keys_are_ignored() {
+        let yaml = r#"
+target:
+  codec: hevc
+  unknown_target_key: ignored
+  future_option: 42
+top_level_unknown: also_ignored
+media_extensions:
+  - mkv
+"#;
+        let config = parse_config(yaml).unwrap();
+        assert_eq!(config.target.codec, "hevc");
+        assert_eq!(config.media_extensions, vec!["mkv"]);
     }
 }
