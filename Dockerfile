@@ -89,9 +89,15 @@ COPY --from=builder /src/target/release/hvac /usr/local/bin/hvac
 # their admin accounts already sit there), so we just reuse it rather
 # than create a parallel "hvac" group at the same number.
 # Override with `--user $(id -u):$(id -g)` if your NAS uses different values.
-RUN useradd -m -u 1026 -g 100 hvac
-USER hvac:users
+#
+# Order matters: create /media + chown it as root, *then* switch to the
+# unprivileged user. WORKDIR after USER would try to mkdir as that user
+# and fail on the root-owned parent. The bind mount at runtime hides
+# this directory anyway, but the entrypoint still runs from it when
+# no mount is provided (e.g. `docker run hvac --help`).
+RUN useradd -m -u 1026 -g 100 hvac && mkdir -p /media && chown hvac:users /media
 WORKDIR /media
+USER hvac:users
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/hvac"]
 CMD ["--help"]
