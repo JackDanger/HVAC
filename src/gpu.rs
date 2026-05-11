@@ -6,6 +6,9 @@ pub struct GpuInfo {
     pub name: String,
     pub encoder: String,
     pub kind: GpuKind,
+    /// Whether this GPU's HEVC encoder reliably supports 10-bit input.
+    /// False for Maxwell-era and early Pascal NVENC silicon. True elsewhere.
+    pub supports_10bit_hevc: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -13,6 +16,48 @@ pub enum GpuKind {
     Nvidia,
     Intel,
     Apple,
+}
+
+/// NVIDIA GPU name fragments whose NVENC silicon does NOT reliably support
+/// 10-bit HEVC encode.
+///
+///   - Maxwell 1st gen (GTX 750 / 750 Ti) has no HEVC encode at all. The
+///     gate flag is "no 10-bit HEVC" today, but a separate "no HEVC at
+///     all" gate is the right longer-term shape for these cards (8-bit
+///     HEVC will still attempt and fail). Tracked as a follow-up; for now
+///     skipping 10-bit is at least no worse than the prior opaque
+///     mid-encode failure.
+///   - Maxwell 2nd gen (GTX 9xx) does 8-bit HEVC only.
+///   - Pascal: the GP104 / GP102 chips on GTX 1080, GTX 1080 Ti, and Titan
+///     Xp do support 10-bit HEVC, but for V1 we list "GTX 1080" as a
+///     conservative match anyway. This is intentionally pessimistic —
+///     telling a user with a 1080 Ti to convert to 8-bit first is
+///     annoying but not destructive; missing a card that genuinely can't
+///     encode 10-bit is. The tests assert this conservative behavior.
+///     Refining to per-chip detection is a follow-up.
+///
+/// Reference: https://developer.nvidia.com/video-encode-and-decode-gpu-support-matrix-new
+///
+/// Match is case-insensitive substring on `nvidia-smi --query-gpu=name`.
+const NVENC_NO_10BIT_HEVC: &[&str] = &[
+    // Maxwell 1st gen — no HEVC encode at all.
+    "GTX 750",
+    // Maxwell 2nd gen — 8-bit HEVC only.
+    // Matches "GTX 950", "GTX 960", "GTX 970", "GTX 980", "GTX 980 Ti", etc.
+    "GTX 9", // Early Pascal — conservatively gated on 10-bit; see module comment.
+    "GTX 1050", "GTX 1060", "GTX 1070", "GTX 1080",
+];
+
+/// Returns true when the given NVIDIA GPU name matches a known
+/// no-10-bit-HEVC NVENC family.
+fn nvidia_supports_10bit_hevc(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    for fragment in NVENC_NO_10BIT_HEVC {
+        if lower.contains(&fragment.to_lowercase()) {
+            return false;
+        }
+    }
+    true
 }
 
 /// Detect available GPU for h265 encoding.
@@ -23,10 +68,12 @@ pub fn detect_gpu() -> Result<GpuInfo> {
     if let Ok(nvidia) = detect_nvidia() {
         // Verify ffmpeg has hevc_nvenc
         if has_ffmpeg_encoder("hevc_nvenc") {
+            let supports_10bit = nvidia_supports_10bit_hevc(&nvidia);
             return Ok(GpuInfo {
                 name: nvidia,
                 encoder: "hevc_nvenc".to_string(),
                 kind: GpuKind::Nvidia,
+                supports_10bit_hevc: supports_10bit,
             });
         }
         log::debug!("NVIDIA GPU found but hevc_nvenc not available in ffmpeg");
@@ -39,6 +86,7 @@ pub fn detect_gpu() -> Result<GpuInfo> {
                 name: "Intel GPU (VAAPI)".to_string(),
                 encoder: "hevc_vaapi".to_string(),
                 kind: GpuKind::Intel,
+                supports_10bit_hevc: true,
             });
         }
         log::debug!("Intel GPU found but hevc_vaapi not available in ffmpeg");
@@ -51,6 +99,7 @@ pub fn detect_gpu() -> Result<GpuInfo> {
                 name: detect_apple_chip_name(),
                 encoder: "hevc_videotoolbox".to_string(),
                 kind: GpuKind::Apple,
+                supports_10bit_hevc: true,
             });
         }
         log::debug!("Apple GPU found but hevc_videotoolbox not available in ffmpeg");
@@ -179,6 +228,7 @@ mod tests {
             name: "NVIDIA GeForce RTX 2060".to_string(),
             encoder: "hevc_nvenc".to_string(),
             kind: GpuKind::Nvidia,
+            supports_10bit_hevc: true,
         };
         assert_eq!(max_encode_sessions(&gpu), 3);
     }
@@ -189,8 +239,70 @@ mod tests {
             name: "A100-SXM4-80GB".to_string(),
             encoder: "hevc_nvenc".to_string(),
             kind: GpuKind::Nvidia,
+            supports_10bit_hevc: true,
         };
         assert_eq!(max_encode_sessions(&gpu), 4);
+    }
+
+    // ── 10-bit HEVC capability mapping ──────────────────────────────────────
+    //
+    // String-match GPU names against the known no-10-bit families.
+    // Anything not on the list (Turing+, Ampere, Ada, Hopper, Quadros)
+    // is assumed to support 10-bit HEVC encode.
+
+    #[test]
+    fn test_10bit_unsupported_maxwell_first_gen() {
+        // Maxwell 1st gen GTX 750 / 750 Ti — no HEVC at all.
+        assert!(!nvidia_supports_10bit_hevc("NVIDIA GeForce GTX 750"));
+        assert!(!nvidia_supports_10bit_hevc("NVIDIA GeForce GTX 750 Ti"));
+    }
+
+    #[test]
+    fn test_10bit_unsupported_maxwell_second_gen() {
+        // Maxwell 2nd gen GTX 9xx — 8-bit HEVC only.
+        assert!(!nvidia_supports_10bit_hevc("NVIDIA GeForce GTX 950"));
+        assert!(!nvidia_supports_10bit_hevc("NVIDIA GeForce GTX 960"));
+        assert!(!nvidia_supports_10bit_hevc("NVIDIA GeForce GTX 970"));
+        assert!(!nvidia_supports_10bit_hevc("NVIDIA GeForce GTX 980"));
+        assert!(!nvidia_supports_10bit_hevc("NVIDIA GeForce GTX 980 Ti"));
+    }
+
+    #[test]
+    fn test_10bit_unsupported_early_pascal() {
+        // Early Pascal — no 10-bit HEVC.
+        assert!(!nvidia_supports_10bit_hevc("NVIDIA GeForce GTX 1050"));
+        assert!(!nvidia_supports_10bit_hevc("NVIDIA GeForce GTX 1050 Ti"));
+        assert!(!nvidia_supports_10bit_hevc("NVIDIA GeForce GTX 1060 3GB"));
+        assert!(!nvidia_supports_10bit_hevc("NVIDIA GeForce GTX 1060 6GB"));
+        assert!(!nvidia_supports_10bit_hevc("NVIDIA GeForce GTX 1070"));
+        assert!(!nvidia_supports_10bit_hevc("NVIDIA GeForce GTX 1070 Ti"));
+        assert!(!nvidia_supports_10bit_hevc("NVIDIA GeForce GTX 1080"));
+        assert!(!nvidia_supports_10bit_hevc("NVIDIA GeForce GTX 1080 Ti"));
+    }
+
+    #[test]
+    fn test_10bit_supported_turing_and_newer() {
+        // Turing (RTX 20xx, GTX 16xx) — full 10-bit HEVC.
+        assert!(nvidia_supports_10bit_hevc("NVIDIA GeForce RTX 2060"));
+        assert!(nvidia_supports_10bit_hevc("NVIDIA GeForce RTX 2080 Ti"));
+        assert!(nvidia_supports_10bit_hevc("NVIDIA GeForce GTX 1660 Ti"));
+        assert!(nvidia_supports_10bit_hevc("NVIDIA GeForce GTX 1650"));
+        // Ampere
+        assert!(nvidia_supports_10bit_hevc("NVIDIA GeForce RTX 3060"));
+        assert!(nvidia_supports_10bit_hevc("NVIDIA GeForce RTX 3090"));
+        // Ada
+        assert!(nvidia_supports_10bit_hevc("NVIDIA GeForce RTX 4090"));
+        // Pro
+        assert!(nvidia_supports_10bit_hevc("NVIDIA A100-SXM4-80GB"));
+        assert!(nvidia_supports_10bit_hevc("Quadro RTX 5000"));
+        assert!(nvidia_supports_10bit_hevc("Tesla T4"));
+    }
+
+    #[test]
+    fn test_10bit_case_insensitive() {
+        // Match must be case-insensitive — nvidia-smi formatting varies.
+        assert!(!nvidia_supports_10bit_hevc("nvidia geforce gtx 970"));
+        assert!(!nvidia_supports_10bit_hevc("GEFORCE GTX 1080"));
     }
 
     #[test]
