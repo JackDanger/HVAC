@@ -181,14 +181,40 @@ as_root() {
     fi
 }
 
-# Detect distro id from /etc/os-release. Echoes one of: debian, ubuntu, other.
+# Detect distro id from /etc/os-release plus a couple of NAS-specific
+# files. Echoes one of: debian, ubuntu, alpine, synology, qnap, unraid,
+# openmediavault, other.
+#
+# NAS detection runs before /etc/os-release because Synology's os-release
+# claims ID=dsm (sometimes ID_LIKE=debian, sometimes nothing) and QNAP's
+# QTS has no os-release at all. Catching them by their canonical
+# fingerprint files keeps the apt branch from running on a host where
+# apt either doesn't exist or would break the appliance.
 detect_linux_distro() {
+    # Synology DSM: /etc.defaults/VERSION is present on every model.
+    if [ -r /etc.defaults/VERSION ] || [ -r /etc/synoinfo.conf ]; then
+        printf 'synology\n'; return
+    fi
+    # QNAP QTS: /etc/config/uLinux.conf is the well-known fingerprint.
+    if [ -r /etc/config/uLinux.conf ]; then
+        printf 'qnap\n'; return
+    fi
+    # Unraid: rootfs is read-only Slackware loaded into RAM; /etc/unraid-version exists.
+    if [ -r /etc/unraid-version ]; then
+        printf 'unraid\n'; return
+    fi
     if [ -r /etc/os-release ]; then
         # shellcheck disable=SC1091
         ID_LIKE=$(. /etc/os-release; printf '%s %s' "${ID:-}" "${ID_LIKE:-}")
         case " $ID_LIKE " in
+            # OpenMediaVault declares ID=openmediavault, ID_LIKE=debian.
+            # Surface it as omv so we can point users at omv-extras / the
+            # OMV docker plugin instead of plain apt — but the apt path
+            # itself still works, so this is informational.
+            *" openmediavault "*) printf 'openmediavault\n'; return ;;
             *" ubuntu "*) printf 'ubuntu\n'; return ;;
             *" debian "*) printf 'debian\n'; return ;;
+            *" alpine "*) printf 'alpine\n'; return ;;
         esac
     fi
     printf 'other\n'
@@ -288,8 +314,92 @@ ffmpeg / hardware-accel packages were not auto-installed (unsupported
 distro for this script). Install ffmpeg manually:
   Arch:    sudo pacman -S ffmpeg libva-utils
   Fedora:  sudo dnf install ffmpeg-free libva-utils
+  Alpine:  sudo apk add ffmpeg libva-utils
   Other:   see your distro's packaging
 EOF
+}
+
+# Synology DSM: there's no apt, ffmpeg from Package Center is gimped (no
+# encoders), and most models have no GPU at all. The actionable path is
+# Docker on Plus models (Intel iGPU passes through to /dev/dri), or
+# transcoding off-box.
+install_synology_hint() {
+    cat <<'EOF'
+
+Detected Synology DSM. This installer cannot configure ffmpeg or GPU
+drivers on Synology — the Package Center ffmpeg lacks the HEVC encoders
+hvac needs. Two supported paths:
+
+  1. Docker (recommended). Install "Container Manager" from Package
+     Center, then follow docs/NAS.md#synology for the docker run / compose
+     snippet. Plus models pass the Intel iGPU through at /dev/dri.
+
+  2. Off-box. Run hvac on a Linux box / Mac with a GPU and point it at the
+     Synology share via NFS or SMB. Expect transcode throughput to be
+     bound by the network, not the GPU — 1 GbE is enough for one job.
+
+Either way the binary at $PREFIX/hvac is harmless to leave installed;
+it just won't have a usable encoder on DSM itself.
+EOF
+}
+
+# QNAP QTS: similar story to Synology — Entware ships an ffmpeg, but the
+# Plex / hardware-transcoding story on QNAP is so model-dependent that
+# pointing at Container Station is the only general advice.
+install_qnap_hint() {
+    cat <<'EOF'
+
+Detected QNAP QTS. This installer cannot configure ffmpeg or GPU drivers
+on QTS. The supported path is Container Station:
+
+  1. Install "Container Station" from the App Center.
+  2. Follow docs/NAS.md#qnap for the docker run / compose snippet.
+     Intel-based TS-x53 / TS-x73 / TS-h-series pass /dev/dri through;
+     ARM models have no usable HEVC encoder.
+
+Off-box transcoding (NFS / SMB mount on a Linux host) also works.
+EOF
+}
+
+# Unraid: rootfs is RAM-loaded so anything we install vanishes on reboot.
+# Community Applications + the Docker tab is the canonical pattern.
+install_unraid_hint() {
+    cat <<'EOF'
+
+Detected Unraid. The rootfs is loaded from /boot at every reboot, so
+installing ffmpeg into / will not survive. The supported path is Docker:
+
+  1. From the WebUI's Apps tab, install Community Applications if not
+     already present.
+  2. Follow docs/NAS.md#unraid for the container template.
+     Intel iGPUs need the "Intel-GPU-TOP" plugin to expose /dev/dri.
+     NVIDIA GPUs need the "Nvidia-Driver" plugin from CA.
+
+The binary at $PREFIX/hvac will be gone after the next reboot. Drop the
+docker container in instead.
+EOF
+}
+
+# OpenMediaVault sits on top of Debian, so apt works — the hint just
+# points at omv-extras + docker-compose, the idiomatic OMV path.
+install_omv_hint() {
+    cat <<'EOF'
+
+Detected OpenMediaVault (Debian under the hood). The standard apt install
+will work, but the OMV-idiomatic path is the "compose" plugin from
+omv-extras — see docs/NAS.md#openmediavault.
+EOF
+}
+
+install_alpine() {
+    pkgs="ffmpeg libva-utils mesa-va-gallium intel-media-driver"
+    info "will install via apk: $pkgs"
+    if ! confirm "Proceed with 'apk add' for the packages above?"; then
+        info "skipped ffmpeg install; re-run with HVAC_ASSUME_YES=1 to auto-confirm"
+        return 0
+    fi
+    # shellcheck disable=SC2086
+    as_root apk add --no-cache $pkgs
 }
 
 if [ "${HVAC_SKIP_FFMPEG:-0}" != "1" ]; then
@@ -301,8 +411,13 @@ if [ "${HVAC_SKIP_FFMPEG:-0}" != "1" ]; then
         Linux)
             distro=$(detect_linux_distro)
             case "$distro" in
-                ubuntu|debian) install_debian_ubuntu "$distro" ;;
-                *)             install_other_linux_hint ;;
+                ubuntu|debian)    install_debian_ubuntu "$distro" ;;
+                openmediavault)   install_omv_hint; install_debian_ubuntu debian ;;
+                alpine)           install_alpine ;;
+                synology)         install_synology_hint ;;
+                qnap)             install_qnap_hint ;;
+                unraid)           install_unraid_hint ;;
+                *)                install_other_linux_hint ;;
             esac
             ;;
     esac
