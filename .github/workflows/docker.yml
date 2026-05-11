@@ -32,17 +32,48 @@ on:
       - "src/**"
       - ".github/workflows/docker.yml"
 
+# Default to read-only at the workflow scope; the publish job below
+# upgrades to packages:write. PR builds run in the verify job, which
+# inherits read-only.
 permissions:
   contents: read
-  packages: write
 
 concurrency:
   group: docker-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  build:
+  # PR builds: verify the Dockerfile + .dockerignore still produce a
+  # buildable image on both target platforms, but never log into GHCR
+  # and never get packages:write. Fork PRs can't escalate.
+  verify:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # Push builds: main + tag pushes. Distinct job so packages:write only
+  # lives on the path that actually needs it.
+  publish:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v4
 
@@ -52,9 +83,6 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to GHCR
-        # Only push on main/tag events. PRs build for syntax + portability
-        # but don't get push credentials — keeps fork PRs honest.
-        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -90,11 +118,13 @@ jobs:
         with:
           context: .
           platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name != 'pull_request' }}
+          push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # GHA build cache: writes to /tmp; reads from the same on cache
           # hits. First build is full, subsequent builds within the cache
-          # TTL skip the apt + cargo layers.
+          # TTL skip the apt + cargo layers. The verify job also writes
+          # to the same cache so PR builds warm it for the publish run
+          # that follows the merge.
           cache-from: type=gha
           cache-to: type=gha,mode=max

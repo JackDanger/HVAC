@@ -208,9 +208,10 @@ detect_linux_distro() {
         ID_LIKE=$(. /etc/os-release; printf '%s %s' "${ID:-}" "${ID_LIKE:-}")
         case " $ID_LIKE " in
             # OpenMediaVault declares ID=openmediavault, ID_LIKE=debian.
-            # Surface it as omv so we can point users at omv-extras / the
-            # OMV docker plugin instead of plain apt — but the apt path
-            # itself still works, so this is informational.
+            # Surface it as 'openmediavault' (matches the dispatch case
+            # below) so we can point users at omv-extras / the OMV docker
+            # plugin instead of plain apt — but the apt path itself still
+            # works, so this is informational.
             *" openmediavault "*) printf 'openmediavault\n'; return ;;
             *" ubuntu "*) printf 'ubuntu\n'; return ;;
             *" debian "*) printf 'debian\n'; return ;;
