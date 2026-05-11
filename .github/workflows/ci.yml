@@ -64,9 +64,11 @@ jobs:
           fi
           echo "msrv=$msrv" >> "$GITHUB_OUTPUT"
       # dtolnay/rust-toolchain has no @stable-equivalent ref for arbitrary
-      # toolchain inputs — @master is the documented entry point. Pin to a
-      # tagged release of the action itself for reproducibility.
-      - uses: dtolnay/rust-toolchain@5fa12dde88ade6df0c93e8c2f4d59fc2e9b48b87 # 1.13.0
+      # toolchain inputs (the @stable / @nightly / @beta refs only work
+      # for those exact channels) — @master is the documented entry point
+      # for passing a `toolchain:` input. The action is small and audit-
+      # able, and Dependabot watches it for upstream changes.
+      - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ steps.msrv.outputs.msrv }}
       - uses: Swatinem/rust-cache@v2
