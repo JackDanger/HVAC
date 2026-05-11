@@ -1,14 +1,18 @@
 #!/usr/bin/env sh
 # hvac installer — downloads the latest pre-built binary for your platform
-# from https://github.com/JackDanger/hvac/releases and installs it.
+# from https://github.com/JackDanger/hvac/releases and installs it, then
+# installs ffmpeg + the right hardware-accel packages for the host (macOS
+# via Homebrew, Debian/Ubuntu via apt).
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/JackDanger/hvac/main/install.sh | sh
 #
 # Environment overrides:
-#   HVAC_VERSION   pin to a specific tag (e.g. v5.1.1); default: latest
-#   HVAC_PREFIX    install dir; default: /usr/local/bin if writable, else $HOME/.local/bin
-#   HVAC_REPO      override owner/name; default: JackDanger/hvac
+#   HVAC_VERSION         pin to a specific tag (e.g. v5.1.1); default: latest
+#   HVAC_PREFIX          install dir; default: /usr/local/bin if writable, else $HOME/.local/bin
+#   HVAC_REPO            override owner/name; default: JackDanger/hvac
+#   HVAC_SKIP_FFMPEG     set to 1 to skip ffmpeg / hardware-accel package install
+#   HVAC_ASSUME_YES      set to 1 to skip the apt/brew confirmation prompt
 
 set -eu
 
@@ -149,16 +153,151 @@ case ":$PATH:" in
               "$PREFIX" "$PREFIX" ;;
 esac
 
-if ! command -v ffmpeg >/dev/null 2>&1; then
+# ---- ffmpeg + hardware acceleration ----------------------------------------
+#
+# hvac requires ffmpeg built with at least one GPU encoder: hevc_nvenc (NVIDIA),
+# hevc_vaapi (Intel/AMD on Linux), or hevc_videotoolbox (macOS). The ffmpeg
+# packages shipped by Homebrew and Debian/Ubuntu already enable all encoders
+# the platform supports — we just need to install ffmpeg plus any userspace
+# driver libraries the host GPU needs.
+
+# Run a privileged command. Uses sudo only if we're not already root.
+as_root() {
+    if [ "$(id -u 2>/dev/null || echo 0)" -eq 0 ]; then
+        "$@"
+    elif command -v sudo >/dev/null 2>&1; then
+        sudo "$@"
+    else
+        err "this step requires root; install sudo or run as root: $*"
+    fi
+}
+
+# Detect distro id from /etc/os-release. Echoes one of: debian, ubuntu, other.
+detect_linux_distro() {
+    if [ -r /etc/os-release ]; then
+        # shellcheck disable=SC1091
+        ID_LIKE=$(. /etc/os-release; printf '%s %s' "${ID:-}" "${ID_LIKE:-}")
+        case " $ID_LIKE " in
+            *" ubuntu "*) printf 'ubuntu\n'; return ;;
+            *" debian "*) printf 'debian\n'; return ;;
+        esac
+    fi
+    printf 'other\n'
+}
+
+# Detect GPU vendor on Linux via lspci. Echoes a space-separated list of
+# detected vendors, drawn from {nvidia, intel, amd}. Empty if lspci is
+# missing or nothing video-related shows up.
+detect_linux_gpus() {
+    command -v lspci >/dev/null 2>&1 || return 0
+    pci=$(lspci 2>/dev/null) || return 0
+    # Filter to display-class devices (VGA / 3D / Display controllers).
+    display=$(printf '%s\n' "$pci" | grep -Ei 'vga compatible|3d controller|display controller' || true)
+    vendors=
+    case "$display" in *NVIDIA*|*nVidia*|*nvidia*) vendors="$vendors nvidia" ;; esac
+    case "$display" in *Intel*|*intel*)            vendors="$vendors intel" ;;  esac
+    case "$display" in *AMD*|*ATI*|*amd*|*Advanced\ Micro*) vendors="$vendors amd" ;; esac
+    printf '%s' "${vendors# }"
+}
+
+confirm() {
+    [ "${HVAC_ASSUME_YES:-0}" = "1" ] && return 0
+    # No tty (piped from curl)? Default to yes so the one-liner install works.
+    [ -t 0 ] || return 0
+    printf '%s [Y/n] ' "$1"
+    read -r reply
+    case "$reply" in ''|y|Y|yes|YES) return 0 ;; *) return 1 ;; esac
+}
+
+install_macos() {
+    have_ffmpeg=0
+    command -v ffmpeg >/dev/null 2>&1 && have_ffmpeg=1
+    if [ "$have_ffmpeg" = "1" ]; then
+        info "ffmpeg already installed; macOS hevc_videotoolbox is built into the OS"
+        return 0
+    fi
+    if ! command -v brew >/dev/null 2>&1; then
+        info "Homebrew not found; install it from https://brew.sh and re-run, or:"
+        info "  brew install ffmpeg"
+        return 0
+    fi
+    if confirm "Install ffmpeg via 'brew install ffmpeg'?"; then
+        info "running: brew install ffmpeg"
+        brew install ffmpeg
+    else
+        info "skipped ffmpeg install; run 'brew install ffmpeg' when ready"
+    fi
+}
+
+install_debian_ubuntu() {
+    distro="$1"
+
+    # Packages: ffmpeg always; plus userspace driver libraries for whatever
+    # GPUs we can see. We do *not* try to auto-install the NVIDIA kernel
+    # driver — that requires reboots and conflicts with vendor-specific
+    # setups (Optimus, Tesla repos, container hosts, etc.). We just point
+    # at it if the card is present without a driver.
+    pkgs="ffmpeg"
+    gpus=$(detect_linux_gpus)
+    case " $gpus " in
+        *" intel "*|*" amd "*)
+            # vainfo is useful both for diagnostics and so hvac's startup
+            # check can see VAAPI is alive. intel-media-va-driver covers
+            # Broadwell+ Intel iGPUs; mesa-va-drivers covers AMD + older Intel.
+            pkgs="$pkgs vainfo intel-media-va-driver mesa-va-drivers"
+            ;;
+    esac
+
+    info "will install via apt: $pkgs"
+    if ! confirm "Proceed with 'apt-get install' for the packages above?"; then
+        info "skipped ffmpeg install; re-run with HVAC_ASSUME_YES=1 to auto-confirm"
+        return 0
+    fi
+
+    as_root env DEBIAN_FRONTEND=noninteractive apt-get update -qq
+    # shellcheck disable=SC2086
+    as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $pkgs
+
+    case " $gpus " in
+        *" nvidia "*)
+            if ! command -v nvidia-smi >/dev/null 2>&1; then
+                cat <<EOF
+
+NVIDIA GPU detected but the NVIDIA driver does not appear to be installed
+(no nvidia-smi). hvac needs the proprietary driver for hevc_nvenc:
+  $distro: sudo apt install nvidia-driver       # then reboot
+Cloud / container hosts: install the matching driver from your provider.
+EOF
+            fi
+            ;;
+    esac
+}
+
+install_other_linux_hint() {
     cat <<'EOF'
 
-ffmpeg was not found on PATH. hvac requires ffmpeg with a GPU encoder
-(hevc_nvenc, hevc_vaapi, or hevc_videotoolbox). Install it:
-  Debian/Ubuntu: sudo apt install ffmpeg
-  Arch:          sudo pacman -S ffmpeg
-  Fedora:        sudo dnf install ffmpeg
-  macOS:         brew install ffmpeg
+ffmpeg / hardware-accel packages were not auto-installed (unsupported
+distro for this script). Install ffmpeg manually:
+  Arch:    sudo pacman -S ffmpeg libva-utils
+  Fedora:  sudo dnf install ffmpeg-free libva-utils
+  Other:   see your distro's packaging
 EOF
+}
+
+if [ "${HVAC_SKIP_FFMPEG:-0}" != "1" ]; then
+    info "checking ffmpeg + hardware acceleration"
+    case "$OS" in
+        Darwin)
+            install_macos
+            ;;
+        Linux)
+            distro=$(detect_linux_distro)
+            case "$distro" in
+                ubuntu|debian) install_debian_ubuntu "$distro" ;;
+                *)             install_other_linux_hint ;;
+            esac
+            ;;
+    esac
 fi
 
 printf '\nInstalled %s. Try:\n  hvac --help\n' "$("$PREFIX/hvac" --version 2>/dev/null || echo hvac)"

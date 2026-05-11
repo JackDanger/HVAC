@@ -19,8 +19,6 @@ Point `hvac` at a directory that contains videos — even ones hidden inside `.i
 curl -fsSL https://raw.githubusercontent.com/JackDanger/hvac/main/install.sh | sh
 ```
 
-You also need `ffmpeg` (`apt install ffmpeg` / `brew install ffmpeg`) and any hardware acceleration — see [below](#gpu-required).
-
 Other ways: `brew install JackDanger/tap/hvac` &middot; `cargo install hvac-transcoder` &middot; [`.deb`, AUR, tarballs](https://github.com/JackDanger/hvac/releases)
 
 ---
