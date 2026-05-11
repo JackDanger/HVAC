@@ -35,7 +35,7 @@ clap = { version = "4", features = ["derive"] }
 ctrlc = "3"
 env_logger = "0.11"
 isomage = "0.1"
-launchdarkly-server-sdk = { version = "3", default-features = false, features = ["hyper-rustls-native-roots", "event-compression"] }
+launchdarkly-server-sdk = { version = "3", default-features = false, features = ["hyper-rustls-webpki-roots", "event-compression"] }
 libc = "0.2"
 log = "0.4"
 opentelemetry = { version = "0.32", default-features = false, features = ["trace"] }
