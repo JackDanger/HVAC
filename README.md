@@ -9,8 +9,10 @@ Point `hvac` at a directory that contains videos — even ones hidden inside `.i
 
 You need a GPU with an HEVC encoder (NVIDIA NVENC, Intel VAAPI, or
 Apple VideoToolbox) and an ffmpeg built against it. The installer below
-handles both on macOS and Debian/Ubuntu; for everything else there's
-[Docker](#docker) or the [NAS-specific notes](docs/NAS.md).
+auto-installs ffmpeg on macOS, Debian/Ubuntu, Alpine, and OpenMediaVault,
+and prints platform-specific guidance on Synology, QNAP, and Unraid.
+For everything else there's [Docker](#docker) or the
+[NAS-specific notes](docs/NAS.md).
 
 ---
 
@@ -122,9 +124,16 @@ docker run --rm \
 ```
 
 For compose, copy [`compose.example.yml`](compose.example.yml) and edit
-the volume path. The image is built from this repo's
-[`Dockerfile`](Dockerfile) — `docker build -t hvac .` works if you'd
-rather build locally.
+the volume path. The image is built and published to GHCR by the
+[`docker.yml`](.github/workflows/docker.yml) workflow on every push to
+`main`; until the first push lands you can build it locally from this
+repo's [`Dockerfile`](Dockerfile):
+
+```bash
+docker build -t hvac .
+docker run --rm --device /dev/dri:/dev/dri -v /path/to/media:/media \
+  hvac --dry-run /media
+```
 
 NAS-specific instructions (Synology Container Manager, QNAP Container
 Station, Unraid Community Applications, TrueNAS SCALE, OpenMediaVault)

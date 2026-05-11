@@ -17,7 +17,7 @@ If your NAS isn't listed here and you've got a working recipe, open a PR.
 - [QNAP QTS](#qnap) — Docker via Container Station
 - [Unraid](#unraid) — Docker via Community Applications
 - [OpenMediaVault](#openmediavault) — apt + compose plugin
-- [TrueNAS SCALE](#truenas-scale) — apps catalog or jail
+- [TrueNAS SCALE](#truenas-scale) — apps catalog or direct Docker
 - [TrueNAS CORE](#truenas-core) — off-box only
 - [Off-box transcoding](#off-box) — NAS as storage, GPU host elsewhere
 
@@ -38,9 +38,12 @@ right userland driver, and the hvac binary; the NAS only has to expose
 the GPU device node (`/dev/dri` for Intel, `nvidia-container-runtime` for
 NVIDIA) and bind-mount your media path.
 
-The container image is the same one published from this repo's release
-pipeline. See the project [`Dockerfile`](../Dockerfile) for what goes in
-it.
+The container image is published to GHCR by the
+[`docker.yml`](../.github/workflows/docker.yml) workflow on every push
+to `main` and on each tagged release. See the project
+[`Dockerfile`](../Dockerfile) for what goes in it. If you'd rather
+build from source: `git clone … && docker build -t hvac .` produces
+an equivalent image.
 
 ## <a id="synology"></a>Synology DSM
 
@@ -93,11 +96,12 @@ services:
 sudo docker compose -f /volume1/docker/hvac/compose.yml up
 ```
 
-**Permissions note:** DSM containers run as root by default. Files
-hvac writes back to `/volume1/video` end up owned by root — fine if
-your share's NFS/SMB export squashes UIDs, painful otherwise. Set
-`user: "1026:100"` (DSM's default admin UID/GID) in the compose if
-you want files owned by your admin account.
+**Permissions note:** the image ships configured to run as UID 1026
+GID 100 — DSM's default admin user and `users` group — so files
+hvac writes back to `/volume1/video` are owned by your admin
+account, not root. If your DSM admin is at a different UID (custom
+setup, multiple admins), override with `user: "<uid>:<gid>"` in the
+compose service. To find your UID, SSH in and run `id`.
 
 ## <a id="qnap"></a>QNAP QTS
 
