@@ -175,10 +175,77 @@ fn paint_viewport(ctx: &RenderCtx, prev_viewport: &mut usize, start: Instant) {
     *prev_viewport = viewport;
 }
 
+/// Outcome of one auto-ramp evaluation. Pure value type so the decision
+/// logic can be unit-tested without atomics or threads.
+///
+/// The render thread translates each variant into a concrete state mutation:
+/// `Wait` does nothing, `RampUp` bumps `max_encoders` and updates the
+/// baseline, `Stall` flips `ramping` off, `StallAndRevert` does the same
+/// plus a `lower_max` call. Side-effect-free helpers ([`decide_ramp`] and
+/// [`SIGNIFICANT_DROP_NUMERATOR`]/`DENOMINATOR`) live next to it.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RampAction {
+    /// Not enough information yet (slots haven't all reported a speed),
+    /// or aggregate speed is still zero.
+    Wait,
+    /// Bump `max_encoders` by one. `new_baseline` is the speed reading
+    /// that justified the bump and should replace the current baseline.
+    RampUp { new_baseline: u64 },
+    /// Throughput has stalled. Stop ramping for the rest of the run.
+    Stall,
+    /// Throughput dropped significantly (below `SIGNIFICANT_DROP_NUMERATOR
+    /// / SIGNIFICANT_DROP_DENOMINATOR` of baseline). Stop ramping *and*
+    /// revert the last `max_encoders++`.
+    StallAndRevert,
+}
+
+/// "Significantly worse" threshold: 85 % of baseline. If speed drops
+/// below this we treat the last ramp as actively harmful and revert it.
+/// Anything between 85 % and 100 % is just a plateau — we stop ramping
+/// but keep the current concurrency.
+pub const SIGNIFICANT_DROP_NUMERATOR: u64 = 85;
+pub const SIGNIFICANT_DROP_DENOMINATOR: u64 = 100;
+
+/// Decide what (if anything) to do this ramp tick.
+///
+/// Inputs:
+/// * `reporting` — how many active worker slots are currently reporting a
+///   non-zero speed.
+/// * `current_max` — the value of `max_encoders` at the start of this tick.
+/// * `total_speed` — sum of reported speeds across active workers.
+/// * `baseline` — the speed reading from the previous successful ramp, or 0
+///   if we've never measured.
+pub fn decide_ramp(
+    reporting: u32,
+    current_max: u32,
+    total_speed: u64,
+    baseline: u64,
+) -> RampAction {
+    // Wait until every active slot has reported a speed AND there's any
+    // aggregate measurement to act on. Without both we don't know whether
+    // the previous ramp helped.
+    if reporting < current_max || total_speed == 0 {
+        return RampAction::Wait;
+    }
+    // Two cases warrant another ramp: we've never measured (`baseline == 0`,
+    // first observation), or total throughput went up since the last ramp.
+    if baseline == 0 || total_speed > baseline {
+        return RampAction::RampUp {
+            new_baseline: total_speed,
+        };
+    }
+    // Throughput stalled or dropped: stop ramping.
+    if total_speed < baseline * SIGNIFICANT_DROP_NUMERATOR / SIGNIFICANT_DROP_DENOMINATOR {
+        RampAction::StallAndRevert
+    } else {
+        RampAction::Stall
+    }
+}
+
 fn try_ramp(ctx: &RenderCtx, baseline: &mut u64, last_ramp: &mut Instant) {
     let current_max = ctx.max_encoders.load(Ordering::SeqCst);
 
-    // Collect speeds from active (non-queued) workers.
+    // Snapshot reported speeds from each active (non-queued) worker slot.
     let speeds: Vec<u64> = ctx
         .slots
         .iter()
@@ -188,27 +255,20 @@ fn try_ramp(ctx: &RenderCtx, baseline: &mut u64, last_ramp: &mut Instant) {
     let reporting = speeds.iter().filter(|&&s| s > 0).count() as u32;
     let total_speed: u64 = speeds.iter().sum();
 
-    // Wait until all current slots are encoding and reporting a speed.
-    if reporting < current_max || total_speed == 0 {
-        return;
-    }
-
-    // Two cases warrant another ramp: we've never measured (`baseline == 0`,
-    // first observation), or total throughput went up since the last ramp.
-    // Both update the baseline and bump max by one.
-    let still_improving = *baseline == 0 || total_speed > *baseline;
-    if still_improving {
-        *baseline = total_speed;
-        ctx.max_encoders.store(current_max + 1, Ordering::SeqCst);
-        *last_ramp = Instant::now();
-        return;
-    }
-
-    // Throughput stalled or dropped: stop ramping permanently.
-    ctx.ramping.store(false, Ordering::SeqCst);
-    if total_speed < *baseline * 85 / 100 {
-        // Significant drop: revert the last ramp.
-        lower_max(&ctx.max_encoders, current_max.saturating_sub(1).max(1));
+    match decide_ramp(reporting, current_max, total_speed, *baseline) {
+        RampAction::Wait => {}
+        RampAction::RampUp { new_baseline } => {
+            *baseline = new_baseline;
+            ctx.max_encoders.store(current_max + 1, Ordering::SeqCst);
+            *last_ramp = Instant::now();
+        }
+        RampAction::Stall => {
+            ctx.ramping.store(false, Ordering::SeqCst);
+        }
+        RampAction::StallAndRevert => {
+            ctx.ramping.store(false, Ordering::SeqCst);
+            lower_max(&ctx.max_encoders, current_max.saturating_sub(1).max(1));
+        }
     }
 }
 
@@ -224,4 +284,98 @@ fn finish_screen(ctx: &RenderCtx, prev_viewport: usize) {
     write!(stderr, "\x1b[0m\r\n").ok();
     stderr.flush().ok();
     let _ = ctx; // silence unused-field warning when adding later metrics
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wait_when_not_all_slots_reporting() {
+        // 3 slots active, only 2 have a speed → wait for the third.
+        assert_eq!(
+            decide_ramp(2, 3, 100, 0),
+            RampAction::Wait,
+            "reporting < current_max must wait"
+        );
+    }
+
+    #[test]
+    fn wait_when_total_speed_zero() {
+        // Reporting == max but everyone's at 0 (ffmpeg hasn't started
+        // emitting progress yet). Wait, don't ramp.
+        assert_eq!(decide_ramp(2, 2, 0, 0), RampAction::Wait);
+    }
+
+    #[test]
+    fn first_observation_ramps_up() {
+        // baseline == 0 sentinel means "we've never measured" → ramp on
+        // first complete reading.
+        assert_eq!(
+            decide_ramp(2, 2, 100, 0),
+            RampAction::RampUp { new_baseline: 100 }
+        );
+    }
+
+    #[test]
+    fn improving_throughput_ramps_up() {
+        assert_eq!(
+            decide_ramp(3, 3, 150, 100),
+            RampAction::RampUp { new_baseline: 150 }
+        );
+    }
+
+    #[test]
+    fn equal_throughput_stalls_without_revert() {
+        // baseline == total → no improvement → stop, but don't revert
+        // (we're not actively worse, just plateaued).
+        assert_eq!(decide_ramp(3, 3, 100, 100), RampAction::Stall);
+    }
+
+    #[test]
+    fn slight_drop_stalls_without_revert() {
+        // 90% of baseline: above the 85% threshold; plateau, don't revert.
+        assert_eq!(decide_ramp(3, 3, 90, 100), RampAction::Stall);
+    }
+
+    #[test]
+    fn threshold_exactly_stalls_without_revert() {
+        // 85% is the boundary; the predicate is strict less-than, so 85
+        // exactly is NOT a "significant drop".
+        assert_eq!(decide_ramp(3, 3, 85, 100), RampAction::Stall);
+    }
+
+    #[test]
+    fn significant_drop_reverts() {
+        // 80% of baseline → below threshold → revert the last ramp.
+        assert_eq!(decide_ramp(3, 3, 80, 100), RampAction::StallAndRevert);
+    }
+
+    #[test]
+    fn far_below_baseline_reverts() {
+        // GPU thrashing: speed collapsed. Definitely revert.
+        assert_eq!(decide_ramp(3, 3, 10, 1000), RampAction::StallAndRevert);
+    }
+
+    #[test]
+    fn waiting_takes_priority_over_baseline_compare() {
+        // Even if we have a baseline and the totals look bad, if a slot
+        // hasn't reported yet we still wait — we don't have full data.
+        assert_eq!(decide_ramp(2, 3, 50, 100), RampAction::Wait);
+    }
+
+    #[test]
+    fn current_max_zero_corner_case() {
+        // Pathological but defensive: max=0 means "no active encoders",
+        // so reporting==0 vacuously satisfies reporting >= current_max
+        // but total_speed is also 0 → still Wait.
+        assert_eq!(decide_ramp(0, 0, 0, 0), RampAction::Wait);
+    }
+
+    #[test]
+    fn ramp_threshold_constants_are_sensible() {
+        // Guards against accidental edits that would change the 85% rule.
+        assert_eq!(SIGNIFICANT_DROP_NUMERATOR, 85);
+        assert_eq!(SIGNIFICANT_DROP_DENOMINATOR, 100);
+    }
 }
