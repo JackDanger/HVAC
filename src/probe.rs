@@ -77,7 +77,7 @@ fn format_timeout(d: Duration) -> String {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 #[allow(dead_code)]
 pub struct MediaInfo {
     pub codec: String,
@@ -88,6 +88,20 @@ pub struct MediaInfo {
     pub pix_fmt: String,
     pub has_audio: bool,
     pub has_subtitles: bool,
+    /// HDR / color metadata. All optional — only emitted to ffmpeg when the
+    /// source actually carries them. Without these flags, ffmpeg drops the
+    /// tags and players show washed-out / wrong-gamma output for HDR sources.
+    pub color_primaries: Option<String>,
+    pub color_transfer: Option<String>,
+    pub color_space: Option<String>,
+    pub color_range: Option<String>,
+    /// HDR10 mastering display, formatted for ffmpeg's `-master_display`:
+    ///   `G(gx,gy)B(bx,by)R(rx,ry)WP(wpx,wpy)L(max,min)`
+    /// Coordinates in 1/50000 units, luminance in 1/10000 nits.
+    pub master_display: Option<String>,
+    /// HDR10 max content + frame-average light level, formatted for
+    /// ffmpeg's `-max_cll` as `max_cll,max_fall`.
+    pub max_cll: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -104,6 +118,12 @@ struct FfprobeStream {
     width: Option<u32>,
     height: Option<u32>,
     pix_fmt: Option<String>,
+    color_primaries: Option<String>,
+    color_transfer: Option<String>,
+    color_space: Option<String>,
+    color_range: Option<String>,
+    #[serde(default)]
+    side_data_list: Option<Vec<FfprobeSideData>>,
     #[serde(default)]
     tags: Option<FfprobeTags>,
 }
@@ -118,6 +138,45 @@ struct FfprobeTags {
 struct FfprobeFormat {
     bit_rate: Option<String>,
     duration: Option<String>,
+}
+
+/// One entry in ffprobe's `side_data_list`. Multiple side-data types share
+/// the same JSON object shape (a `side_data_type` discriminant plus type-
+/// specific fields), so we use a single permissive struct with all fields
+/// optional and dispatch on `side_data_type`.
+#[derive(Deserialize, Default)]
+struct FfprobeSideData {
+    side_data_type: Option<String>,
+
+    // MasteringDisplayMetadata fields — rationals like "13250/50000".
+    red_x: Option<String>,
+    red_y: Option<String>,
+    green_x: Option<String>,
+    green_y: Option<String>,
+    blue_x: Option<String>,
+    blue_y: Option<String>,
+    white_point_x: Option<String>,
+    white_point_y: Option<String>,
+    min_luminance: Option<String>,
+    max_luminance: Option<String>,
+
+    // ContentLightLevelMetadata fields — plain integers (nits).
+    max_content: Option<u32>,
+    max_average: Option<u32>,
+}
+
+/// Output of ffprobe's `-show_frames -read_intervals "%+#1"` — just the first
+/// video frame, used to harvest HDR side-data attached to that frame.
+#[derive(Deserialize)]
+struct FfprobeFramesOutput {
+    #[serde(default)]
+    frames: Vec<FfprobeFrame>,
+}
+
+#[derive(Deserialize)]
+struct FfprobeFrame {
+    #[serde(default)]
+    side_data_list: Option<Vec<FfprobeSideData>>,
 }
 
 /// Probe a file with the default timeout. Convenience wrapper for callers
@@ -160,7 +219,43 @@ pub fn probe_file_with_timeout(path: &Path, timeout: Duration) -> Result<MediaIn
         bail!("ffprobe failed for {:?}: {}", path, err_msg);
     }
 
-    parse_ffprobe_json(&output.stdout)
+    let mut info = parse_ffprobe_json(&output.stdout)?;
+
+    // HDR10 mastering display + max-cll usually live in side-data attached
+    // to frames, not the stream header. Some sources put them in the stream
+    // header (parse_ffprobe_json picks those up); for the rest we probe the
+    // first frame.
+    //
+    // Gate the second ffprobe on need: skip it when stream-header parsing
+    // already gave us both fields, and when basic color tags say SDR (no
+    // HDR-relevant transfer function). On a typical SDR-only library this
+    // saves one subprocess per file across the whole scan.
+    if needs_frame_side_data_probe(&info) {
+        if let Ok(frame_out) = probe_first_frame_side_data(path) {
+            apply_frame_side_data(&mut info, &frame_out);
+        }
+    }
+
+    Ok(info)
+}
+
+/// True when stream-header parsing didn't already give us both HDR10
+/// fields AND the file plausibly carries HDR (or we couldn't tell).
+/// Avoids a wasted ffprobe on SDR sources.
+fn needs_frame_side_data_probe(info: &MediaInfo) -> bool {
+    if info.master_display.is_some() && info.max_cll.is_some() {
+        return false;
+    }
+    // HDR transfer functions: smpte2084 = HDR10/PQ, arib-std-b67 = HLG.
+    // bt2020 primaries also strongly suggest HDR. Anything else (bt709,
+    // bt601, smpte170m, unknown/None) is SDR-by-default.
+    let trc = info.color_transfer.as_deref().unwrap_or("");
+    let prim = info.color_primaries.as_deref().unwrap_or("");
+    let looks_hdr =
+        matches!(trc, "smpte2084" | "arib-std-b67") || prim.eq_ignore_ascii_case("bt2020");
+    // When color tags are entirely missing we don't know — probe to be safe.
+    let no_color_info = info.color_transfer.is_none() && info.color_primaries.is_none();
+    looks_hdr || no_color_info
 }
 
 /// Probe a file inside an ISO with the default timeout.
@@ -217,6 +312,10 @@ pub fn probe_iso_file_with_timeout(
         );
     }
 
+    // ISO sources don't get the side-data frame probe — it would require
+    // streaming the whole inner file twice. Basic color tags from -show_streams
+    // are usually enough for DVD/Blu-ray (HDR10 BDs are rare in raw-ISO form
+    // and ffprobe-from-pipe doesn't always surface frame side-data anyway).
     parse_ffprobe_json(&output.stdout)
 }
 
@@ -237,6 +336,129 @@ fn run_with_timeout(
         .spawn()
         .with_context(|| format!("Failed to spawn {}", program))?;
     wait_with_timeout(child, timeout, descriptor)
+}
+
+/// Run ffprobe to read the first video frame's side-data list. Used to extract
+/// HDR10 mastering display and content-light-level metadata, which only appears
+/// on frames, not on the stream header.
+fn probe_first_frame_side_data(path: &Path) -> Result<FfprobeFramesOutput> {
+    let output = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-print_format",
+            "json",
+            "-select_streams",
+            "v:0",
+            "-show_frames",
+            "-read_intervals",
+            "%+#1",
+        ])
+        .arg(path)
+        .output()
+        .context("Failed to run ffprobe (frames)")?;
+
+    if !output.status.success() {
+        bail!(
+            "ffprobe (frames) failed for {:?}: {}",
+            path,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    parse_frames_json(&output.stdout)
+}
+
+fn parse_frames_json(json: &[u8]) -> Result<FfprobeFramesOutput> {
+    serde_json::from_slice(json).context("Failed to parse ffprobe frames JSON")
+}
+
+/// Pull MasteringDisplayMetadata + ContentLightLevelMetadata out of the first
+/// frame's side-data list and stash the formatted strings on `info`.
+fn apply_frame_side_data(info: &mut MediaInfo, frames: &FfprobeFramesOutput) {
+    let Some(frame) = frames.frames.first() else {
+        return;
+    };
+    let Some(side_data) = frame.side_data_list.as_ref() else {
+        return;
+    };
+    for sd in side_data {
+        match sd.side_data_type.as_deref() {
+            // Only fill missing fields. Stream-header values already on
+            // `info` are authoritative — we don't want first-frame
+            // side-data quietly overwriting them with a different
+            // mastering display reading.
+            Some("Mastering display metadata") if info.master_display.is_none() => {
+                if let Some(s) = format_master_display(sd) {
+                    info.master_display = Some(s);
+                }
+            }
+            Some("Content light level metadata") if info.max_cll.is_none() => {
+                if let Some(s) = format_max_cll(sd) {
+                    info.max_cll = Some(s);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Parse a rational string like "13250/50000" into integer (numerator, denominator).
+/// Returns None if either side is missing or non-numeric.
+fn parse_rational(s: &str) -> Option<(i64, i64)> {
+    let (num, den) = s.split_once('/')?;
+    let num: i64 = num.trim().parse().ok()?;
+    let den: i64 = den.trim().parse().ok()?;
+    if den == 0 {
+        return None;
+    }
+    Some((num, den))
+}
+
+/// Normalise a color rational ("13250/50000") to integer 1/50000 units, the
+/// scale ffmpeg's `-master_display` flag expects for chromaticity coords.
+fn rational_to_50000(s: &str) -> Option<i64> {
+    let (num, den) = parse_rational(s)?;
+    // Multiply first to keep precision: num * 50000 / den.
+    Some(num.saturating_mul(50000) / den)
+}
+
+/// Normalise a luminance rational to integer 1/10000 nits, ffmpeg's expected
+/// scale for `-master_display`'s L(max,min).
+fn rational_to_10000(s: &str) -> Option<i64> {
+    let (num, den) = parse_rational(s)?;
+    Some(num.saturating_mul(10000) / den)
+}
+
+/// Build the master_display arg string from a MasteringDisplayMetadata side-data
+/// entry. ffmpeg accepts the syntax
+/// `G(gx,gy)B(bx,by)R(rx,ry)WP(wpx,wpy)L(max,min)` with chromaticity in
+/// 1/50000 and luminance in 1/10000 nits. Returns None if any required field
+/// is missing.
+fn format_master_display(sd: &FfprobeSideData) -> Option<String> {
+    let gx = rational_to_50000(sd.green_x.as_deref()?)?;
+    let gy = rational_to_50000(sd.green_y.as_deref()?)?;
+    let bx = rational_to_50000(sd.blue_x.as_deref()?)?;
+    let by = rational_to_50000(sd.blue_y.as_deref()?)?;
+    let rx = rational_to_50000(sd.red_x.as_deref()?)?;
+    let ry = rational_to_50000(sd.red_y.as_deref()?)?;
+    let wpx = rational_to_50000(sd.white_point_x.as_deref()?)?;
+    let wpy = rational_to_50000(sd.white_point_y.as_deref()?)?;
+    let lmax = rational_to_10000(sd.max_luminance.as_deref()?)?;
+    let lmin = rational_to_10000(sd.min_luminance.as_deref()?)?;
+    Some(format!(
+        "G({},{})B({},{})R({},{})WP({},{})L({},{})",
+        gx, gy, bx, by, rx, ry, wpx, wpy, lmax, lmin
+    ))
+}
+
+/// Build the max_cll arg string ("max_cll,max_fall") from a
+/// ContentLightLevelMetadata side-data entry. Returns None if either value
+/// is missing.
+fn format_max_cll(sd: &FfprobeSideData) -> Option<String> {
+    let cll = sd.max_content?;
+    let fall = sd.max_average?;
+    Some(format!("{},{}", cll, fall))
 }
 
 fn parse_ffprobe_json(json: &[u8]) -> Result<MediaInfo> {
@@ -296,6 +518,32 @@ fn parse_ffprobe_json(json: &[u8]) -> Result<MediaInfo> {
         .iter()
         .any(|s| s.codec_type.as_deref() == Some("subtitle"));
 
+    // Color metadata from the video stream header. ffprobe emits "unknown" for
+    // unspecified fields — treat that as None so we don't pass a useless
+    // `-color_primaries unknown` to ffmpeg.
+    let color_primaries = clean_color_tag(video_stream.color_primaries.as_deref());
+    let color_transfer = clean_color_tag(video_stream.color_transfer.as_deref());
+    let color_space = clean_color_tag(video_stream.color_space.as_deref());
+    let color_range = clean_color_tag(video_stream.color_range.as_deref());
+
+    // Some sources expose mastering display metadata directly in the stream
+    // header (rare, but possible — e.g. some MKVs). Pick those up too.
+    let mut master_display: Option<String> = None;
+    let mut max_cll: Option<String> = None;
+    if let Some(side_data) = video_stream.side_data_list.as_ref() {
+        for sd in side_data {
+            match sd.side_data_type.as_deref() {
+                Some("Mastering display metadata") if master_display.is_none() => {
+                    master_display = format_master_display(sd);
+                }
+                Some("Content light level metadata") if max_cll.is_none() => {
+                    max_cll = format_max_cll(sd);
+                }
+                _ => {}
+            }
+        }
+    }
+
     Ok(MediaInfo {
         codec,
         width,
@@ -305,7 +553,24 @@ fn parse_ffprobe_json(json: &[u8]) -> Result<MediaInfo> {
         pix_fmt,
         has_audio,
         has_subtitles,
+        color_primaries,
+        color_transfer,
+        color_space,
+        color_range,
+        master_display,
+        max_cll,
     })
+}
+
+/// Filter ffprobe's color tags: drop `None`, `"unknown"`, and empty strings.
+/// ffprobe emits "unknown" for fields the bitstream didn't specify; passing
+/// that to ffmpeg is worse than passing nothing.
+fn clean_color_tag(s: Option<&str>) -> Option<String> {
+    let s = s?.trim();
+    if s.is_empty() || s.eq_ignore_ascii_case("unknown") || s.eq_ignore_ascii_case("unspecified") {
+        return None;
+    }
+    Some(s.to_string())
 }
 
 /// Check if a file already meets the target encoding requirements.
@@ -369,6 +634,7 @@ mod tests {
             pix_fmt: "yuv420p".to_string(),
             has_audio: true,
             has_subtitles: false,
+            ..MediaInfo::default()
         }
     }
 
@@ -505,5 +771,266 @@ mod tests {
             "expected '150ms' in timeout error, got: {}",
             err
         );
+    }
+
+    // ── HDR / color metadata tests ───────────────────────────────────────────
+
+    #[test]
+    fn test_clean_color_tag_drops_unknown() {
+        assert_eq!(clean_color_tag(Some("bt2020")), Some("bt2020".to_string()));
+        assert_eq!(clean_color_tag(Some("unknown")), None);
+        assert_eq!(clean_color_tag(Some("UNKNOWN")), None);
+        assert_eq!(clean_color_tag(Some("unspecified")), None);
+        assert_eq!(clean_color_tag(Some("")), None);
+        assert_eq!(clean_color_tag(Some("   ")), None);
+        assert_eq!(clean_color_tag(None), None);
+    }
+
+    #[test]
+    fn test_parse_color_tags_from_stream() {
+        let json = br#"{
+            "streams": [{
+                "codec_name": "hevc",
+                "codec_type": "video",
+                "width": 3840,
+                "height": 2160,
+                "pix_fmt": "yuv420p10le",
+                "color_primaries": "bt2020",
+                "color_transfer": "smpte2084",
+                "color_space": "bt2020nc",
+                "color_range": "tv"
+            }]
+        }"#;
+        let info = parse_ffprobe_json(json).unwrap();
+        assert_eq!(info.color_primaries.as_deref(), Some("bt2020"));
+        assert_eq!(info.color_transfer.as_deref(), Some("smpte2084"));
+        assert_eq!(info.color_space.as_deref(), Some("bt2020nc"));
+        assert_eq!(info.color_range.as_deref(), Some("tv"));
+    }
+
+    #[test]
+    fn test_parse_unknown_color_tags_become_none() {
+        let json = br#"{
+            "streams": [{
+                "codec_name": "h264",
+                "codec_type": "video",
+                "width": 1920,
+                "height": 1080,
+                "pix_fmt": "yuv420p",
+                "color_primaries": "unknown",
+                "color_transfer": "unknown",
+                "color_space": "unknown",
+                "color_range": "unknown"
+            }]
+        }"#;
+        let info = parse_ffprobe_json(json).unwrap();
+        assert_eq!(info.color_primaries, None);
+        assert_eq!(info.color_transfer, None);
+        assert_eq!(info.color_space, None);
+        assert_eq!(info.color_range, None);
+    }
+
+    #[test]
+    fn test_master_display_format_from_stream_side_data() {
+        // BT.2020 primaries with a 1000-nit / 0.005-nit display.
+        // Coordinates expressed as ffprobe does: rationals over 50000 / 10000.
+        let json = br#"{
+            "streams": [{
+                "codec_name": "hevc",
+                "codec_type": "video",
+                "width": 3840,
+                "height": 2160,
+                "pix_fmt": "yuv420p10le",
+                "color_primaries": "bt2020",
+                "color_transfer": "smpte2084",
+                "color_space": "bt2020nc",
+                "side_data_list": [{
+                    "side_data_type": "Mastering display metadata",
+                    "red_x": "35400/50000",
+                    "red_y": "14600/50000",
+                    "green_x": "8500/50000",
+                    "green_y": "39850/50000",
+                    "blue_x": "6550/50000",
+                    "blue_y": "2300/50000",
+                    "white_point_x": "15635/50000",
+                    "white_point_y": "16450/50000",
+                    "min_luminance": "50/10000",
+                    "max_luminance": "10000000/10000"
+                }, {
+                    "side_data_type": "Content light level metadata",
+                    "max_content": 1000,
+                    "max_average": 400
+                }]
+            }]
+        }"#;
+        let info = parse_ffprobe_json(json).unwrap();
+        assert_eq!(
+            info.master_display.as_deref(),
+            Some("G(8500,39850)B(6550,2300)R(35400,14600)WP(15635,16450)L(10000000,50)")
+        );
+        assert_eq!(info.max_cll.as_deref(), Some("1000,400"));
+    }
+
+    #[test]
+    fn test_master_display_format_from_frame_side_data() {
+        // When mastering metadata only appears on frames (the typical HDR10 case),
+        // probe_first_frame_side_data returns it; apply_frame_side_data merges it in.
+        let frames_json = br#"{
+            "frames": [{
+                "side_data_list": [{
+                    "side_data_type": "Mastering display metadata",
+                    "red_x": "34000/50000",
+                    "red_y": "16000/50000",
+                    "green_x": "13250/50000",
+                    "green_y": "34500/50000",
+                    "blue_x": "7500/50000",
+                    "blue_y": "3000/50000",
+                    "white_point_x": "15635/50000",
+                    "white_point_y": "16450/50000",
+                    "min_luminance": "1/10000",
+                    "max_luminance": "40000000/10000"
+                }, {
+                    "side_data_type": "Content light level metadata",
+                    "max_content": 4000,
+                    "max_average": 1000
+                }]
+            }]
+        }"#;
+        let frames = parse_frames_json(frames_json).unwrap();
+        let mut info = MediaInfo::default();
+        apply_frame_side_data(&mut info, &frames);
+        assert_eq!(
+            info.master_display.as_deref(),
+            Some("G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(40000000,1)")
+        );
+        assert_eq!(info.max_cll.as_deref(), Some("4000,1000"));
+    }
+
+    #[test]
+    fn test_master_display_missing_field_returns_none() {
+        // Drop one required field — formatter must refuse rather than emit garbage.
+        let frames_json = br#"{
+            "frames": [{
+                "side_data_list": [{
+                    "side_data_type": "Mastering display metadata",
+                    "red_x": "34000/50000",
+                    "red_y": "16000/50000",
+                    "green_x": "13250/50000",
+                    "green_y": "34500/50000",
+                    "blue_x": "7500/50000",
+                    "white_point_x": "15635/50000",
+                    "white_point_y": "16450/50000",
+                    "min_luminance": "1/10000",
+                    "max_luminance": "40000000/10000"
+                }]
+            }]
+        }"#;
+        let frames = parse_frames_json(frames_json).unwrap();
+        let mut info = MediaInfo::default();
+        apply_frame_side_data(&mut info, &frames);
+        assert_eq!(info.master_display, None);
+    }
+
+    #[test]
+    fn test_max_cll_missing_field_returns_none() {
+        let frames_json = br#"{
+            "frames": [{
+                "side_data_list": [{
+                    "side_data_type": "Content light level metadata",
+                    "max_content": 1000
+                }]
+            }]
+        }"#;
+        let frames = parse_frames_json(frames_json).unwrap();
+        let mut info = MediaInfo::default();
+        apply_frame_side_data(&mut info, &frames);
+        assert_eq!(info.max_cll, None);
+    }
+
+    #[test]
+    fn test_apply_frame_side_data_does_not_overwrite_stream_header() {
+        // Stream-header parsing already populated master_display; the
+        // first-frame side-data must not silently replace it (the stream
+        // header is the authoritative reading; frame side-data here is
+        // a fallback for sources that lack stream-header HDR tags).
+        let frames_json = br#"{
+            "frames": [{
+                "side_data_list": [{
+                    "side_data_type": "Mastering display metadata",
+                    "red_x": "34000/50000",
+                    "red_y": "16000/50000",
+                    "green_x": "13250/50000",
+                    "green_y": "34500/50000",
+                    "blue_x": "7500/50000",
+                    "blue_y": "3000/50000",
+                    "white_point_x": "15635/50000",
+                    "white_point_y": "16450/50000",
+                    "min_luminance": "1/10000",
+                    "max_luminance": "40000000/10000"
+                }]
+            }]
+        }"#;
+        let frames = parse_frames_json(frames_json).unwrap();
+        let mut info = MediaInfo::default();
+        info.master_display = Some("STREAM-HEADER-VALUE".to_string());
+        apply_frame_side_data(&mut info, &frames);
+        assert_eq!(info.master_display.as_deref(), Some("STREAM-HEADER-VALUE"));
+    }
+
+    #[test]
+    fn test_needs_frame_side_data_probe_skips_complete_sdr() {
+        // SDR file with full stream-header coverage — never probe frames.
+        let mut info = MediaInfo::default();
+        info.color_transfer = Some("bt709".to_string());
+        info.color_primaries = Some("bt709".to_string());
+        info.master_display = Some("x".to_string());
+        info.max_cll = Some("y".to_string());
+        assert!(!needs_frame_side_data_probe(&info));
+    }
+
+    #[test]
+    fn test_needs_frame_side_data_probe_skips_sdr_missing_hdr_fields() {
+        // SDR file with no HDR fields — also no point probing frames;
+        // frame side-data on SDR is empty.
+        let mut info = MediaInfo::default();
+        info.color_transfer = Some("bt709".to_string());
+        info.color_primaries = Some("bt709".to_string());
+        assert!(!needs_frame_side_data_probe(&info));
+    }
+
+    #[test]
+    fn test_needs_frame_side_data_probe_runs_on_pq_hdr_missing_fields() {
+        let mut info = MediaInfo::default();
+        info.color_transfer = Some("smpte2084".to_string());
+        info.color_primaries = Some("bt2020".to_string());
+        // master_display / max_cll empty → must probe to fill them.
+        assert!(needs_frame_side_data_probe(&info));
+    }
+
+    #[test]
+    fn test_needs_frame_side_data_probe_runs_when_color_tags_unknown() {
+        // Source with no color metadata at all: we don't know if it's
+        // HDR or SDR, so probe to be safe.
+        let info = MediaInfo::default();
+        assert!(needs_frame_side_data_probe(&info));
+    }
+
+    #[test]
+    fn test_needs_frame_side_data_probe_skips_pq_when_already_populated() {
+        let mut info = MediaInfo::default();
+        info.color_transfer = Some("smpte2084".to_string());
+        info.master_display = Some("x".to_string());
+        info.max_cll = Some("y".to_string());
+        assert!(!needs_frame_side_data_probe(&info));
+    }
+
+    #[test]
+    fn test_rational_helpers() {
+        assert_eq!(rational_to_50000("13250/50000"), Some(13250));
+        assert_eq!(rational_to_50000("1/2"), Some(25000));
+        assert_eq!(rational_to_50000("garbage"), None);
+        assert_eq!(rational_to_50000("1/0"), None);
+        assert_eq!(rational_to_10000("40000000/10000"), Some(40000000));
+        assert_eq!(rational_to_10000("1/10000"), Some(1));
     }
 }

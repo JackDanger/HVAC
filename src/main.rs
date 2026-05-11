@@ -296,6 +296,9 @@ struct WorkItem {
     duration_secs: f64,
     pix_fmt: String,
     source_size: u64,
+    /// Color / HDR metadata to forward to the encoder so HDR10 / HLG / wide-
+    /// gamut sources don't end up with the wrong tags on output.
+    color: transcode::ColorMetadata,
     /// For ISO entries: path to the ISO file.
     iso_path: Option<PathBuf>,
     /// For ISO with single file: path inside the ISO.
@@ -833,12 +836,14 @@ fn main() -> Result<()> {
                         }
                     }
 
+                    let color = transcode::ColorMetadata::from_media_info(&info);
                     to_transcode.push(WorkItem {
                         path: file.clone(),
                         bitrate_kbps,
                         duration_secs,
                         pix_fmt: info.pix_fmt,
                         source_size,
+                        color,
                         iso_path: iso_p.clone(),
                         inner_path: inner_p.clone(),
                         inner_paths: inner_ps.clone(),
@@ -1350,6 +1355,7 @@ fn main() -> Result<()> {
                             item.bitrate_kbps,
                             item.duration_secs,
                             &item.pix_fmt,
+                            &item.color,
                             Some(&my_slot.progress),
                             Some(&my_slot.speed),
                             skip_subs,
@@ -1365,6 +1371,7 @@ fn main() -> Result<()> {
                             item.bitrate_kbps,
                             item.duration_secs,
                             &item.pix_fmt,
+                            &item.color,
                             Some(&my_slot.progress),
                             Some(&my_slot.speed),
                             skip_subs,
@@ -1701,6 +1708,7 @@ mod tests {
             pix_fmt: "yuv420p".to_string(),
             has_audio: true,
             has_subtitles: false,
+            ..probe::MediaInfo::default()
         }
     }
 
