@@ -10,6 +10,36 @@ it becomes the new version section and a fresh `Unreleased` is opened.
 
 ## [Unreleased]
 
+### Added
+- **`Dockerfile` + `compose.example.yml`.** Two-stage Debian build with
+  ffmpeg + VAAPI userland in the runtime image; non-root user matching
+  the typical NAS admin UID/GID so files written back to bind mounts
+  aren't root-owned. Tini as PID 1 forwards SIGINT cleanly through
+  `docker run`.
+- **`docs/NAS.md`.** Copy-pasteable per-platform instructions for
+  Synology DSM (Container Manager + compose), QNAP QTS (Container
+  Station), Unraid (CA + Intel-GPU-TOP / Nvidia-Driver), OpenMediaVault
+  (omv-extras compose plugin), TrueNAS SCALE (apps catalog), TrueNAS
+  CORE (off-box only), plus the NFS/SMB off-box pattern for NAS hosts
+  without a usable GPU.
+- **README Docker + Troubleshooting sections.** Docker one-liners for
+  Intel and NVIDIA; FAQ covering the four questions every comment thread
+  asks (no GPU, CPU encoding, will-it-touch-my-files, how-to-stop).
+
+### Changed
+- **`install.sh` recognises Synology, QNAP, Unraid, OpenMediaVault, and
+  Alpine.** The previous "other Linux" branch named only Arch and
+  Fedora; anyone running the one-liner on a NAS hit a dead end. Each
+  appliance now gets a specific hint pointing at the actually-supported
+  path (Docker on Synology/QNAP/Unraid, apt+omv-extras on OMV).
+- **Platform-aware "No GPU found" error.** Splits into macOS-specific
+  (brew install ffmpeg), container-specific (the exact `--device` /
+  `--gpus` flag), and generic-Linux branches. Inline tests pin the
+  encoder names and the platform branch taken.
+- **Bug-report template** asks how hvac is being run (native / Docker /
+  NAS) up front and no longer assumes nvidia-smi is available for the
+  GPU question.
+
 ## [5.2.0] — 2026-05-11
 
 ### Added
