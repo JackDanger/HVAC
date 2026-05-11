@@ -6,9 +6,25 @@ on:
   pull_request:
     branches: [main]
 
+# Cancel superseded runs on the same branch. The matrix test job takes
+# 40-90 s on each runner and there's no value in finishing a stale run
+# after a force-push.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: short
+
 jobs:
+  # ── Core: fmt + clippy + test on Ubuntu and macOS ────────────────────────
+  #
+  # Same command set the pre-commit hook runs locally, so a green hook
+  # means a green job here (modulo platform-specific test failures).
   test:
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
@@ -29,3 +45,164 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy -- -D warnings
       - run: cargo test
+
+  # ── MSRV check: confirm the declared minimum still builds + tests ────────
+  #
+  # `rust-version` in Cargo.toml is the source of truth; this job re-runs
+  # the binary build + unit tests on exactly that toolchain to catch any
+  # silently-newer-Rust-feature creep.
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read rust-version from Cargo.toml
+        id: msrv
+        run: |
+          msrv=$(grep -oE '^rust-version = "[^"]+"' Cargo.toml | sed -E 's/.*"([^"]+)"/\1/')
+          if [ -z "$msrv" ]; then
+            echo "rust-version not declared in Cargo.toml"; exit 1
+          fi
+          echo "msrv=$msrv" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.msrv }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv-${{ steps.msrv.outputs.msrv }}
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - run: cargo build --bin hvac
+      - run: cargo test --bin hvac
+
+  # ── Doc build: catches broken intra-doc links + missing `///` on pub ─────
+  doc:
+    runs-on: ubuntu-latest
+    env:
+      # Treat warnings (private item without docs, broken links) as errors
+      # so doc rot is caught at PR time, not at docs.rs build time.
+      RUSTDOCFLAGS: "-D warnings"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo doc --no-deps --document-private-items
+
+  # ── Security audit ────────────────────────────────────────────────────────
+  #
+  # rustsec/audit-check runs against the RustSec advisory DB. Fails the
+  # PR if any dep has a published CVE. Dependabot opens the upgrade PR;
+  # this job ensures the advisory is surfaced even if dependabot is slow.
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── License + supply-chain policy via cargo-deny ─────────────────────────
+  #
+  # See deny.toml for the policy. Notably we reject GPL / AGPL deps (this
+  # crate is MIT) and require every dep to ship at least one accepted
+  # license. Bans on duplicate crates catch accidental MSRV-driven
+  # double-pinning.
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          arguments: --all-features
+
+  # ── Spell-check prose in source files + docs ─────────────────────────────
+  typos:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: crate-ci/typos@v1.27.0
+
+  # ── Coverage upload (codecov.io) ─────────────────────────────────────────
+  #
+  # cargo-llvm-cov runs the test suite under instrumentation, emits an
+  # lcov.info, and codecov-action posts to codecov.io. Best-effort
+  # against an external service: failure to upload doesn't fail the PR.
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: coverage
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - name: Collect coverage
+        run: cargo llvm-cov --lcov --output-path lcov.info --bin hvac
+      - name: Upload to codecov.io
+        uses: codecov/codecov-action@v5
+        with:
+          files: lcov.info
+          fail_ci_if_error: false
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+  # ── Publish prompt log to jackdanger.com ─────────────────────────────────
+  #
+  # Picks up new / modified files under `promptlog/*.md` on push to main
+  # and POSTs each as text/markdown to https://jackdanger.com/promptlog/.
+  # Authenticated via the PROMPTLOG_TOKEN repository secret; if absent
+  # (forks, dependabot branches) the job logs what it would have done
+  # and exits zero.
+  publish-promptlog:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Need at least two commits to diff against the previous push,
+          # so we can find which promptlog files changed.
+          fetch-depth: 2
+      - name: Find changed promptlog files
+        id: changed
+        run: |
+          # Compare against the parent of HEAD. On a fast-forward push
+          # this gives us the merged PR's promptlog/ touches.
+          changed=$(git diff --name-only --diff-filter=AM HEAD~1..HEAD \
+                    | grep -E '^promptlog/.+\.md$' \
+                    | grep -v '^promptlog/README\.md$' || true)
+          if [ -z "$changed" ]; then
+            echo "no promptlog files changed; nothing to publish"
+            echo "files=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "files<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$changed"   >> "$GITHUB_OUTPUT"
+          echo "EOF"        >> "$GITHUB_OUTPUT"
+      - name: Publish each file
+        if: steps.changed.outputs.files != ''
+        env:
+          PROMPTLOG_TOKEN: ${{ secrets.PROMPTLOG_TOKEN }}
+        run: |
+          set -eu
+          if [ -z "${PROMPTLOG_TOKEN:-}" ]; then
+            echo "PROMPTLOG_TOKEN not configured — skipping upload."
+            echo "Would have published:"
+            echo "${{ steps.changed.outputs.files }}"
+            exit 0
+          fi
+          while IFS= read -r file; do
+            [ -z "$file" ] && continue
+            slug=$(basename "$file" .md)
+            echo "→ POST $file → https://jackdanger.com/promptlog/$slug"
+            curl --fail-with-body -sS \
+                 -X POST "https://jackdanger.com/promptlog/$slug" \
+                 -H "Authorization: Bearer $PROMPTLOG_TOKEN" \
+                 -H "Content-Type: text/markdown" \
+                 --data-binary "@$file"
+            echo
+          done <<< "${{ steps.changed.outputs.files }}"

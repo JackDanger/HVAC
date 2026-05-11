@@ -1,0 +1,27 @@
+# typos config — spell-check for prose in source comments and docs.
+# Run locally with `typos`; CI runs the same via crate-ci/typos.
+
+[default]
+# These appear in real code and aren't typos:
+extend-identifiers = { hvac = "hvac", hvac_tmp = "hvac_tmp", ofreal = "ofreal" }
+
+[default.extend-words]
+# Filenames and CLI tools we mention by name (typos sometimes thinks
+# they're misspellings of more common words):
+"isomage" = "isomage"
+"NVENC" = "NVENC"
+"VAAPI" = "VAAPI"
+"hevc" = "hevc"
+"tdarr" = "tdarr"
+"tdorr" = "tdorr"   # old name; mentioned in CHANGELOG / git history
+"slimarr" = "slimarr" # ditto
+"HVECuum" = "HVECuum" # earlier project name
+
+# Skip paths that contain generated content or vendored fixtures.
+[files]
+extend-exclude = [
+    "Cargo.lock",
+    "tests/fixtures/",
+    "logo.svg",
+    "packaging/",
+]

@@ -1,0 +1,66 @@
+# cargo-deny configuration: license + advisory + ban + source policies
+# for the hvac dependency tree.  Run locally with `cargo deny check`.
+#
+# This file is the source of truth for what supply-chain hygiene CI
+# enforces; the `deny` job in .github/workflows/ci.yml runs the same
+# command. If you're adding a dependency that fails any check below,
+# either pick a different dep or add a justified exception here with a
+# comment explaining why.
+
+[graph]
+# Restrict to the targets we actually ship binaries for.  Cuts out
+# Windows-only / wasm-only crates from the advisory + license check.
+targets = [
+    { triple = "x86_64-unknown-linux-gnu" },
+    { triple = "aarch64-unknown-linux-gnu" },
+    { triple = "x86_64-apple-darwin" },
+    { triple = "aarch64-apple-darwin" },
+]
+all-features = true
+
+[advisories]
+version = 2
+# yanked = "deny" means a yanked dep fails the build. RustSec doesn't
+# auto-yank for vulnerabilities — fail those via the advisories DB.
+yanked = "deny"
+ignore = []
+
+[licenses]
+version = 2
+# Permissive licenses we're happy to ship.  hvac itself is MIT.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "MPL-2.0",  # weak copyleft; fine for linking
+    "Zlib",
+    "CC0-1.0",
+]
+# 0.8 = "at least 80 % confidence the detected license matches a
+# Spec license-id".  Crates that score lower need an explicit
+# `clarify` entry below.
+confidence-threshold = 0.8
+
+# Treat unlicensed crates as a build failure.  GPL / AGPL would also
+# fail the `allow` list above (they're not listed).
+unused-allowed-license = "warn"
+
+[bans]
+# Two crates with identical names at different versions usually means
+# we have a transitive dep pinning an older minor.  Warn so we notice;
+# the explicit `deny` list catches truly problematic duplicates.
+multiple-versions = "warn"
+wildcards = "deny"
+# Deny known-bad crates here as we discover them.  Empty by default.
+deny = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
