@@ -131,7 +131,14 @@ pub static CANCELLED: AtomicBool = AtomicBool::new(false);
 /// Populated as encodes start; read by the SIGINT-twice force-quit handler.
 pub static TMP_DIRS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
-/// Remove `.hvac_tmp_*` files from all registered work directories.
+/// Remove in-progress `.hvac_tmp_*` encode scratch files from every directory
+/// registered in [`TMP_DIRS`].
+///
+/// Deliberately does **not** touch `.hvac.complete` sidecar markers: those are
+/// written *after* the final rename succeeds (so a SIGINT can never strand one
+/// next to a partial output), and any markers from prior runs are part of the
+/// resume/adopt contract — clearing them here would force unnecessary re-encodes
+/// on the next run.
 pub fn cleanup_tmp_dirs() {
     if let Ok(dirs) = TMP_DIRS.lock() {
         for dir in dirs.iter() {

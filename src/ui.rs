@@ -91,16 +91,27 @@ pub fn max_name_for_cols(cols: usize) -> usize {
     cols.saturating_sub(LINE_FORMAT_OVERHEAD).max(20)
 }
 
-/// Truncate `name` to `max_len` characters, appending an ellipsis when needed.
-/// Counts Unicode characters, not bytes — important for filenames containing
-/// non-ASCII.
+/// Truncate `name` to at most `max_len` characters, appending an ellipsis when
+/// the original would exceed the limit. Counts Unicode characters, not bytes —
+/// important for filenames containing non-ASCII.
+///
+/// The ellipsis (1 char in Unicode mode, 2 chars `..` in ASCII mode) is
+/// included in the `max_len` budget, so the returned string never exceeds
+/// `max_len` chars. When `max_len` is smaller than the ellipsis itself (1 in
+/// Unicode, 2 in ASCII) we fall back to a plain clip — the result is still
+/// `≤ max_len` chars and the caller's layout doesn't blow up.
 pub fn truncate_name(name: &str, max_len: usize, sym: &Symbols) -> String {
     if name.chars().count() <= max_len {
-        name.to_string()
-    } else {
-        let truncated: String = name.chars().take(max_len - 1).collect();
-        format!("{truncated}{}", sym.ellipsis)
+        return name.to_string();
     }
+    let ellipsis_len = sym.ellipsis.chars().count();
+    if max_len <= ellipsis_len {
+        // No room for any name chars plus a full ellipsis; clip to fit.
+        return name.chars().take(max_len).collect();
+    }
+    let keep = max_len - ellipsis_len;
+    let truncated: String = name.chars().take(keep).collect();
+    format!("{truncated}{}", sym.ellipsis)
 }
 
 /// Render a progress bar of `width` cells representing `fraction` ∈ [0, 1].
@@ -170,15 +181,37 @@ mod tests {
     fn truncate_name_truncates_with_ellipsis() {
         let name = "a".repeat(40);
         let out = truncate_name(&name, 10, &ASCII_SYMBOLS);
-        // ASCII ellipsis is ".." — we trim to `max_len-1` chars then append it,
-        // so the visible width is max_len-1 + 2 = max_len+1 in ASCII mode.
-        // The contract is "ends with the ellipsis and isn't much longer than max_len".
-        assert!(out.ends_with(".."), "got {out:?}");
-        assert!(
-            out.chars().count() <= 12,
-            "got {} chars: {out:?}",
-            out.chars().count()
-        );
+        // ASCII ellipsis is ".." (2 chars), so we keep 8 name chars + "..".
+        // Contract: result is exactly `max_len` chars and ends with the ellipsis.
+        assert_eq!(out, "aaaaaaaa..");
+        assert_eq!(out.chars().count(), 10);
+    }
+
+    #[test]
+    fn truncate_name_unicode_ellipsis_fits_exactly() {
+        // Unicode ellipsis is one char ("…"), so a 10-char budget keeps 9 of the
+        // name. Result must be exactly 10 chars.
+        let name = "a".repeat(40);
+        let out = truncate_name(&name, 10, &UNICODE_SYMBOLS);
+        assert_eq!(out.chars().count(), 10);
+        assert!(out.ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn truncate_name_zero_max_len_does_not_panic() {
+        // Regression: an earlier implementation did `max_len - 1` and panicked
+        // on `max_len == 0` (overflow in debug, wrap in release).
+        let out = truncate_name("anything", 0, &ASCII_SYMBOLS);
+        assert_eq!(out, "");
+    }
+
+    #[test]
+    fn truncate_name_small_max_len_clips_below_ellipsis() {
+        // ASCII ellipsis is 2 chars; max_len=1 has no room for it. Falls back
+        // to a plain 1-char clip rather than emitting a 2-char "..".
+        let out = truncate_name("abcdef", 1, &ASCII_SYMBOLS);
+        assert_eq!(out.chars().count(), 1);
+        assert_eq!(out, "a");
     }
 
     #[test]

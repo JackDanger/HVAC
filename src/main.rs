@@ -203,7 +203,12 @@ fn main() -> Result<()> {
 
     // ── Phase 3: transcode + render ────────────────────────────────────────
     let transcoded = Arc::new(AtomicU32::new(0));
-    let error_count = Arc::new(AtomicU32::new(errors));
+    // Phase-3 errors only. The render thread terminates when
+    // `transcoded + phase3_errors >= file_count`, and `file_count` counts only
+    // Phase-3 inputs, so we must not seed this with pre-scan/probe errors —
+    // doing so would let the UI exit early while workers are still encoding.
+    // Pre-Phase-3 errors are added back into `final_errors` for the summary.
+    let phase3_errors = Arc::new(AtomicU32::new(0));
     let bytes_saved = Arc::new(AtomicU64::new(0));
     let bytes_input = Arc::new(AtomicU64::new(0));
     let bytes_output = Arc::new(AtomicU64::new(0));
@@ -220,7 +225,7 @@ fn main() -> Result<()> {
         sym,
         max_name,
         Arc::clone(&transcoded),
-        Arc::clone(&error_count),
+        Arc::clone(&phase3_errors),
         Arc::clone(&bytes_saved),
         Arc::clone(&bytes_input),
         Arc::clone(&bytes_output),
@@ -245,7 +250,8 @@ fn main() -> Result<()> {
     drop(to_transcode);
 
     let final_transcoded = transcoded.load(Ordering::Relaxed);
-    let final_errors = error_count.load(Ordering::Relaxed);
+    // Pre-Phase-3 (scan/probe) errors + Phase-3 (worker) errors → summary total.
+    let final_errors = errors + phase3_errors.load(Ordering::Relaxed);
     let total_saved = bytes_saved.load(Ordering::Relaxed);
     let total_input = bytes_input.load(Ordering::Relaxed);
     let total_output = bytes_output.load(Ordering::Relaxed);
@@ -291,7 +297,7 @@ fn run_transcode_phase(
     sym: &'static ui::Symbols,
     max_name: usize,
     transcoded: Arc<AtomicU32>,
-    error_count: Arc<AtomicU32>,
+    phase3_errors: Arc<AtomicU32>,
     bytes_saved: Arc<AtomicU64>,
     bytes_input: Arc<AtomicU64>,
     bytes_output: Arc<AtomicU64>,
@@ -329,7 +335,7 @@ fn run_transcode_phase(
                 completed_lines: Arc::clone(&completed_lines),
                 completed_units: Arc::clone(&completed_units),
                 transcoded: Arc::clone(&transcoded),
-                errors: Arc::clone(&error_count),
+                errors: Arc::clone(&phase3_errors),
                 max_encoders: Arc::clone(&max_encoders),
                 ramping: Arc::clone(&ramping),
                 session_limit_frozen: Arc::clone(&session_limit_frozen),
@@ -355,7 +361,7 @@ fn run_transcode_phase(
                 sym,
                 max_name,
                 transcoded: Arc::clone(&transcoded),
-                error_count: Arc::clone(&error_count),
+                error_count: Arc::clone(&phase3_errors),
                 bytes_saved: Arc::clone(&bytes_saved),
                 bytes_input: Arc::clone(&bytes_input),
                 bytes_output: Arc::clone(&bytes_output),

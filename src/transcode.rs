@@ -719,11 +719,13 @@ pub fn transcode_iso(
         out_meta.len()
     );
 
-    // ISO encodes can't know the "source size" in the same way regular files
-    // can (the ISO bytes piped in are not the file's effective payload), so
-    // we record the output size here. Adopt logic re-checks the marker by
-    // re-stating the source — for ISOs that's the ISO itself, not the inner
-    // files, so this records the ISO's size at completion time.
+    // For ISO encodes the marker's `source_size` is the size of the .iso/.img
+    // file itself. `marker_valid_for_source` compares it against the current
+    // size of whatever path partition.rs hands in as the "source", and for
+    // disc images that's the disc image path — *not* the inner stream we
+    // actually piped to ffmpeg. Storing the ISO's size keeps that comparison
+    // consistent so a future resume adopts the output iff the disc is byte-
+    // identical to the one we encoded from.
     let iso_size = std::fs::metadata(iso_path).map(|m| m.len()).unwrap_or(0);
     if let Err(e) = write_marker(&final_output, iso_size, source_duration_secs) {
         log::warn!(
