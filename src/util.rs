@@ -32,9 +32,10 @@ pub fn available_disk_space(path: &Path) -> Result<u64> {
 /// - **KB**: integer; also the unit for anything < 1 MB including 0.
 ///
 /// Uses binary units (`1024`-based) — what `du -h` and the rest of the
-/// system tools speak. Bytes < 1024 are rendered as a fractional KB
-/// (`"0KB"` for 0, `"0KB"` for 100 — sub-KB resolution is not useful
-/// for the things this function is called on).
+/// system tools speak. Bytes < 1024 render with `{:.0}KB`, which is the
+/// nearest whole KB after dividing by 1024: 0 → `"0KB"`, 100 → `"0KB"`,
+/// 1023 → `"1KB"` (the `.999…` rounds up). Sub-KB precision isn't
+/// useful for the values this function gets called on.
 pub fn format_size(bytes: u64) -> String {
     if bytes >= 1024 * 1024 * 1024 {
         format!("{:.1}GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
@@ -51,11 +52,12 @@ mod tests {
 
     #[test]
     fn available_disk_space_root_returns_a_value() {
-        // Just verify the call succeeds. Every supported platform has `/`.
-        let space = available_disk_space(Path::new("/")).unwrap();
-        // Sanity: the root fs has *some* space. A box with literally 0
-        // bytes free would have failed many earlier syscalls.
-        assert!(space > 0, "root filesystem reported 0 bytes free");
+        // Just verify the call succeeds. We deliberately don't assert
+        // `> 0`: statvfs can legitimately return 0 bytes available to
+        // a non-root caller on a full / reserve-protected filesystem
+        // while still succeeding, and that's the kind of thing we want
+        // to report up rather than panic on in a test.
+        let _ = available_disk_space(Path::new("/")).unwrap();
     }
 
     #[test]

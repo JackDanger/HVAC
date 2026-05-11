@@ -234,8 +234,13 @@ pub fn decide_ramp(
             new_baseline: total_speed,
         };
     }
-    // Throughput stalled or dropped: stop ramping.
-    if total_speed < baseline * SIGNIFICANT_DROP_NUMERATOR / SIGNIFICANT_DROP_DENOMINATOR {
+    // Throughput stalled or dropped: stop ramping. Compute the threshold
+    // in u128 so a large `baseline` (the helper is callable with any u64,
+    // and we now unit-test it with arbitrary values) can't overflow during
+    // the multiplication before the divide.
+    let threshold = (baseline as u128) * (SIGNIFICANT_DROP_NUMERATOR as u128)
+        / (SIGNIFICANT_DROP_DENOMINATOR as u128);
+    if (total_speed as u128) < threshold {
         RampAction::StallAndRevert
     } else {
         RampAction::Stall
@@ -377,5 +382,35 @@ mod tests {
         // Guards against accidental edits that would change the 85% rule.
         assert_eq!(SIGNIFICANT_DROP_NUMERATOR, 85);
         assert_eq!(SIGNIFICANT_DROP_DENOMINATOR, 100);
+    }
+
+    #[test]
+    fn ramp_does_not_overflow_on_large_baselines() {
+        // Real worker speed × 100 fits in u64 a million times over,
+        // but the helper is now a pure function and easy to call with
+        // anything. The intermediate `baseline * SIGNIFICANT_DROP_NUMERATOR`
+        // must not overflow u64; doing the math in u128 covers it.
+        // With a baseline of u64::MAX and a non-zero-but-tiny total_speed,
+        // the previous implementation would panic in debug builds on the
+        // multiplication. Now it computes the threshold cleanly and
+        // returns StallAndRevert.
+        let result = decide_ramp(1, 1, 1, u64::MAX);
+        assert!(
+            matches!(result, RampAction::StallAndRevert),
+            "huge baseline with tiny current speed: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn ramp_handles_u64_max_total_speed() {
+        // Symmetric: huge `total_speed` against a small baseline. Must
+        // pick RampUp (improved) without panicking on the comparison.
+        let result = decide_ramp(1, 1, u64::MAX, 100);
+        assert!(
+            matches!(result, RampAction::RampUp { .. }),
+            "huge speed vs small baseline: {:?}",
+            result
+        );
     }
 }
