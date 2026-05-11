@@ -1,15 +1,11 @@
-# Get your TBs back
+# HVAC — Get your TBs back
 
 [![CI](https://github.com/JackDanger/hvac/actions/workflows/ci.yml/badge.svg)](https://github.com/JackDanger/hvac/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/hvac-transcoder.svg)](https://crates.io/crates/hvac-transcoder)
 [![docs.rs](https://img.shields.io/docsrs/hvac-transcoder.svg)](https://docs.rs/hvac-transcoder)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Point `hvac` at a directory that contains videos — even ones hidden inside `.img` and `.iso` files - and it'll compress them to h.265 (HEVC) using reasonable defaults. You can overwrite these defaults with a small config file.
-
-<p align="center">
-  <b>Shrink your entire video library to h265.</b><br/>
-</p>
+Point `hvac` at a directory that contains videos — even ones hidden inside `.img` and `.iso` files — and it'll compress them to `h.265` (`HEVC`) using reasonable defaults. You can overwrite these defaults with a small config file.
 
 ---
 
@@ -29,7 +25,7 @@ Other ways: `brew install JackDanger/tap/hvac` &middot; `cargo install hvac-tran
 hvac /path/to/movies
 ```
 
-It scans the directory, skips files that are already h265, and re-encodes the rest. Each new file is ffprobe-verified before the original is replaced. Disc images (`.iso`, `.img`) work too. Re-running picks up where you left off.
+It scans the directory, skips files that are already h.265, and re-encodes the rest. Re-running picks up where you left off.
 
 ```bash
 hvac --dry-run /path/to/movies        # preview, change nothing
