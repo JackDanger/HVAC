@@ -271,6 +271,14 @@ fn main() -> Result<()> {
         std::process::exit(130);
     }
 
+    if pipeline::LD_KILL.load(Ordering::Relaxed) {
+        eprintln!(
+            "\nStopped by LaunchDarkly: enable-transcoding=false ({} transcoded)",
+            transcoded.load(Ordering::Relaxed)
+        );
+        // Fall through to track_run_completed + flush before exiting.
+    }
+
     // ── Phase 4 (optional): swap originals with .transcoded.* siblings ────
     if cli.replace && !cli.overwrite() {
         pipeline::replace::run(&to_transcode, &cli, &cfg, sym);

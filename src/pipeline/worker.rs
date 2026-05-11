@@ -21,7 +21,7 @@ use crate::transcode;
 use crate::ui::{truncate_name, Symbols};
 use crate::util::{self, format_size};
 
-use super::{WorkItem, WorkerSlot, CANCELLED, TMP_DIRS};
+use super::{WorkItem, WorkerSlot, CANCELLED, LD_KILL, TMP_DIRS};
 
 /// Maximum times a single file may retry on session-limit / disk-space
 /// errors. Each retry waits for the offending pressure to clear.
@@ -76,6 +76,7 @@ pub enum RetryDecision {
 pub struct RetryState {
     pub session_retries: u32,
     pub disk_space_retries: u32,
+    pub subtitle_retries: u32,
     pub force_reencode_audio: bool,
     pub subtitle_reencode_attempt: Option<&'static str>,
     pub skip_subs: bool,
@@ -222,16 +223,21 @@ pub fn run_worker(ctx: WorkerCtx, my_slot: Arc<WorkerSlot>) {
             return;
         }
 
-        // Kill-switch: stop picking up new files.
+        // Kill-switch: stop picking up new files. Uses LD_KILL (not CANCELLED)
+        // so main can flush telemetry before exiting rather than exit(130).
         if !ctx.flags.enable_transcoding() {
             log::info!("LaunchDarkly enable-transcoding=false: worker stopping");
-            CANCELLED.store(true, Ordering::Relaxed);
+            LD_KILL.store(true, Ordering::Relaxed);
             return;
         }
 
         // Pause: spin-wait while paused; in-flight encodes finish first.
+        // Also exits the spin if CANCELLED (SIGINT) or the kill-switch fires.
         let mut was_paused = false;
-        while ctx.flags.pause_transcoding() && !CANCELLED.load(Ordering::Relaxed) {
+        while ctx.flags.pause_transcoding()
+            && !CANCELLED.load(Ordering::Relaxed)
+            && ctx.flags.enable_transcoding()
+        {
             if !was_paused {
                 let active = ctx.active_encoders.load(Ordering::Relaxed) as usize;
                 ctx.flags.track_transcoding_paused(active);
@@ -239,7 +245,9 @@ pub fn run_worker(ctx: WorkerCtx, my_slot: Arc<WorkerSlot>) {
             }
             std::thread::sleep(Duration::from_secs(1));
         }
-        if was_paused {
+        // Only emit "resumed" when we exited because the pause flag cleared,
+        // not because of a SIGINT or kill-switch.
+        if was_paused && !CANCELLED.load(Ordering::Relaxed) && ctx.flags.enable_transcoding() {
             let active = ctx.active_encoders.load(Ordering::Relaxed) as usize;
             ctx.flags.track_transcoding_resumed(active);
         }
@@ -621,10 +629,11 @@ fn apply_retry(
         RetryDecision::SkipSubtitles => {
             state.skip_subs = true;
             state.subtitle_reencode_attempt = None;
+            state.subtitle_retries += 1;
             log::info!("{}: retrying without subtitles", short_name);
             ctx.flags.track_subtitle_retry(short_name);
             ctx.flags
-                .track_transcode_retry(short_name, state.session_retries, "skip-subtitles");
+                .track_transcode_retry(short_name, state.subtitle_retries, "skip-subtitles");
             my_slot.progress.store(0, Ordering::Relaxed);
             my_slot.speed.store(0, Ordering::Relaxed);
             true
@@ -637,7 +646,7 @@ fn apply_retry(
             ctx.min_observed_max.fetch_min(active, Ordering::SeqCst);
 
             let hits = ctx.session_limit_hits.fetch_add(1, Ordering::SeqCst) + 1;
-            ctx.flags.track_session_limit_hit(hits);
+            ctx.flags.track_session_limit_hit(active);
             ctx.flags
                 .track_transcode_retry(short_name, state.session_retries, "session-limit");
             if should_freeze(hits) && !ctx.session_limit_frozen.swap(true, Ordering::SeqCst) {
