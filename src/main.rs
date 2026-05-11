@@ -139,12 +139,16 @@ fn main() -> Result<()> {
     let mut errors = scan_result.errors;
     eprintln!("Scanning {} files...", scan_result.items.len());
 
-    let total_bytes: u64 = scan_result
-        .items
-        .iter()
-        .filter_map(|item| std::fs::metadata(&item.file).ok())
-        .map(|m| m.len())
-        .sum();
+    let total_bytes: u64 = {
+        let mut seen = std::collections::HashSet::new();
+        scan_result
+            .items
+            .iter()
+            .filter(|item| seen.insert(&item.file))
+            .filter_map(|item| std::fs::metadata(&item.file).ok())
+            .map(|m| m.len())
+            .sum()
+    };
     flags.track_scan_completed(scan_result.items.len(), total_bytes);
 
     // ── Phase 2: probe + filter ────────────────────────────────────────────
@@ -452,7 +456,8 @@ extern "C" fn sigint_handler(_: libc::c_int) {
     // SAFETY: write(2) is async-signal-safe.
     unsafe { libc::write(2, RESET.as_ptr() as *const libc::c_void, RESET.len()) };
     if pipeline::CANCELLED.load(Ordering::Relaxed) {
-        pipeline::cleanup_tmp_dirs();
+        // Skip cleanup — Mutex + I/O are not async-signal-safe. In-progress
+        // .hvac_tmp_* files are detected and removed on the next run.
         // SAFETY: _exit is async-signal-safe.
         unsafe { libc::_exit(130) };
     }

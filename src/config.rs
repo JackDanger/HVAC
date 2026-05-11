@@ -140,6 +140,12 @@ fn parse_config(yaml: &str) -> Result<Config> {
         .filter(|s| !s.is_empty())
         .ok_or_else(|| anyhow::anyhow!("missing required field: target.codec"))?;
 
+    if media_extensions.is_empty() {
+        anyhow::bail!(
+            "missing required field: media_extensions (must list at least one extension)"
+        );
+    }
+
     Ok(Config {
         target: TargetConfig {
             codec,
@@ -211,6 +217,18 @@ media_extensions:
     fn test_load_falls_back_gracefully_on_missing_file() {
         let result = Config::load(std::path::Path::new("/nonexistent/config.yaml"));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_empty_media_extensions_is_an_error() {
+        let yaml = r#"
+target:
+  codec: hevc
+media_extensions:
+"#;
+        let result = parse_config(yaml);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("media_extensions"));
     }
 
     #[test]
