@@ -9,11 +9,13 @@ edition = "2021"
 # build + tests on exactly this toolchain so silently-newer-Rust feature
 # usage doesn't sneak in. Bump cautiously and bump CHANGELOG with it.
 #
-# 1.85 (Feb 2025): the cargo-audit install pulls in `time-core` which
-# requires the `edition2024` Cargo feature, stabilised in 1.85. We also
-# use C-string literals (1.77+) and `let ... else` (1.65+); 1.85 sits
-# comfortably above those and covers transitive dep MSRVs.
-rust-version = "1.85"
+# 1.93 (Nov 2025): the real floor is set by transitive deps of
+# launchdarkly-server-sdk — specifically `eventsource-client@0.17.4`
+# which declares `rust-version = 1.93`. Our own code only needs 1.77
+# (C-string literals); without the LD SDK we could go lower. Bumps to
+# this field should land alongside a CHANGELOG note so consumers
+# understand why their build broke if they pin an older toolchain.
+rust-version = "1.93"
 description = "GPU-accelerated media transcoder (HEVC/h265 via NVENC, VAAPI, VideoToolbox). Single-binary Tdarr alternative."
 license = "MIT"
 repository = "https://github.com/JackDanger/hvac"
