@@ -135,6 +135,13 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    let total_bytes: u64 = files
+        .iter()
+        .filter_map(|f| std::fs::metadata(f).ok())
+        .map(|m| m.len())
+        .sum();
+    flags.track_scan_completed(files.len(), total_bytes);
+
     let scan_result = pipeline::scan::expand(&files);
     let mut errors = scan_result.errors;
     eprintln!("Scanning {} files...", scan_result.items.len());
