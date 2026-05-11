@@ -65,8 +65,10 @@ pub fn run_render(ctx: RenderCtx) {
         // its own optimal concurrency again (unless frozen by session limits).
         let flag_max = ctx.flags.max_parallel_jobs();
         if flag_max > 0 {
+            let max_slots = ctx.slots.len().max(1);
+            let clamped = flag_max.clamp(1, max_slots) as u32;
+            ctx.max_encoders.store(clamped, Ordering::SeqCst);
             ctx.ramping.store(false, Ordering::SeqCst);
-            ctx.max_encoders.store(flag_max as u32, Ordering::SeqCst);
         } else if prev_flag_max > 0 && !ctx.session_limit_frozen.load(Ordering::SeqCst) {
             ctx.ramping.store(true, Ordering::SeqCst);
         }

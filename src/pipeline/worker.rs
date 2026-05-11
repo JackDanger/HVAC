@@ -475,18 +475,22 @@ fn encode_with_retry(
                 ctx.disk_reserved.fetch_sub(disk_estimate, Ordering::SeqCst);
 
                 let err_str = e.to_string();
+                let error_category = if transcode::is_session_limit_error(&err_str) {
+                    "session-limit"
+                } else if transcode::is_audio_copy_error(&err_str) {
+                    "audio-copy"
+                } else if transcode::is_subtitle_error(&err_str) {
+                    "subtitle"
+                } else if transcode::is_disk_space_error(&err_str) {
+                    "disk-space"
+                } else {
+                    "unknown"
+                };
                 let decision = classify_failure(&err_str, state);
                 if !apply_retry(
                     decision, &err_str, state, ctx, my_slot, short_name, size_str,
                 ) {
-                    // Truncate ffmpeg stderr before sending to LD — it can be
-                    // several KB and most useful context is in the last ~500 chars.
-                    let truncated = if err_str.len() > 500 {
-                        &err_str[err_str.len() - 500..]
-                    } else {
-                        &err_str
-                    };
-                    ctx.flags.track_transcode_failed(short_name, truncated);
+                    ctx.flags.track_transcode_failed(short_name, error_category);
                     return Some(e);
                 }
             }

@@ -263,7 +263,12 @@ fn main() -> Result<()> {
 
     pipeline::cleanup_tmp_dirs();
 
-    if pipeline::CANCELLED.load(Ordering::Relaxed) {
+    if pipeline::LD_KILL.load(Ordering::Relaxed) {
+        eprintln!(
+            "\nStopped: {} transcoded before LaunchDarkly kill-switch",
+            transcoded.load(Ordering::Relaxed)
+        );
+    } else if pipeline::CANCELLED.load(Ordering::Relaxed) {
         eprintln!(
             "\nCancelled: {} transcoded before interrupt",
             transcoded.load(Ordering::Relaxed)
