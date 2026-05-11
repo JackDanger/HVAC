@@ -74,7 +74,7 @@ jobs:
           sha256sum "$NEW_NAME" > "$NEW_NAME.sha256"
 
       - name: Upload tarball artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.name }}
           path: |
@@ -83,7 +83,7 @@ jobs:
 
       - name: Upload .deb artifact
         if: matrix.deb
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.name }}-deb
           path: |
