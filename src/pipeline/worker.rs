@@ -15,12 +15,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::config::Config;
+use crate::flags::Flags;
 use crate::gpu::GpuInfo;
 use crate::transcode;
 use crate::ui::{truncate_name, Symbols};
 use crate::util::{self, format_size};
 
-use super::{WorkItem, WorkerSlot, CANCELLED, TMP_DIRS};
+use super::{WorkItem, WorkerSlot, CANCELLED, LD_KILL, TMP_DIRS};
 
 /// Maximum times a single file may retry on session-limit / disk-space
 /// errors. Each retry waits for the offending pressure to clear.
@@ -75,6 +76,7 @@ pub enum RetryDecision {
 pub struct RetryState {
     pub session_retries: u32,
     pub disk_space_retries: u32,
+    pub subtitle_retries: u32,
     pub force_reencode_audio: bool,
     pub subtitle_reencode_attempt: Option<&'static str>,
     pub skip_subs: bool,
@@ -210,6 +212,7 @@ pub struct WorkerCtx {
     pub session_limit_frozen: Arc<AtomicBool>,
     pub min_observed_max: Arc<AtomicU32>,
     pub disk_reserved: Arc<AtomicU64>,
+    pub flags: Arc<Flags>,
 }
 
 /// Run one worker iteration for the slot bound to `my_slot`. Exits when the
@@ -218,6 +221,35 @@ pub fn run_worker(ctx: WorkerCtx, my_slot: Arc<WorkerSlot>) {
     'outer: loop {
         if CANCELLED.load(Ordering::Relaxed) {
             return;
+        }
+
+        // Kill-switch: stop picking up new files. Uses LD_KILL (not CANCELLED)
+        // so main can flush telemetry before exiting rather than exit(130).
+        if !ctx.flags.enable_transcoding() {
+            log::info!("LaunchDarkly enable-transcoding=false: worker stopping");
+            LD_KILL.store(true, Ordering::Relaxed);
+            return;
+        }
+
+        // Pause: spin-wait while paused; in-flight encodes finish first.
+        // Also exits the spin if CANCELLED (SIGINT) or the kill-switch fires.
+        let mut was_paused = false;
+        while ctx.flags.pause_transcoding()
+            && !CANCELLED.load(Ordering::Relaxed)
+            && ctx.flags.enable_transcoding()
+        {
+            if !was_paused {
+                let active = ctx.active_encoders.load(Ordering::Relaxed) as usize;
+                ctx.flags.track_transcoding_paused(active);
+                was_paused = true;
+            }
+            std::thread::sleep(Duration::from_secs(1));
+        }
+        // Only emit "resumed" when we exited because the pause flag cleared,
+        // not because of a SIGINT or kill-switch.
+        if was_paused && !CANCELLED.load(Ordering::Relaxed) && ctx.flags.enable_transcoding() {
+            let active = ctx.active_encoders.load(Ordering::Relaxed) as usize;
+            ctx.flags.track_transcoding_resumed(active);
         }
 
         let idx = ctx.next_idx.fetch_add(1, Ordering::Relaxed) as usize;
@@ -397,7 +429,14 @@ fn encode_with_retry(
         // stay invisible until we have a slot.
         if !try_acquire(&ctx.active_encoders, &ctx.max_encoders) {
             if !ctx.auto_ramp {
-                my_slot.queued.store(true, Ordering::Relaxed);
+                if !my_slot.queued.swap(true, Ordering::Relaxed) {
+                    // Just became queued — track it once.
+                    ctx.flags.track_transcode_queued(
+                        short_name,
+                        0,
+                        ctx.max_encoders.load(Ordering::Relaxed),
+                    );
+                }
                 my_slot.progress.store(0, Ordering::Relaxed);
                 my_slot.speed.store(0, Ordering::Relaxed);
             }
@@ -413,6 +452,14 @@ fn encode_with_retry(
             my_slot.progress.store(0, Ordering::Relaxed);
             my_slot.speed.store(0, Ordering::Relaxed);
         }
+
+        ctx.flags.track_transcode_started(
+            short_name,
+            item.bitrate_kbps,
+            item.duration_secs,
+            item.source_size,
+            &item.pix_fmt,
+        );
 
         let encode_result = run_one_encode(item, output_path.as_deref(), state, ctx, my_slot);
 
@@ -432,6 +479,14 @@ fn encode_with_retry(
                 if !apply_retry(
                     decision, &err_str, state, ctx, my_slot, short_name, size_str,
                 ) {
+                    // Truncate ffmpeg stderr before sending to LD — it can be
+                    // several KB and most useful context is in the last ~500 chars.
+                    let truncated = if err_str.len() > 500 {
+                        &err_str[err_str.len() - 500..]
+                    } else {
+                        &err_str
+                    };
+                    ctx.flags.track_transcode_failed(short_name, truncated);
                     return Some(e);
                 }
             }
@@ -464,7 +519,15 @@ fn wait_for_disk(
     };
 
     if !has_disk {
-        my_slot.disk_wait.store(true, Ordering::Relaxed);
+        if !my_slot.disk_wait.swap(true, Ordering::Relaxed) {
+            // First time hitting disk pressure for this file — track it once.
+            let avail_gb = if let Ok(a) = util::available_disk_space(check_dir) {
+                a as f64 / (1024 * 1024 * 1024) as f64
+            } else {
+                0.0
+            };
+            ctx.flags.track_disk_wait(short_name, avail_gb);
+        }
         if !ctx.auto_ramp {
             let mut info = my_slot.info.lock().unwrap();
             *info = Some((short_name.to_string(), size_str.to_string()));
@@ -573,7 +636,11 @@ fn apply_retry(
         RetryDecision::SkipSubtitles => {
             state.skip_subs = true;
             state.subtitle_reencode_attempt = None;
+            state.subtitle_retries += 1;
             log::info!("{}: retrying without subtitles", short_name);
+            ctx.flags.track_subtitle_retry(short_name);
+            ctx.flags
+                .track_transcode_retry(short_name, state.subtitle_retries, "skip-subtitles");
             my_slot.progress.store(0, Ordering::Relaxed);
             my_slot.speed.store(0, Ordering::Relaxed);
             true
@@ -586,6 +653,9 @@ fn apply_retry(
             ctx.min_observed_max.fetch_min(active, Ordering::SeqCst);
 
             let hits = ctx.session_limit_hits.fetch_add(1, Ordering::SeqCst) + 1;
+            ctx.flags.track_session_limit_hit(active);
+            ctx.flags
+                .track_transcode_retry(short_name, state.session_retries, "session-limit");
             if should_freeze(hits) && !ctx.session_limit_frozen.swap(true, Ordering::SeqCst) {
                 let pin = ctx
                     .min_observed_max
@@ -632,6 +702,9 @@ fn record_success(
     } else {
         0
     };
+
+    ctx.flags
+        .track_transcode_completed(short_name, item.source_size, out_size, saved_pct);
 
     *my_slot.info.lock().unwrap() = None;
     my_slot.progress.store(0, Ordering::Relaxed);

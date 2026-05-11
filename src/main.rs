@@ -34,7 +34,7 @@ use util::format_size;
 /// idempotent so the explicit flush at end-of-main is a documentation
 /// duplicate of this Drop.
 struct LdGuard {
-    flags: flags::Flags,
+    flags: Arc<flags::Flags>,
     telemetry: telemetry::Telemetry,
 }
 
@@ -65,10 +65,7 @@ fn main() -> Result<()> {
     // LaunchDarkly client (no-op when --launchdarkly-sdk-key is omitted).
     // SDK key is **CLI-only**: never read from the environment.
     let sdk_key = cli.launchdarkly_sdk_key.as_deref();
-    let mut ld_guard = LdGuard {
-        flags: flags::Flags::new(sdk_key),
-        telemetry: telemetry::Telemetry::new(sdk_key),
-    };
+    let mut ld_flags = flags::Flags::new(sdk_key);
 
     // Safety: clap enforces `path` is present unless --dump-config /
     // --setup-launchdarkly is set.
@@ -104,6 +101,21 @@ fn main() -> Result<()> {
              10-bit sources will be skipped."
         );
     }
+    let gpu_kind = match gpu.kind {
+        gpu::GpuKind::Nvidia => "nvidia",
+        gpu::GpuKind::Intel => "intel",
+        gpu::GpuKind::Apple => "apple",
+    };
+    ld_flags.set_gpu(&gpu.name, &gpu.encoder, gpu_kind);
+    let max_sessions = gpu::max_encode_sessions(&gpu);
+
+    // Now wrap in Arc so the guard and all downstream threads share one client.
+    let mut ld_guard = LdGuard {
+        flags: Arc::new(ld_flags),
+        telemetry: telemetry::Telemetry::new(sdk_key),
+    };
+    let flags = Arc::clone(&ld_guard.flags);
+    flags.track_gpu_detected(&gpu.name, &gpu.encoder, gpu_kind, max_sessions);
 
     if let Ok(avail) = util::available_disk_space(path) {
         eprintln!("Disk: {} available", format_size(avail));
@@ -126,6 +138,14 @@ fn main() -> Result<()> {
     let scan_result = pipeline::scan::expand(&files);
     let mut errors = scan_result.errors;
     eprintln!("Scanning {} files...", scan_result.items.len());
+
+    let total_bytes: u64 = scan_result
+        .items
+        .iter()
+        .filter_map(|item| std::fs::metadata(&item.file).ok())
+        .map(|m| m.len())
+        .sum();
+    flags.track_scan_completed(scan_result.items.len(), total_bytes);
 
     // ── Phase 2: probe + filter ────────────────────────────────────────────
     let part = pipeline::partition::partition(&scan_result.items, &cli, &cfg, &gpu);
@@ -188,6 +208,12 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Kill-switch: abort before starting Phase 3 if LaunchDarkly says so.
+    if !flags.enable_transcoding() {
+        eprintln!("Aborted: LaunchDarkly enable-transcoding flag is false.");
+        return Ok(());
+    }
+
     // Register work directories for SIGINT cleanup.
     {
         let mut dirs = pipeline::TMP_DIRS.lock().unwrap();
@@ -213,6 +239,9 @@ fn main() -> Result<()> {
     let bytes_input = Arc::new(AtomicU64::new(0));
     let bytes_output = Arc::new(AtomicU64::new(0));
 
+    let total_transcode_bytes: u64 = to_transcode.iter().map(|i| i.source_size).sum();
+    flags.track_run_started(to_transcode.len(), total_transcode_bytes, jobs, auto_ramp);
+
     let to_transcode = Arc::new(to_transcode);
     run_transcode_phase(
         Arc::clone(&to_transcode),
@@ -229,6 +258,7 @@ fn main() -> Result<()> {
         Arc::clone(&bytes_saved),
         Arc::clone(&bytes_input),
         Arc::clone(&bytes_output),
+        Arc::clone(&flags),
     );
 
     pipeline::cleanup_tmp_dirs();
@@ -239,6 +269,14 @@ fn main() -> Result<()> {
             transcoded.load(Ordering::Relaxed)
         );
         std::process::exit(130);
+    }
+
+    if pipeline::LD_KILL.load(Ordering::Relaxed) {
+        eprintln!(
+            "\nStopped by LaunchDarkly: enable-transcoding=false ({} transcoded)",
+            transcoded.load(Ordering::Relaxed)
+        );
+        // Fall through to track_run_completed + flush before exiting.
     }
 
     // ── Phase 4 (optional): swap originals with .transcoded.* siblings ────
@@ -273,8 +311,17 @@ fn main() -> Result<()> {
         );
     }
 
+    flags.track_run_completed(
+        final_transcoded,
+        skipped,
+        final_errors,
+        total_saved,
+        total_input,
+        total_output,
+    );
+
     // Explicit flush — duplicates the LdGuard's Drop but documents intent.
-    ld_guard.flags.close();
+    flags.close();
     ld_guard.telemetry.shutdown();
 
     let _ = (resumed,); // silence unused if log paths change
@@ -301,6 +348,7 @@ fn run_transcode_phase(
     bytes_saved: Arc<AtomicU64>,
     bytes_input: Arc<AtomicU64>,
     bytes_output: Arc<AtomicU64>,
+    flags: Arc<flags::Flags>,
 ) {
     let total_units = to_transcode.len() as u64 * 1000;
     let file_count = to_transcode.len() as u64;
@@ -342,6 +390,7 @@ fn run_transcode_phase(
                 total_units,
                 file_count,
                 sym,
+                flags: Arc::clone(&flags),
             };
             s.spawn(move || pipeline::render::run_render(render_ctx));
         }
@@ -375,6 +424,7 @@ fn run_transcode_phase(
                 session_limit_frozen: Arc::clone(&session_limit_frozen),
                 min_observed_max: Arc::clone(&min_observed_max),
                 disk_reserved: Arc::clone(&disk_reserved),
+                flags: Arc::clone(&flags),
             };
             let my_slot = Arc::clone(slot);
             s.spawn(move || pipeline::worker::run_worker(ctx, my_slot));

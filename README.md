@@ -99,7 +99,13 @@ For long-running batch transcodes (a media library of thousands of files takes d
    ```
 3. With a key supplied, hvac connects to LaunchDarkly's evaluation endpoint and exports per-encode OpenTelemetry spans to LaunchDarkly Observability, so you can watch live progress and timing in the LD dashboard.
 
-> **Status note.** The wiring is in place but flag *evaluation* (toggles like `pause-transcoding`, `enable-transcoding`, `dry-run`, `max-parallel-jobs`, `transcode-preset` overriding the run while it's in flight) is not yet read by the run-loop — those flags exist in the `--setup-launchdarkly` provisioner but flipping them today does not affect a running encode. Telemetry export and the kill-switch wiring are the next milestones; track this on the issues page.
+The three flags that are active during a run:
+
+| Flag | Type | Effect |
+|------|------|--------|
+| `pause-transcoding` | boolean | Workers finish their current file, then spin until you set it back to false |
+| `enable-transcoding` | boolean | Kill-switch — workers stop picking up new files when set to false |
+| `max-parallel-jobs` | integer | Override the parallel encoder count on the fly (0 = auto) |
 
 The SDK key is **CLI-only** by design — it does not read from any environment variable. This is deliberate: hvac controls expensive GPU/disk resources, and a key that lives in your shell rc would silently apply to every run. Keep the key in a secure location and pass it explicitly when you want remote observability/control to be active.
 

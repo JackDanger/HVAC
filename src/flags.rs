@@ -11,12 +11,6 @@ use std::time::{Duration, Instant};
 /// environment. Pass it explicitly per invocation via
 /// `hvac --launchdarkly-sdk-key <KEY> ...`. This prevents a key in a shell
 /// rc from silently controlling every run.
-// Fields are populated for use as evaluation-context targeting attributes
-// (hostname, username, GPU details) when the SDK actually evaluates flags
-// against rules. The current binary doesn't yet build a context that
-// references them — they're carried forward so flag-rule expansion
-// doesn't require constructor changes later.
-#[allow(dead_code)]
 pub struct Flags {
     client: Option<Arc<Client>>,
     hostname: String,
@@ -26,12 +20,6 @@ pub struct Flags {
     gpu_kind: Option<String>,
 }
 
-// As with the struct above: the methods on Flags are the public surface
-// for future flag-evaluation calls (set_gpu, plus whatever boolean/string
-// flag readers the binary will use). They aren't called from the current
-// run-loop yet; clippy's -D warnings would otherwise reject the unused
-// methods as dead code.
-#[allow(dead_code)]
 impl Flags {
     /// Connect to LaunchDarkly using the supplied SDK key. Pass `None`
     /// (or an empty string) to get a no-op client. Blocks up to 2 s for
@@ -62,29 +50,9 @@ impl Flags {
 
     // ── Boolean flags ─────────────────────────────────────────────────────────
 
-    /// Master kill-switch: set false to disable all transcoding.
+    /// Master kill-switch: set false to abort processing remaining files.
     pub fn enable_transcoding(&self) -> bool {
         self.bool_flag("enable-transcoding", true)
-    }
-
-    /// Whether to auto-ramp parallel job count (disable to use fixed -j).
-    pub fn enable_auto_ramp(&self) -> bool {
-        self.bool_flag("enable-auto-ramp", true)
-    }
-
-    /// Whether to process .iso / .img disc images.
-    pub fn enable_iso_support(&self) -> bool {
-        self.bool_flag("enable-iso-support", true)
-    }
-
-    /// Whether to retry failed encodes without subtitle streams.
-    pub fn enable_subtitle_retry(&self) -> bool {
-        self.bool_flag("enable-subtitle-retry", true)
-    }
-
-    /// Flag-controlled dry run (ORed with --dry-run CLI arg).
-    pub fn dry_run(&self) -> bool {
-        self.bool_flag("dry-run", false)
     }
 
     /// Pause all encoding. Workers spin until this goes false; in-flight jobs finish.
@@ -92,69 +60,11 @@ impl Flags {
         self.bool_flag("pause-transcoding", false)
     }
 
-    // ── String flags ──────────────────────────────────────────────────────────
-
-    /// Override the detected GPU encoder (e.g. "hevc_nvenc"). Empty = use detected.
-    pub fn gpu_encoder_override(&self) -> Option<String> {
-        let v = self.str_flag("gpu-encoder-override", String::new());
-        if v.is_empty() {
-            None
-        } else {
-            Some(v)
-        }
-    }
-
-    /// Override the ffmpeg quality preset (e.g. "medium"). Empty = use config.
-    pub fn transcode_preset_override(&self) -> Option<String> {
-        let v = self.str_flag("transcode-preset", String::new());
-        if v.is_empty() {
-            None
-        } else {
-            Some(v)
-        }
-    }
-
     // ── Integer flags ─────────────────────────────────────────────────────────
 
     /// Override parallel job count. 0 = auto-detect from GPU.
     pub fn max_parallel_jobs(&self) -> usize {
         self.int_flag("max-parallel-jobs", 0).max(0) as usize
-    }
-
-    /// Override config max_bitrate_kbps. 0 = use config value.
-    pub fn max_bitrate_kbps_override(&self) -> Option<u32> {
-        let v = self.int_flag("max-bitrate-kbps", 0);
-        if v <= 0 {
-            None
-        } else {
-            Some(v as u32)
-        }
-    }
-
-    /// Max retries on NVENC session-limit errors. Default: 5.
-    pub fn max_session_retries(&self) -> u32 {
-        self.int_flag("max-session-retries", 5).max(1) as u32
-    }
-
-    // ── Float flags ───────────────────────────────────────────────────────────
-
-    /// Extra GB to reserve on disk beyond the base 2 GB safety margin.
-    pub fn disk_headroom_extra_gb(&self) -> f64 {
-        self.float_flag("disk-headroom-extra-gb", 0.0).max(0.0)
-    }
-
-    // ── JSON flags ────────────────────────────────────────────────────────────
-
-    /// Extra ffmpeg args appended to every encode command (JSON array of strings).
-    pub fn extra_ffmpeg_args(&self) -> Vec<String> {
-        let val = self.json_flag("extra-ffmpeg-args", serde_json::Value::Array(vec![]));
-        match val {
-            serde_json::Value::Array(arr) => arr
-                .iter()
-                .filter_map(|v| v.as_str().map(str::to_string))
-                .collect(),
-            _ => vec![],
-        }
     }
 
     // ── Event tracking ────────────────────────────────────────────────────────
@@ -181,39 +91,6 @@ impl Flags {
                 "total_size_bytes": total_size as i64,
             }),
         );
-    }
-
-    pub fn track_iso_analyzed(
-        &self,
-        name: &str,
-        disc_type: &str,
-        main_count: usize,
-        extra_count: usize,
-    ) {
-        self.emit(
-            "iso-analyzed",
-            serde_json::json!({
-                "name": name,
-                "disc_type": disc_type,
-                "main_feature_count": main_count as i64,
-                "extra_count": extra_count as i64,
-            }),
-        );
-    }
-
-    pub fn track_probe_skipped(&self, filename: &str, codec: &str, bitrate_kbps: u32) {
-        self.emit(
-            "probe-skipped",
-            serde_json::json!({
-                "filename": filename,
-                "codec": codec,
-                "bitrate_kbps": bitrate_kbps as i64,
-            }),
-        );
-    }
-
-    pub fn track_probe_resumed(&self, filename: &str) {
-        self.emit("probe-resumed", serde_json::json!({ "filename": filename }));
     }
 
     pub fn track_transcode_started(
@@ -321,79 +198,6 @@ impl Flags {
         );
     }
 
-    // ── Probe events ──────────────────────────────────────────────────────────
-
-    pub fn track_probe_started(&self, filename: &str, size_bytes: u64) {
-        self.emit(
-            "probe-started",
-            serde_json::json!({
-                "filename": filename,
-                "size_bytes": size_bytes as i64,
-            }),
-        );
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn track_probe_completed(
-        &self,
-        filename: &str,
-        codec: &str,
-        width: u32,
-        height: u32,
-        bitrate_kbps: u32,
-        duration_secs: f64,
-        has_audio: bool,
-        has_subtitles: bool,
-    ) {
-        self.emit(
-            "probe-completed",
-            serde_json::json!({
-                "filename": filename,
-                "codec": codec,
-                "width": width as i64,
-                "height": height as i64,
-                "bitrate_kbps": bitrate_kbps as i64,
-                "duration_secs": duration_secs,
-                "has_audio": has_audio,
-                "has_subtitles": has_subtitles,
-            }),
-        );
-    }
-
-    pub fn track_probe_failed(&self, filename: &str, error: &str) {
-        self.emit(
-            "probe-failed",
-            serde_json::json!({
-                "filename": filename,
-                "error": error,
-            }),
-        );
-    }
-
-    // ── Phase lifecycle ───────────────────────────────────────────────────────
-
-    pub fn track_phase_started(&self, phase: &str, count: usize) {
-        self.emit(
-            "phase-started",
-            serde_json::json!({
-                "phase": phase,
-                "item_count": count as i64,
-            }),
-        );
-    }
-
-    pub fn track_phase_completed(&self, phase: &str, elapsed_secs: f64, count: usize) {
-        self.emit_metric(
-            "phase-completed",
-            elapsed_secs,
-            serde_json::json!({
-                "phase": phase,
-                "elapsed_secs": elapsed_secs,
-                "item_count": count as i64,
-            }),
-        );
-    }
-
     // ── Run start ─────────────────────────────────────────────────────────────
 
     pub fn track_run_started(
@@ -445,17 +249,6 @@ impl Flags {
             serde_json::json!({
                 "final_max": final_max as i64,
                 "reverted": reverted,
-            }),
-        );
-    }
-
-    pub fn track_originals_replaced(&self, count: u32, bytes_saved: u64) {
-        self.emit_metric(
-            "originals-replaced",
-            bytes_saved as f64,
-            serde_json::json!({
-                "count": count as i64,
-                "bytes_saved": bytes_saved as i64,
             }),
         );
     }
@@ -548,31 +341,10 @@ impl Flags {
         }
     }
 
-    fn str_flag(&self, key: &str, default: String) -> String {
-        match &self.client {
-            None => default,
-            Some(c) => c.str_variation(&self.make_context(), key, default),
-        }
-    }
-
     fn int_flag(&self, key: &str, default: i64) -> i64 {
         match &self.client {
             None => default,
             Some(c) => c.int_variation(&self.make_context(), key, default),
-        }
-    }
-
-    fn float_flag(&self, key: &str, default: f64) -> f64 {
-        match &self.client {
-            None => default,
-            Some(c) => c.float_variation(&self.make_context(), key, default),
-        }
-    }
-
-    fn json_flag(&self, key: &str, default: serde_json::Value) -> serde_json::Value {
-        match &self.client {
-            None => default,
-            Some(c) => c.json_variation(&self.make_context(), key, default),
         }
     }
 

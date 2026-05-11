@@ -127,6 +127,11 @@ impl Default for WorkerSlot {
 /// thread check it every loop iteration.
 pub static CANCELLED: AtomicBool = AtomicBool::new(false);
 
+/// Set by a worker when the LaunchDarkly `enable-transcoding` flag returns
+/// false. Unlike `CANCELLED` (which triggers `process::exit(130)`), this flag
+/// lets `main` fall through to the normal tracking/flush path for a clean exit.
+pub static LD_KILL: AtomicBool = AtomicBool::new(false);
+
 /// Directories where `.hvac_tmp_*` files may exist during a run.
 /// Populated as encodes start; read by the SIGINT-twice force-quit handler.
 pub static TMP_DIRS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());

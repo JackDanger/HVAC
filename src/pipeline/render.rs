@@ -15,10 +15,11 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::flags::Flags;
 use crate::ui::{progress_bar_str, Symbols};
 
 use super::worker::lower_max;
-use super::{WorkerSlot, CANCELLED};
+use super::{WorkerSlot, CANCELLED, LD_KILL};
 
 /// Render-thread state. Held by the spawn callback so each Arc is cloned once.
 pub struct RenderCtx {
@@ -33,6 +34,7 @@ pub struct RenderCtx {
     pub total_units: u64,
     pub file_count: u64,
     pub sym: &'static Symbols,
+    pub flags: Arc<Flags>,
 }
 
 /// Run the render loop until all files are accounted for (or the run was
@@ -42,6 +44,7 @@ pub fn run_render(ctx: RenderCtx) {
     let mut prev_viewport = 0usize;
     let mut ramp_baseline_speed = 0u64;
     let mut last_ramp_time = start;
+    let mut prev_flag_max = 0usize;
 
     loop {
         paint_viewport(&ctx, &mut prev_viewport, start);
@@ -57,10 +60,23 @@ pub fn run_render(ctx: RenderCtx) {
             try_ramp(&ctx, &mut ramp_baseline_speed, &mut last_ramp_time);
         }
 
+        // max-parallel-jobs flag: override max_encoders every tick when set.
+        // When it clears back to 0, re-enable auto-ramp so the run can find
+        // its own optimal concurrency again (unless frozen by session limits).
+        let flag_max = ctx.flags.max_parallel_jobs();
+        if flag_max > 0 {
+            ctx.ramping.store(false, Ordering::SeqCst);
+            ctx.max_encoders.store(flag_max as u32, Ordering::SeqCst);
+        } else if prev_flag_max > 0 && !ctx.session_limit_frozen.load(Ordering::SeqCst) {
+            ctx.ramping.store(true, Ordering::SeqCst);
+        }
+        prev_flag_max = flag_max;
+
         let completed = ctx.transcoded.load(Ordering::Relaxed);
         let errs = ctx.errors.load(Ordering::Relaxed);
+        let ld_kill = LD_KILL.load(Ordering::Relaxed);
         let cancelled = CANCELLED.load(Ordering::Relaxed);
-        if (completed + errs) as u64 >= ctx.file_count || cancelled {
+        if (completed + errs) as u64 >= ctx.file_count || cancelled || ld_kill {
             finish_screen(&ctx, prev_viewport);
             return;
         }
@@ -264,15 +280,21 @@ fn try_ramp(ctx: &RenderCtx, baseline: &mut u64, last_ramp: &mut Instant) {
         RampAction::Wait => {}
         RampAction::RampUp { new_baseline } => {
             *baseline = new_baseline;
-            ctx.max_encoders.store(current_max + 1, Ordering::SeqCst);
+            let new_max = current_max + 1;
+            ctx.max_encoders.store(new_max, Ordering::SeqCst);
+            ctx.flags
+                .track_auto_ramp_increased(current_max, new_max, total_speed);
             *last_ramp = Instant::now();
         }
         RampAction::Stall => {
             ctx.ramping.store(false, Ordering::SeqCst);
+            ctx.flags.track_auto_ramp_stopped(current_max, false);
         }
         RampAction::StallAndRevert => {
             ctx.ramping.store(false, Ordering::SeqCst);
-            lower_max(&ctx.max_encoders, current_max.saturating_sub(1).max(1));
+            let reverted = current_max.saturating_sub(1).max(1);
+            lower_max(&ctx.max_encoders, reverted);
+            ctx.flags.track_auto_ramp_stopped(reverted, true);
         }
     }
 }
