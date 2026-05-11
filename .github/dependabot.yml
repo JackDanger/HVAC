@@ -1,0 +1,38 @@
+version: 2
+updates:
+  # Cargo deps: weekly rollup PR. Grouping cuts noise — most weeks we get
+  # one PR with several patch bumps rather than five separate PRs.
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: "America/Los_Angeles"
+    open-pull-requests-limit: 5
+    groups:
+      patches:
+        update-types: ["patch"]
+      minors:
+        update-types: ["minor"]
+    commit-message:
+      prefix: "deps"
+      include: "scope"
+    labels:
+      - "dependencies"
+
+  # GitHub Actions: pin to commit SHAs as a separate concern. Same weekly
+  # cadence so reviews batch.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: "America/Los_Angeles"
+    commit-message:
+      prefix: "ci"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "ci"

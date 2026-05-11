@@ -1,5 +1,10 @@
 # Get your TBs back
 
+[![CI](https://github.com/JackDanger/hvac/actions/workflows/ci.yml/badge.svg)](https://github.com/JackDanger/hvac/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/hvac-transcoder.svg)](https://crates.io/crates/hvac-transcoder)
+[![docs.rs](https://img.shields.io/docsrs/hvac-transcoder.svg)](https://docs.rs/hvac-transcoder)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Point `hvac` at a directory that contains videos — even ones hidden inside `.img` and `.iso` files - and it'll compress them to h.265 (HEVC) using reasonable defaults. You can overwrite these defaults with a small config file.
 
 <p align="center">
@@ -124,6 +129,21 @@ After that, every commit that touches a `.rs` file runs:
 2. `cargo clippy -- -D warnings` — slower (5-30s cold, <2s incremental); rejected if any lint fires. Both checks mirror exactly what CI enforces.
 
 To bypass the slow check for a quick fix-up commit (you've already run clippy yourself or are about to squash anyway): `HVAC_SKIP_CLIPPY=1 git commit ...`. To bypass both: `git commit --no-verify`.
+
+For more on the code layout, retry tiers, and concurrency model, see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
+---
+
+## Contributing
+
+Pull requests welcome — see [`CONTRIBUTING.md`](CONTRIBUTING.md) for the
+PR checklist, code style notes, and release flow. Bugs go on the
+[issues tracker](https://github.com/JackDanger/hvac/issues/new/choose);
+security-sensitive reports go to the address in
+[`SECURITY.md`](SECURITY.md) instead.
+
+The [`CHANGELOG.md`](CHANGELOG.md) tracks user-visible changes in
+[Keep a Changelog](https://keepachangelog.com/) format.
 
 ---
 

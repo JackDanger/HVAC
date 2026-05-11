@@ -1,0 +1,101 @@
+name: Bug report
+description: A transcode failed, hvac panicked, or output was wrong.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Two things make bug reports actionable: the
+        **exact command** you ran and the **exact output** (or stack trace).
+        Please don't trim either. If the output is huge, attach a file.
+
+        Security-sensitive issues go to **jack@jackdanger.com**, not here.
+        See [SECURITY.md](../../blob/main/SECURITY.md).
+
+  - type: input
+    id: version
+    attributes:
+      label: hvac version
+      description: Output of `hvac --version`.
+      placeholder: "hvac 5.1.1 (build abc1234)"
+    validations:
+      required: true
+
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: OS, distro/version, kernel.
+      placeholder: "Debian 12 (bookworm), Linux 6.8.0"
+    validations:
+      required: true
+
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU
+      description: |
+        Output of `nvidia-smi --query-gpu=name --format=csv,noheader`
+        (NVIDIA) or vendor + model otherwise.
+      placeholder: "NVIDIA GeForce RTX 2060"
+    validations:
+      required: true
+
+  - type: input
+    id: ffmpeg
+    attributes:
+      label: ffmpeg version
+      description: First line of `ffmpeg -version`.
+      placeholder: "ffmpeg version n7.1 Copyright (c) 2000-2024 the FFmpeg developers"
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: Command
+      description: The exact invocation. Redact paths only if absolutely necessary.
+      render: shell
+      placeholder: "hvac --dry-run /mnt/media"
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+      description: |
+        Include the full hvac output, ideally with `RUST_LOG=debug`
+        prefixed. For transcode failures, the offending ffmpeg stderr is
+        usually quoted in hvac's error message; please include it verbatim.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: source-details
+    attributes:
+      label: Source details (for transcode failures)
+      description: |
+        If reproducible against a specific file, `ffprobe -v error
+        -show_streams -show_format <file>` output helps a lot. ISO?
+        Multi-title DVD? Encrypted commercial Blu-ray?
+      render: shell
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Sanity checks
+      options:
+        - label: I've searched existing issues and this isn't a duplicate.
+          required: true
+        - label: I can reproduce with `--dry-run` failing, or with a fresh run after `rm -f *.hvac_tmp_* *.hvac.complete`.
+        - label: I'm reporting against the latest tagged release or `main`.
+          required: true

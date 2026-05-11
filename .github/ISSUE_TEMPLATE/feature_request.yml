@@ -1,0 +1,49 @@
+name: Feature request
+description: Suggest something hvac should do, or do differently.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing, please skim the README and the open issues —
+        especially the ones tagged `enhancement` — to make sure this hasn't
+        been raised already. A short, specific request beats a broad
+        wishlist.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: |
+        Describe the situation you're in. "I want X" is fine; "I'm doing
+        Y and Z hurts" is even better because it lets us suggest fixes you
+        might not have considered.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behaviour
+      description: |
+        What should hvac do? CLI flags, output format, error messages —
+        whatever's relevant. Stick to *what*, not *how*; we can figure out
+        the implementation together.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you've considered
+      description: Workarounds you've tried, other tools that do this, etc.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Sanity checks
+      options:
+        - label: I've searched existing issues.
+          required: true
+        - label: This is a single, focused request (not a dump of ideas).
+          required: true
