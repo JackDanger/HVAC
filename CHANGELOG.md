@@ -1,0 +1,91 @@
+# Changelog
+
+All notable changes to this project are documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
+and this project follows [Semantic Versioning](https://semver.org/).
+
+`Unreleased` collects work merged to `main` since the last tag; on release
+it becomes the new version section and a fresh `Unreleased` is opened.
+
+## [Unreleased]
+
+### Added
+- **Pipeline refactor.** The 2,235-line `src/main.rs` is now 401 lines of
+  orchestration. Phase-by-phase code lives in `src/pipeline/{scan,
+  partition, worker, render, replace}.rs`; `Cli` and terminal display
+  primitives moved to `src/{cli,ui}.rs`. Worker retry logic is now a
+  typed `RetryDecision` state machine — `classify_failure(err_str,
+  &state)` is pure and has 8 unit tests pinning the tier ordering.
+- **Restored regressed features.** Three behaviours whose commit
+  messages claimed they landed but whose source had been overwritten by
+  earlier merges: multi-title DVD splitting (PR #11), AACS / BD+
+  encrypted-disc skip (PR #21), and the completion-marker adopt gate
+  (PR #17). All three are wired through the pipeline modules with
+  regression tests.
+- **Governance files.** `CONTRIBUTING.md`, `SECURITY.md`,
+  `CODE_OF_CONDUCT.md`, and this `CHANGELOG.md`.
+
+### Changed
+- **`LdGuard` lifted to a top-level struct** with a `Drop` impl. The
+  LaunchDarkly client + OTel exporter now flush on every `main()` exit
+  path (early-return for `--dry-run` / empty scan, panics), not just the
+  success path.
+- **`scanner::detect_network_mount` is wired in.** Was dead code
+  previously; now emits a one-line warning at scan start when the target
+  path is on an NFS / SMB / CIFS mount.
+
+### Fixed
+- **Pre-commit hook clarity.** README's Development section describes
+  both fmt and clippy steps; the "warn once" wording in the hook itself
+  corrected to "warn on every commit" (clippy missing is rare enough
+  that we don't bother caching state).
+
+## [5.1.1] — 2026-05-10
+
+### Added
+- **Clearer ffmpeg failure reporting.** `summarize_ffmpeg_error()` scans
+  the full stderr stream and surfaces the root-cause line (e.g.
+  `No wav codec tag found for codec pcm_dvd`) instead of the muxer's
+  generic "Nothing was written into output file" cascade.
+- **Audio re-encode auto-retry.** When `-c:a copy` produces a stream the
+  target container can't accept (most commonly pcm_dvd into MKV),
+  workers automatically retry with `-c:a aac`.
+
+## [5.1.0] — 2026-05-10
+
+### Added
+- GA release: install.sh, .deb packaging, AUR publishing, name cleanup.
+
+## [5.0.0] — 2026-04-?? *(pre-changelog, dates approximate)*
+
+### Changed
+- **`--overwrite` is the default** for non-disc-image sources;
+  `--no-overwrite` writes `.transcoded.<ext>` siblings instead.
+- **`--dry-run` previews** the plan without touching anything.
+- ISO filename used for transcoded output instead of inner track name
+  (`Movie.iso` → `Movie.transcoded.mkv`, not `00000.M2T.transcoded.mkv`).
+
+## [4.1.0] — *(pre-changelog)*
+
+### Added
+- `nl_langinfo(CODESET)`-based locale detection (more reliable than env
+  var sniffing).
+
+## [4.0.0] — *(pre-changelog)*
+
+### Added
+- Direct ISO/IMG streaming to ffmpeg via the `isomage` crate (no
+  on-disk extract step).
+
+## [0.6.0] and earlier
+
+Initial public releases. See `git log` for individual commits prior to
+the changelog being established.
+
+[Unreleased]: https://github.com/JackDanger/hvac/compare/v5.1.1...HEAD
+[5.1.1]: https://github.com/JackDanger/hvac/compare/v5.1.0...v5.1.1
+[5.1.0]: https://github.com/JackDanger/hvac/compare/v5.0.0...v5.1.0
+[5.0.0]: https://github.com/JackDanger/hvac/compare/v4.1.0...v5.0.0
+[4.1.0]: https://github.com/JackDanger/hvac/compare/v4.0.0...v4.1.0
+[4.0.0]: https://github.com/JackDanger/hvac/compare/v0.6.0...v4.0.0

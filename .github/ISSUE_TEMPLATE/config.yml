@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: mailto:jack@jackdanger.com
+    about: Email rather than file a public issue. See SECURITY.md for the policy.
+  - name: Question or discussion
+    url: https://github.com/JackDanger/hvac/discussions
+    about: General questions and ideas live in Discussions, not Issues.
