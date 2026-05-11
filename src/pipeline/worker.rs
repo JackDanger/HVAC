@@ -7,7 +7,7 @@
 //! a completed line onto the shared queue for the render thread.
 //!
 //! Atomics and Arcs holding the shared state are bundled in [`WorkerCtx`] so
-//! the spawn-loop in [`crate::pipeline::run`] doesn't grow tentacles.
+//! the spawn-loop in `main` doesn't grow tentacles.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};

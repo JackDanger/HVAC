@@ -36,7 +36,7 @@ pub enum GpuKind {
 ///     encode 10-bit is. The tests assert this conservative behavior.
 ///     Refining to per-chip detection is a follow-up.
 ///
-/// Reference: https://developer.nvidia.com/video-encode-and-decode-gpu-support-matrix-new
+/// Reference: <https://developer.nvidia.com/video-encode-and-decode-gpu-support-matrix-new>
 ///
 /// Match is case-insensitive substring on `nvidia-smi --query-gpu=name`.
 const NVENC_NO_10BIT_HEVC: &[&str] = &[
