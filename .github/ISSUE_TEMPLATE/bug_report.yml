@@ -35,11 +35,38 @@ body:
     attributes:
       label: GPU
       description: |
-        Output of `nvidia-smi --query-gpu=name --format=csv,noheader`
-        (NVIDIA) or vendor + model otherwise.
+        Vendor + model. For NVIDIA, `nvidia-smi --query-gpu=name --format=csv,noheader`
+        prints it for you. On Apple Silicon say "Apple M1 / M2 / …". If
+        you don't know, paste `lspci -nn | grep -iE 'vga|3d|display'` on
+        Linux or "System Report → Graphics/Displays" on macOS.
       placeholder: "NVIDIA GeForce RTX 2060"
     validations:
       required: true
+
+  - type: dropdown
+    id: runtime
+    attributes:
+      label: How are you running hvac?
+      description: |
+        We get reports from very different setups. This helps us
+        reproduce against the right one.
+      options:
+        - "Native binary on a Linux host"
+        - "Native binary on macOS"
+        - "Docker / Podman container"
+        - "On a NAS (Synology, QNAP, Unraid, TrueNAS, OMV)"
+        - "Other / not sure"
+    validations:
+      required: true
+
+  - type: input
+    id: nas-model
+    attributes:
+      label: NAS model (if applicable)
+      description: |
+        Only relevant if the previous question was "NAS". Helps us know
+        whether the model has a usable HEVC encoder at all.
+      placeholder: "Synology DS920+, Unraid 6.12 on a custom build, …"
 
   - type: input
     id: ffmpeg
