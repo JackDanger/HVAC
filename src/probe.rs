@@ -1,9 +1,81 @@
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
 use crate::config::TargetConfig;
+
+/// Default ffprobe watchdog timeout when no explicit value is supplied.
+/// 30 seconds is generous for a healthy local disk but short enough that a
+/// stale NFS / unresponsive SMB mount fails fast instead of hanging the run.
+pub const DEFAULT_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Poll interval for the watchdog loop. 50ms keeps wakeups cheap while
+/// imposing < 100ms latency on top of the actual ffprobe runtime.
+const POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Grace window after `kill()` during which we still try to reap the child.
+/// SIGKILL doesn't preempt processes stuck in uninterruptible IO (the exact
+/// failure mode this watchdog exists to defeat — stale NFS / unresponsive
+/// SMB), so a blocking `wait()` after `kill()` would re-introduce the hang
+/// the watchdog just avoided. We poll for a short window and then bail —
+/// the OS reaps the zombie when the syscall eventually completes.
+const KILL_REAP_GRACE: Duration = Duration::from_millis(500);
+
+/// Wait for `child` to exit, killing it and returning a clear error if the
+/// watchdog fires first. `descriptor` is woven into the timeout error message
+/// so the user can tell which probe got stuck.
+fn wait_with_timeout(
+    mut child: Child,
+    timeout: Duration,
+    descriptor: &str,
+) -> Result<std::process::Output> {
+    let started = Instant::now();
+    loop {
+        match child.try_wait().context("Failed to poll ffprobe child")? {
+            Some(_status) => {
+                // Process exited — collect its captured stdout/stderr.
+                return child
+                    .wait_with_output()
+                    .context("Failed to collect ffprobe output");
+            }
+            None => {
+                if started.elapsed() >= timeout {
+                    let _ = child.kill();
+                    // Try to reap the zombie, but only briefly — see
+                    // KILL_REAP_GRACE for why we don't use blocking wait().
+                    let reap_deadline = Instant::now() + KILL_REAP_GRACE;
+                    while Instant::now() < reap_deadline {
+                        if matches!(child.try_wait(), Ok(Some(_))) {
+                            break;
+                        }
+                        std::thread::sleep(POLL_INTERVAL);
+                    }
+                    bail!(
+                        "ffprobe timed out after {} reading {}; \
+                         the source filesystem may be unresponsive",
+                        format_timeout(timeout),
+                        descriptor
+                    );
+                }
+                std::thread::sleep(POLL_INTERVAL);
+            }
+        }
+    }
+}
+
+/// Format a Duration for the user-facing timeout message without truncating
+/// sub-second values. `as_secs()` alone would render 200ms as "0s".
+fn format_timeout(d: Duration) -> String {
+    if d.as_secs() >= 1 && d.subsec_millis() == 0 {
+        format!("{}s", d.as_secs())
+    } else if d.as_secs() == 0 {
+        format!("{}ms", d.as_millis())
+    } else {
+        format!("{:.3}s", d.as_secs_f64())
+    }
+}
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -48,8 +120,18 @@ struct FfprobeFormat {
     duration: Option<String>,
 }
 
+/// Probe a file with the default timeout. Convenience wrapper for callers
+/// that don't have a configured `Duration` (e.g. transcode-output validation).
 pub fn probe_file(path: &Path) -> Result<MediaInfo> {
-    let output = Command::new("ffprobe")
+    probe_file_with_timeout(path, DEFAULT_PROBE_TIMEOUT)
+}
+
+/// Probe a file, killing ffprobe and returning an error if it doesn't exit
+/// within `timeout`. The watchdog protects against hangs caused by stale NFS
+/// mounts or unresponsive network shares — without it, a single bad mount
+/// blocks the entire scan forever.
+pub fn probe_file_with_timeout(path: &Path, timeout: Duration) -> Result<MediaInfo> {
+    let child = Command::new("ffprobe")
         .args([
             "-v",
             "error",
@@ -59,8 +141,13 @@ pub fn probe_file(path: &Path) -> Result<MediaInfo> {
             "-show_format",
         ])
         .arg(path)
-        .output()
-        .context("Failed to run ffprobe")?;
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("Failed to spawn ffprobe")?;
+
+    let descriptor = path.display().to_string();
+    let output = wait_with_timeout(child, timeout, &descriptor)?;
 
     if !output.status.success() {
         // ffprobe writes progress with bare \r; str::lines() handles \r, \n, \r\n.
@@ -76,10 +163,21 @@ pub fn probe_file(path: &Path) -> Result<MediaInfo> {
     parse_ffprobe_json(&output.stdout)
 }
 
-/// Probe a file inside an ISO by streaming its contents to ffprobe via stdin.
+/// Probe a file inside an ISO with the default timeout.
+/// Convenience wrapper retained for symmetry with `probe_file`.
+#[allow(dead_code)]
 pub fn probe_iso_file(iso_path: &Path, inner_path: &str) -> Result<MediaInfo> {
-    use std::process::Stdio;
+    probe_iso_file_with_timeout(iso_path, inner_path, DEFAULT_PROBE_TIMEOUT)
+}
 
+/// Probe a file inside an ISO by streaming its contents to ffprobe via stdin.
+/// Wrapped with the same watchdog as `probe_file_with_timeout` — an
+/// unresponsive disc-image source must not be allowed to hang forever.
+pub fn probe_iso_file_with_timeout(
+    iso_path: &Path,
+    inner_path: &str,
+    timeout: Duration,
+) -> Result<MediaInfo> {
     let mut child = Command::new("ffprobe")
         .args([
             "-v",
@@ -106,9 +204,8 @@ pub fn probe_iso_file(iso_path: &Path, inner_path: &str) -> Result<MediaInfo> {
         let _ = crate::iso::cat_file(&iso, &inner, &mut stdin);
     });
 
-    let output = child
-        .wait_with_output()
-        .context("Failed to wait for ffprobe")?;
+    let descriptor = format!("{}:{}", iso_path.display(), inner_path);
+    let output = wait_with_timeout(child, timeout, &descriptor)?;
     let _ = writer_handle.join();
 
     if !output.status.success() {
@@ -121,6 +218,25 @@ pub fn probe_iso_file(iso_path: &Path, inner_path: &str) -> Result<MediaInfo> {
     }
 
     parse_ffprobe_json(&output.stdout)
+}
+
+/// Spawn an arbitrary command with the watchdog and return its captured
+/// output. Test-only helper: lets us drive the timeout logic without
+/// shelling out to ffprobe (e.g. with `sleep` or `echo`).
+#[cfg(test)]
+fn run_with_timeout(
+    program: &str,
+    args: &[&str],
+    timeout: Duration,
+    descriptor: &str,
+) -> Result<std::process::Output> {
+    let child = Command::new(program)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("Failed to spawn {}", program))?;
+    wait_with_timeout(child, timeout, descriptor)
 }
 
 fn parse_ffprobe_json(json: &[u8]) -> Result<MediaInfo> {
@@ -301,5 +417,93 @@ mod tests {
         assert!(is_10bit("yuv444p10be"));
         assert!(!is_10bit("yuv420p"));
         assert!(!is_10bit("nv12"));
+    }
+
+    // ── Watchdog timeout tests ───────────────────────────────────────────────
+    //
+    // These exercise wait_with_timeout via the run_with_timeout test helper,
+    // using stand-in commands (`sleep`, `echo`) so we don't depend on ffprobe
+    // or any media files being present in the test environment.
+
+    #[test]
+    fn test_timeout_fires_on_slow_command() {
+        // sleep 60 — way longer than the 1s watchdog. Must abort fast.
+        let started = Instant::now();
+        let result = run_with_timeout(
+            "sleep",
+            &["60"],
+            Duration::from_secs(1),
+            "/fake/path/that/hangs",
+        );
+        let elapsed = started.elapsed();
+
+        assert!(result.is_err(), "expected timeout error, got {:?}", result);
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("timed out after 1s"),
+            "error should mention timeout duration: {}",
+            err
+        );
+        assert!(
+            err.contains("/fake/path/that/hangs"),
+            "error should include the descriptor path: {}",
+            err
+        );
+        assert!(
+            err.contains("filesystem may be unresponsive"),
+            "error should hint at the likely cause: {}",
+            err
+        );
+        // Watchdog must terminate close to the configured timeout, not 60s.
+        // 5s upper bound leaves slack for slow CI hosts but rules out the
+        // 60s sleep actually completing.
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "watchdog took {:?}, expected < 5s",
+            elapsed
+        );
+    }
+
+    #[test]
+    fn test_timeout_does_not_fire_on_fast_command() {
+        // echo finishes effectively instantly; a 5s timeout must not fire.
+        let result = run_with_timeout("echo", &["{}"], Duration::from_secs(5), "fast-command");
+        let output = result.expect("fast command should succeed");
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("{}"),
+            "echo output missing payload: {}",
+            stdout
+        );
+    }
+
+    #[test]
+    fn test_timeout_kills_child_on_expiry() {
+        // The point of the watchdog is that a stuck probe can't keep the
+        // process going forever. With a 200ms timeout against `sleep 30`,
+        // wait_with_timeout must return an Err quickly (well under 1s,
+        // accounting for the 500ms kill-reap grace window).
+        let started = Instant::now();
+        let result = run_with_timeout("sleep", &["30"], Duration::from_millis(200), "kill-test");
+        let elapsed = started.elapsed();
+        assert!(result.is_err(), "expected timeout error, got: {:?}", result);
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "kill path took too long: {:?}",
+            elapsed
+        );
+    }
+
+    #[test]
+    fn test_timeout_message_renders_subsecond_durations() {
+        let result = run_with_timeout("sleep", &["10"], Duration::from_millis(150), "subsec-test");
+        let err = result.expect_err("expected timeout").to_string();
+        // The error must mention the actual configured timeout, not "0s".
+        assert!(
+            err.contains("150ms"),
+            "expected '150ms' in timeout error, got: {}",
+            err
+        );
     }
 }

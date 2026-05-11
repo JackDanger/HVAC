@@ -282,6 +282,11 @@ struct Cli {
     /// Skip files shorter than this many seconds (animated GIFs, single-frame stubs)
     #[arg(long, default_value_t = MIN_TRANSCODE_DURATION_SECS)]
     min_duration: f64,
+
+    /// Maximum seconds ffprobe may run on a single file before being killed.
+    /// Protects against hangs caused by stale NFS / unresponsive SMB mounts.
+    #[arg(long, default_value_t = 30)]
+    probe_timeout: u64,
 }
 
 /// File ready to transcode, with pre-probed metadata.
@@ -513,6 +518,22 @@ fn main() -> Result<()> {
         eprintln!("Disk: {} available", format_size(avail));
     }
 
+    // Warn loudly if we're scanning a network mount: those are the most
+    // common cause of indefinite hangs in std::fs::metadata / read_dir
+    // (which the directory walker uses with no timeout). The ffprobe
+    // watchdog catches probe-phase hangs but not walk-phase hangs.
+    if let Some(fs_type) = scanner::detect_network_mount(path) {
+        log::warn!(
+            "{:?} is on a {} mount; if this filesystem is unresponsive, \
+             the directory walk (std::fs::metadata) can hang indefinitely. \
+             ffprobe is bounded by --probe-timeout ({}s) but the scan-walk \
+             phase is not.",
+            path,
+            fs_type,
+            cli.probe_timeout
+        );
+    }
+
     let files = scanner::scan(path, &cfg.media_extensions)?;
 
     if files.is_empty() {
@@ -597,11 +618,13 @@ fn main() -> Result<()> {
     // millions of times.
     let mut writable_cache: HashMap<PathBuf, bool> = HashMap::new();
 
+    let probe_timeout = std::time::Duration::from_secs(cli.probe_timeout);
+
     for (file, iso_p, inner_p, inner_ps) in &expanded {
         let probe_result = if let (Some(ip), Some(inner)) = (iso_p, inner_p) {
-            probe::probe_iso_file(ip, inner)
+            probe::probe_iso_file_with_timeout(ip, inner, probe_timeout)
         } else {
-            probe::probe_file(file)
+            probe::probe_file_with_timeout(file, probe_timeout)
         };
 
         match probe_result {
