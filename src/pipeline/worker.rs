@@ -479,7 +479,14 @@ fn encode_with_retry(
                 if !apply_retry(
                     decision, &err_str, state, ctx, my_slot, short_name, size_str,
                 ) {
-                    ctx.flags.track_transcode_failed(short_name, &err_str);
+                    // Truncate ffmpeg stderr before sending to LD — it can be
+                    // several KB and most useful context is in the last ~500 chars.
+                    let truncated = if err_str.len() > 500 {
+                        &err_str[err_str.len() - 500..]
+                    } else {
+                        &err_str
+                    };
+                    ctx.flags.track_transcode_failed(short_name, truncated);
                     return Some(e);
                 }
             }

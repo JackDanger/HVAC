@@ -101,11 +101,10 @@ fn main() -> Result<()> {
              10-bit sources will be skipped."
         );
     }
-    let gpu_kind = match gpu.encoder.as_str() {
-        e if e.contains("nvenc") => "nvidia",
-        e if e.contains("vaapi") => "intel",
-        e if e.contains("videotoolbox") => "apple",
-        _ => "unknown",
+    let gpu_kind = match gpu.kind {
+        gpu::GpuKind::Nvidia => "nvidia",
+        gpu::GpuKind::Intel => "intel",
+        gpu::GpuKind::Apple => "apple",
     };
     ld_flags.set_gpu(&gpu.name, &gpu.encoder, gpu_kind);
     let max_sessions = gpu::max_encode_sessions(&gpu);
@@ -136,16 +135,17 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let total_bytes: u64 = files
-        .iter()
-        .filter_map(|f| std::fs::metadata(f).ok())
-        .map(|m| m.len())
-        .sum();
-    flags.track_scan_completed(files.len(), total_bytes);
-
     let scan_result = pipeline::scan::expand(&files);
     let mut errors = scan_result.errors;
     eprintln!("Scanning {} files...", scan_result.items.len());
+
+    let total_bytes: u64 = scan_result
+        .items
+        .iter()
+        .filter_map(|item| std::fs::metadata(&item.file).ok())
+        .map(|m| m.len())
+        .sum();
+    flags.track_scan_completed(scan_result.items.len(), total_bytes);
 
     // ── Phase 2: probe + filter ────────────────────────────────────────────
     let part = pipeline::partition::partition(&scan_result.items, &cli, &cfg, &gpu);
