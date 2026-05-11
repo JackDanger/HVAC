@@ -1,7 +1,12 @@
 use opentelemetry::{global, trace::Span, trace::Tracer, KeyValue};
 use opentelemetry_otlp::{WithExportConfig, WithHttpConfig};
+// `SdkTracerProvider` is the SDK-side concrete type (renamed from
+// `TracerProvider` in 0.28). It implements the trait
+// `opentelemetry::trace::TracerProvider`, which is what `global::set_tracer_provider`
+// requires. `SimpleSpanProcessor::new` now takes the exporter by value
+// (no `Box`). `Resource` switched to a builder API.
 use opentelemetry_sdk::{
-    trace::{SimpleSpanProcessor, TracerProvider},
+    trace::{SdkTracerProvider, SimpleSpanProcessor},
     Resource,
 };
 use std::collections::HashMap;
@@ -56,7 +61,7 @@ impl Drop for OtelSpan {
 /// The SDK key is **CLI-only** by design — never read from the environment.
 /// Pass it via `--launchdarkly-sdk-key <KEY>` per invocation.
 pub struct Telemetry {
-    provider: Option<TracerProvider>,
+    provider: Option<SdkTracerProvider>,
 }
 
 impl Telemetry {
@@ -83,7 +88,7 @@ impl Telemetry {
         }
     }
 
-    fn build(sdk_key: &str) -> anyhow::Result<TracerProvider> {
+    fn build(sdk_key: &str) -> anyhow::Result<SdkTracerProvider> {
         let mut headers = HashMap::new();
         headers.insert("Authorization".to_string(), format!("Bearer {}", sdk_key));
 
@@ -94,13 +99,15 @@ impl Telemetry {
             .build()
             .map_err(|e| anyhow::anyhow!("OTel exporter: {e}"))?;
 
-        let resource = Resource::new([
-            KeyValue::new("service.name", "hvac"),
-            KeyValue::new("service.version", env!("CARGO_PKG_VERSION")),
-        ]);
+        let resource = Resource::builder()
+            .with_attributes([
+                KeyValue::new("service.name", "hvac"),
+                KeyValue::new("service.version", env!("CARGO_PKG_VERSION")),
+            ])
+            .build();
 
-        let provider = TracerProvider::builder()
-            .with_span_processor(SimpleSpanProcessor::new(Box::new(exporter)))
+        let provider = SdkTracerProvider::builder()
+            .with_span_processor(SimpleSpanProcessor::new(exporter))
             .with_resource(resource)
             .build();
 
