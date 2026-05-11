@@ -10,6 +10,8 @@ it becomes the new version section and a fresh `Unreleased` is opened.
 
 ## [Unreleased]
 
+## [5.2.0] — 2026-05-11
+
 ### Added
 - **Pipeline refactor.** The 2,235-line `src/main.rs` is now 401 lines of
   orchestration. Phase-by-phase code lives in `src/pipeline/{scan,
@@ -25,6 +27,19 @@ it becomes the new version section and a fresh `Unreleased` is opened.
   regression tests.
 - **Governance files.** `CONTRIBUTING.md`, `SECURITY.md`,
   `CODE_OF_CONDUCT.md`, and this `CHANGELOG.md`.
+- **`install.sh` auto-installs ffmpeg + hardware acceleration** on
+  macOS (via Homebrew) and Debian/Ubuntu (via apt). Picks up the VAAPI
+  driver stack (`intel-media-va-driver` + `mesa-va-drivers` + `vainfo`)
+  unconditionally so the script works in minimal containers without
+  `pciutils`. NVIDIA's kernel driver is hinted at rather than
+  auto-installed (kernel-module installs need reboots + conflict with
+  Optimus / Tesla / container-host setups). Knobs: `HVAC_SKIP_FFMPEG=1`,
+  `HVAC_ASSUME_YES=1`.
+- **Post-install summary in `install.sh`** — probes
+  `ffmpeg -encoders` for `hevc_nvenc` / `hevc_vaapi` / `hevc_videotoolbox`
+  and reports which are compiled in, so a misconfigured host (e.g.
+  RHEL-clone `ffmpeg-free` without nvenc) is surfaced at install time
+  instead of on first run.
 
 ### Changed
 - **`LdGuard` lifted to a top-level struct** with a `Drop` impl. The
@@ -34,12 +49,21 @@ it becomes the new version section and a fresh `Unreleased` is opened.
 - **`scanner::detect_network_mount` is wired in.** Was dead code
   previously; now emits a one-line warning at scan start when the target
   path is on an NFS / SMB / CIFS mount.
+- **README cleanup.** Dropped the "You also need `ffmpeg`…" line —
+  `install.sh` handles it on supported platforms, and the "GPU
+  required" matrix below still documents what each platform uses.
 
 ### Fixed
 - **Pre-commit hook clarity.** README's Development section describes
   both fmt and clippy steps; the "warn once" wording in the hook itself
   corrected to "warn on every commit" (clippy missing is rare enough
   that we don't bother caching state).
+- **`install.sh` install-fallback precedence.** The previous
+  `install … || cp … && chmod …` parsed as `(install || cp) && chmod`;
+  POSIX `set -e` is suppressed for non-final commands of an AND-OR
+  list, so a `cp` failure did not exit the script and the trailing
+  "Installed hvac" message printed over a missing binary. Now an
+  explicit if / elif / else with `err()` on the fall-through.
 
 ## [5.1.1] — 2026-05-10
 
@@ -83,7 +107,8 @@ it becomes the new version section and a fresh `Unreleased` is opened.
 Initial public releases. See `git log` for individual commits prior to
 the changelog being established.
 
-[Unreleased]: https://github.com/JackDanger/hvac/compare/v5.1.1...HEAD
+[Unreleased]: https://github.com/JackDanger/hvac/compare/v5.2.0...HEAD
+[5.2.0]: https://github.com/JackDanger/hvac/compare/v5.1.1...v5.2.0
 [5.1.1]: https://github.com/JackDanger/hvac/compare/v5.1.0...v5.1.1
 [5.1.0]: https://github.com/JackDanger/hvac/compare/v5.0.0...v5.1.0
 [5.0.0]: https://github.com/JackDanger/hvac/compare/v4.1.0...v5.0.0
