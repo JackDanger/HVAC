@@ -51,20 +51,35 @@ FROM debian:bookworm-slim AS runtime
 
 # ffmpeg                  — the encoders hvac drives.
 # vainfo + libva-drm2     — VAAPI diagnostics + the run-time userland.
-# intel-media-va-driver   — Broadwell+ Intel iGPUs.
+# intel-media-va-driver   — Broadwell+ Intel iGPUs (amd64 only; no arm64
+#                           candidate, so we add it conditionally below).
 # mesa-va-drivers         — older Intel + AMD.
 # ca-certificates         — LaunchDarkly + OTel exporter use HTTPS.
 # tini                    — PID 1, forwards signals so Ctrl-C cancels cleanly
 #                           rather than getting eaten by Docker's default init.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+#
+# TARGETARCH is set automatically by buildx in multi-platform builds. It
+# resolves to "amd64" / "arm64" / etc — the same names apt uses. We gate
+# intel-media-va-driver on amd64 because the package literally does not
+# exist on arm64 (it ships Intel-specific shaders) and an unconditional
+# install bricks the arm64 image build.
+ARG TARGETARCH
+RUN set -eux; \
+    extra=""; \
+    if [ "${TARGETARCH:-amd64}" = "amd64" ]; then \
+        extra="intel-media-va-driver"; \
+    fi; \
+    apt-get update; \
+    # shellcheck disable=SC2086
+    apt-get install -y --no-install-recommends \
         ffmpeg \
         vainfo \
         libva-drm2 \
-        intel-media-va-driver \
         mesa-va-drivers \
         ca-certificates \
         tini \
-    && rm -rf /var/lib/apt/lists/*
+        $extra; \
+    rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /src/target/release/hvac /usr/local/bin/hvac
 
