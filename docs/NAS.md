@@ -34,9 +34,13 @@ generic-Linux pattern of "install ffmpeg, install the driver, install the
 binary" simply isn't reproducible on these appliances.
 
 Docker side-steps all of it: the image bundles the right ffmpeg, the
-right userland driver, and the hvac binary; the NAS only has to expose
-the GPU device node (`/dev/dri` for Intel, `nvidia-container-runtime` for
-NVIDIA) and bind-mount your media path.
+VAAPI userland (Intel + AMD), and the hvac binary; the NAS only has
+to expose `/dev/dri` and bind-mount your media path. NVIDIA is the
+exception — the image deliberately does **not** bundle the NVIDIA
+userspace driver (would bloat to ~2 GB and pin to one CUDA version),
+so NVIDIA hosts inject it via `nvidia-container-toolkit` at runtime
+with `--gpus all`. The Unraid / OMV sections below cover the toolkit
+install.
 
 The container image is published to GHCR by the
 [`docker.yml`](../.github/workflows/docker.yml) workflow on every push

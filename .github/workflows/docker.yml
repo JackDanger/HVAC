@@ -3,9 +3,10 @@ name: Docker
 # Build + publish multi-arch container images to GHCR.
 #
 # - main pushes        → ghcr.io/jackdanger/hvac:main + :latest + :sha-<short>
-# - tag pushes (v*)    → ghcr.io/jackdanger/hvac:<version> + :latest
-# - PRs                → build only (no push), so the Dockerfile doesn't
-#                        rot silently.
+# - tag pushes (v*)    → ghcr.io/jackdanger/hvac:<X.Y.Z> + :<X.Y> + :latest
+# - PRs                → verify-only (no push), so the Dockerfile doesn't
+#                        rot silently. PR build runs in a separate job
+#                        with read-only permissions.
 #
 # `:latest` tracks the newest successful build on main; tag pushes
 # overwrite it with the released version. README + docs/NAS.md +
@@ -101,7 +102,6 @@ jobs:
           images: ghcr.io/jackdanger/hvac
           tags: |
             type=ref,event=branch
-            type=ref,event=pr
             type=sha,prefix=sha-,format=short
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}

@@ -12,6 +12,14 @@ services:
   hvac:
     image: ghcr.io/jackdanger/hvac:latest
     container_name: hvac
+    # The image defaults to UID 1026 / GID 100 (Synology / Unraid / OMV
+    # admin). On a regular Linux host that UID probably doesn't own your
+    # media — uncomment one of these lines to remap:
+    #   user: "1000:1000"                  # typical single-user Linux box
+    #   user: "$UID:$GID"                  # docker compose substitutes from env
+    # (Synology / Unraid users on the default admin account: leave the
+    # image default and skip this.)
+
     # Bind-mount your media. The container side is /media; pass /media as
     # the argument to hvac. Replace /path/to/media with /volume1/video on
     # Synology, /share/Multimedia on QNAP, /mnt/user/media on Unraid, etc.

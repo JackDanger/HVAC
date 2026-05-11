@@ -113,15 +113,23 @@ image with everything pre-wired.
 # Intel iGPU (Broadwell+)
 docker run --rm \
   --device /dev/dri:/dev/dri \
+  --user "$(id -u):$(id -g)" \
   -v /path/to/media:/media \
   ghcr.io/jackdanger/hvac:latest --dry-run /media
 
 # NVIDIA (needs nvidia-container-toolkit on the host)
 docker run --rm \
   --gpus all --runtime=nvidia \
+  --user "$(id -u):$(id -g)" \
   -v /path/to/media:/media \
   ghcr.io/jackdanger/hvac:latest --dry-run /media
 ```
+
+The image ships configured to run as UID 1026 GID 100 — Synology / Unraid
+/ OMV's default admin user. On a regular Linux host that UID probably
+doesn't own your media, so the `--user "$(id -u):$(id -g)"` above
+remaps the container's user to yours; drop the flag if you're on a
+NAS and your admin account already matches 1026:100.
 
 For compose, copy [`compose.example.yml`](compose.example.yml) and edit
 the volume path. The image is built and published to GHCR by the
