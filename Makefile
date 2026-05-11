@@ -14,7 +14,7 @@ clean:
 	$(CARGO) clean
 
 run: build
-	./$(TARGET) --config config.yaml /mnt/media/dumb-tv
+	./$(TARGET) --config config.yaml /mnt/media/tv
 
 check:
 	$(CARGO) clippy -- -D warnings
