@@ -283,8 +283,8 @@ jobs:
   apt-repo:
     needs: build
     runs-on: ubuntu-latest
-    # Skip on forks that haven't configured the signing key.
-    if: ${{ secrets.APT_SIGNING_KEY != '' }}
+    # Skip on forks (they won't have the signing key secret).
+    if: github.repository_owner == 'JackDanger'
     steps:
       - uses: actions/checkout@v4
         with:
