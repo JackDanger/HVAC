@@ -16,7 +16,7 @@ services:
     # admin). On a regular Linux host that UID probably doesn't own your
     # media — uncomment one of these lines to remap:
     #   user: "1000:1000"                  # typical single-user Linux box
-    #   user: "$UID:$GID"                  # docker compose substitutes from env
+    #   user: "${UID}:${GID}"              # substitutes from env; export UID/GID first
     # (Synology / Unraid users on the default admin account: leave the
     # image default and skip this.)
 
