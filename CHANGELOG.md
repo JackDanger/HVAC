@@ -10,6 +10,16 @@ it becomes the new version section and a fresh `Unreleased` is opened.
 
 ## [Unreleased]
 
+## [5.2.1] — 2026-05-12
+
+### Fixed
+- **apt repository now works.** `cargo deb` was silently producing no `.deb`
+  because the `assets` entry hardcoded `target/release/hvac` (the native-build
+  path) instead of letting cargo-deb auto-detect the cross-compiled binary at
+  `target/<target>/release/hvac`. Added `name = "hvac"` to
+  `[package.metadata.deb]` so the output filename matches what the release
+  workflow expects (`hvac_*.deb`).
+
 ### Added
 - **`Dockerfile` + `compose.example.yml`.** Two-stage Debian build with
   ffmpeg + VAAPI userland in the runtime image; non-root user matching
@@ -149,7 +159,8 @@ it becomes the new version section and a fresh `Unreleased` is opened.
 Initial public releases. See `git log` for individual commits prior to
 the changelog being established.
 
-[Unreleased]: https://github.com/JackDanger/hvac/compare/v5.2.0...HEAD
+[Unreleased]: https://github.com/JackDanger/hvac/compare/v5.2.1...HEAD
+[5.2.1]: https://github.com/JackDanger/hvac/compare/v5.2.0...v5.2.1
 [5.2.0]: https://github.com/JackDanger/hvac/compare/v5.1.1...v5.2.0
 [5.1.1]: https://github.com/JackDanger/hvac/compare/v5.1.0...v5.1.1
 [5.1.0]: https://github.com/JackDanger/hvac/compare/v5.0.0...v5.1.0
