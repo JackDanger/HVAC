@@ -160,6 +160,19 @@ jobs:
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
+  # ── apt repo script tests (BATS) ─────────────────────────────────────────
+  #
+  # Runs tests/apt_repo.bats, which exercises update-apt-repo.sh against
+  # real minimal .deb fixtures.  Ubuntu-only: needs apt-ftparchive.
+  apt-repo-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get install -y --no-install-recommends apt-utils bats binutils
+      - name: Run apt repo tests
+        run: bats tests/apt_repo.bats
+
   # ── Publish prompt log to jackdanger.com ─────────────────────────────────
   #
   # Picks up new / modified files under `promptlog/*.md` on push to main
