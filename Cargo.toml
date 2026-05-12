@@ -3,7 +3,7 @@
 # `hvac` crate (a 2018 thermostat controller) holds the short name. The
 # installed binary remains `hvac` — see the [[bin]] section below.
 name = "hvac-transcoder"
-version = "5.2.0"
+version = "5.2.1"
 edition = "2021"
 # Minimum Rust we compile against. The `msrv` CI job re-runs the binary
 # build + tests on exactly this toolchain so silently-newer-Rust feature
@@ -47,6 +47,7 @@ serde_json = "1"
 tempfile = "3"
 
 [package.metadata.deb]
+name = "hvac"
 maintainer = "Jack Danger <jack@jackdanger.com>"
 copyright = "2026, Jack Danger <jack@jackdanger.com>"
 license-file = ["LICENSE", "0"]
@@ -60,7 +61,6 @@ recommends = "vainfo, intel-media-va-driver, mesa-va-drivers"
 section = "video"
 priority = "optional"
 assets = [
-    ["target/release/hvac", "usr/bin/", "755"],
     ["config.yaml", "etc/hvac/config.yaml", "644"],
     ["README.md", "usr/share/doc/hvac/README.md", "644"],
     ["LICENSE", "usr/share/doc/hvac/LICENSE", "644"],
