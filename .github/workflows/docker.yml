@@ -1,0 +1,132 @@
+name: Docker
+
+# Build + publish multi-arch container images to GHCR.
+#
+# - main pushes        → ghcr.io/jackdanger/hvac:main + :latest + :sha-<short>
+# - tag pushes (v*)    → ghcr.io/jackdanger/hvac:<X.Y.Z> + :<X.Y> + :latest
+# - PRs                → verify-only (no push), so the Dockerfile doesn't
+#                        rot silently. PR build runs in a separate job
+#                        with read-only permissions.
+#
+# `:latest` tracks the newest successful build on main; tag pushes
+# overwrite it with the released version. README + docs/NAS.md +
+# compose.example.yml all pull `:latest`, so this is the tag a brand-new
+# Reddit visitor needs to resolve on the day this PR merges (well before
+# the next semver tag lands).
+#
+# The publish path builds linux/amd64 + linux/arm64. The arm64 build
+# matters: most modern Synology / QNAP boxes are aarch64, and so is
+# Apple Silicon for the docker-on-Mac crowd. QEMU emulation is enough
+# for Rust + apt and avoids juggling a self-hosted aarch64 runner. PR
+# verify is amd64-only — see the comment on that job for the rationale.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+    paths:
+      - "Dockerfile"
+      - ".dockerignore"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "src/**"
+      - ".github/workflows/docker.yml"
+
+# Default to read-only at the workflow scope; the publish job below
+# upgrades to packages:write. PR builds run in the verify job, which
+# inherits read-only.
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # PR builds: confirm the Dockerfile still produces a buildable image.
+  # amd64 only — arm64 emulation via QEMU adds ~15min for a marginal
+  # signal (the apt branch is the only platform-conditional thing, and
+  # both branches are visible in the Dockerfile review). The publish
+  # job below catches any arm-specific breakage post-merge before the
+  # image hits GHCR. Never logs into GHCR, never gets packages:write.
+  verify:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # Push builds: main + tag pushes. Distinct job so packages:write only
+  # lives on the path that actually needs it.
+  publish:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute tags + labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          # GHCR lowercases the org/owner segment regardless of how it's
+          # written in the repo URL; using github.repository_owner directly
+          # works as long as it's lowercase. Pinning to a literal here
+          # avoids capitalisation drift between the repo (JackDanger/HVAC)
+          # and the image (jackdanger/hvac).
+          images: ghcr.io/jackdanger/hvac
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=sha-,format=short
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            # :latest tracks main and (later) tag pushes. The default
+            # docker/metadata-action 'latest' tag fires only on the
+            # default branch + on semver tags, which is exactly the
+            # behaviour we want — explicit here so the contract is
+            # visible in the workflow file rather than implicit in the
+            # action's defaults.
+            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || startsWith(github.ref, 'refs/tags/v') }}
+
+      - name: Build + push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # GHA build cache: writes to /tmp; reads from the same on cache
+          # hits. First build is full, subsequent builds within the cache
+          # TTL skip the apt + cargo layers. The verify job also writes
+          # to the same cache so PR builds warm it for the publish run
+          # that follows the merge.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

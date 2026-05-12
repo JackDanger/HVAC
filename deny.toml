@@ -40,6 +40,12 @@ allow = [
     "MPL-2.0",  # weak copyleft; fine for linking
     "Zlib",
     "CC0-1.0",
+    # CDLA-Permissive-2.0 is the Linux Foundation's permissive
+    # data license; webpki-roots 0.26.11+ and 1.0.7 ship the
+    # Mozilla CA bundle under it. SPDX-listed permissive license,
+    # safe for redistribution alongside an MIT binary. Pulled in
+    # transitively via hyper-rustls / rustls — no direct dep.
+    "CDLA-Permissive-2.0",
 ]
 # 0.8 = "at least 80 % confidence the detected license matches a
 # Spec license-id".  Crates that score lower need an explicit

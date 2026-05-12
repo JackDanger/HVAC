@@ -105,18 +105,70 @@ pub fn detect_gpu() -> Result<GpuInfo> {
         log::debug!("Apple GPU found but hevc_videotoolbox not available in ffmpeg");
     }
 
-    bail!(
+    bail!("{}", no_gpu_message())
+}
+
+/// Build the "no GPU found" message, branching on platform context so the
+/// hints point at the right fix instead of dumping the full matrix on
+/// everyone. Kept as a free function for inline tests — the message is
+/// the first impression a brand-new user gets when their setup doesn't
+/// match the README's GPU table, so we'd like to know if it regresses.
+fn no_gpu_message() -> String {
+    let mut msg = String::from(
         "No GPU found for h265 encoding!\n\
          hvac requires one of:\n\
          - NVIDIA GPU with NVENC support (hevc_nvenc)\n\
          - Intel GPU with VAAPI support (hevc_vaapi)\n\
-         - Apple Silicon or Mac with VideoToolbox (hevc_videotoolbox)\n\
-         \n\
-         Check that:\n\
-         1. A supported GPU is installed\n\
-         2. Drivers are loaded (nvidia-smi, vainfo, or macOS)\n\
-         3. ffmpeg is built with the appropriate encoder"
-    )
+         - Apple Silicon or Mac with VideoToolbox (hevc_videotoolbox)\n\n",
+    );
+
+    if cfg!(target_os = "macos") {
+        // On macOS the encoder is built into the OS, so a "no GPU" bail
+        // here almost always means ffmpeg is missing or was built without
+        // VideoToolbox (rare, but `ffmpeg-free` clones exist).
+        msg.push_str(
+            "On macOS, VideoToolbox ships with the OS. This message usually means:\n\
+             - ffmpeg is not installed:  brew install ffmpeg\n\
+             - or a non-default ffmpeg build lacks hevc_videotoolbox; reinstall from Homebrew\n",
+        );
+    } else if running_in_container() {
+        // Containerised runs almost always fail because the device node
+        // wasn't passed through. Point at the exact docker flag.
+        msg.push_str(
+            "Detected a container environment. The GPU device wasn't passed through:\n\
+             - Intel iGPU:   add `--device /dev/dri:/dev/dri` to your docker run\n\
+             - NVIDIA:       add `--gpus all --runtime=nvidia` (needs nvidia-container-toolkit)\n\
+             See https://github.com/JackDanger/hvac/blob/main/docs/NAS.md for the NAS-specific recipes.\n",
+        );
+    } else {
+        msg.push_str(
+            "Check that:\n\
+             1. A supported GPU is installed\n\
+             2. Drivers are loaded — `nvidia-smi` for NVIDIA, `ls /dev/dri && vainfo` for Intel\n\
+             3. ffmpeg is built with the appropriate encoder (`ffmpeg -encoders | grep hevc_`)\n\n\
+             Synology, QNAP, Unraid, OMV, TrueNAS: see\n\
+             https://github.com/JackDanger/hvac/blob/main/docs/NAS.md\n",
+        );
+    }
+    msg
+}
+
+/// Best-effort container detection. Used only to pick which set of hints
+/// to show in the "no GPU" error — false positives just mean a Linux
+/// host user sees the docker hint, which is harmless. False negatives
+/// (real container, undetected) fall through to the generic Linux
+/// hints, which is also fine.
+fn running_in_container() -> bool {
+    // Most container runtimes drop a /.dockerenv or /run/.containerenv
+    // marker at the rootfs. Podman uses the latter; Docker the former.
+    if std::path::Path::new("/.dockerenv").exists()
+        || std::path::Path::new("/run/.containerenv").exists()
+    {
+        return true;
+    }
+    // Kubernetes-style runs sometimes have neither marker but always set
+    // these env vars. Cheap belt-and-braces.
+    std::env::var_os("KUBERNETES_SERVICE_HOST").is_some()
 }
 
 /// Return the maximum number of simultaneous encode sessions this GPU supports.
@@ -303,6 +355,41 @@ mod tests {
         // Match must be case-insensitive — nvidia-smi formatting varies.
         assert!(!nvidia_supports_10bit_hevc("nvidia geforce gtx 970"));
         assert!(!nvidia_supports_10bit_hevc("GEFORCE GTX 1080"));
+    }
+
+    #[test]
+    fn no_gpu_message_mentions_all_three_encoders() {
+        // The body of the error has to keep naming the three encoders
+        // hvac drives — that's the only place a brand-new user sees the
+        // full matrix before going to look up their hardware.
+        let m = no_gpu_message();
+        assert!(m.contains("hevc_nvenc"), "missing nvenc mention: {}", m);
+        assert!(m.contains("hevc_vaapi"), "missing vaapi mention: {}", m);
+        assert!(
+            m.contains("hevc_videotoolbox"),
+            "missing videotoolbox mention: {}",
+            m
+        );
+    }
+
+    #[test]
+    fn no_gpu_message_has_platform_specific_tail() {
+        // The tail of the message branches on platform. We can only assert
+        // on the branch this build was compiled for — the other branches
+        // are validated by readers and CI on each OS.
+        let m = no_gpu_message();
+        if cfg!(target_os = "macos") {
+            assert!(m.contains("brew install ffmpeg"));
+            assert!(m.contains("VideoToolbox"));
+        } else if running_in_container() {
+            // CI normally runs outside a container, so this branch only
+            // fires on container-based runners. Keep the assertion lax.
+            assert!(m.contains("--device /dev/dri") || m.contains("--gpus all"));
+        } else {
+            assert!(m.contains("nvidia-smi"));
+            assert!(m.contains("vainfo"));
+            assert!(m.contains("docs/NAS.md"));
+        }
     }
 
     #[test]
