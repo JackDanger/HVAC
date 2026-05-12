@@ -13,32 +13,44 @@ it becomes the new version section and a fresh `Unreleased` is opened.
 ### Added
 - **`Dockerfile` + `compose.example.yml`.** Two-stage Debian build with
   ffmpeg + VAAPI userland in the runtime image; non-root user matching
-  the typical NAS admin UID/GID so files written back to bind mounts
-  aren't root-owned. Tini as PID 1 forwards SIGINT cleanly through
-  `docker run`.
+  the typical NAS admin UID/GID (1026:100) so files written back to
+  bind mounts aren't root-owned. `intel-media-va-driver` gated on
+  amd64 (no arm64 candidate). Tini as PID 1 forwards SIGINT cleanly
+  through `docker run`.
+- **`.github/workflows/docker.yml`.** Multi-arch (linux/amd64 +
+  linux/arm64) build + publish to `ghcr.io/jackdanger/hvac`. main →
+  `:main` + `:latest` + `:sha-<short>`; tags → `:<X.Y.Z>` + `:<X.Y>` +
+  `:latest`. PR verify runs in a separate, read-only job; only the
+  publish job gets `packages: write`.
 - **`docs/NAS.md`.** Copy-pasteable per-platform instructions for
   Synology DSM (Container Manager + compose), QNAP QTS (Container
-  Station), Unraid (CA + Intel-GPU-TOP / Nvidia-Driver), OpenMediaVault
-  (omv-extras compose plugin), TrueNAS SCALE (apps catalog), TrueNAS
-  CORE (off-box only), plus the NFS/SMB off-box pattern for NAS hosts
-  without a usable GPU.
+  Station), Unraid (Docker → Add Container + Intel-GPU-TOP /
+  Nvidia-Driver plugins), OpenMediaVault (omv-extras compose plugin),
+  TrueNAS SCALE (apps catalog + direct Docker), TrueNAS CORE (off-box
+  only), plus the NFS/SMB off-box pattern for NAS hosts without a
+  usable GPU.
 - **README Docker + Troubleshooting sections.** Docker one-liners for
-  Intel and NVIDIA; FAQ covering the four questions every comment thread
-  asks (no GPU, CPU encoding, will-it-touch-my-files, how-to-stop).
+  Intel and NVIDIA (with `--user "$(id -u):$(id -g)"` for non-NAS
+  hosts); FAQ covering the four questions every comment thread asks
+  (no GPU, CPU encoding, will-it-touch-my-files, how-to-stop).
 
 ### Changed
 - **`install.sh` recognises Synology, QNAP, Unraid, OpenMediaVault, and
   Alpine.** The previous "other Linux" branch named only Arch and
   Fedora; anyone running the one-liner on a NAS hit a dead end. Each
   appliance now gets a specific hint pointing at the actually-supported
-  path (Docker on Synology/QNAP/Unraid, apt+omv-extras on OMV).
+  path (Docker on Synology/QNAP/Unraid, apt+omv-extras on OMV,
+  `apk add` on Alpine).
 - **Platform-aware "No GPU found" error.** Splits into macOS-specific
-  (brew install ffmpeg), container-specific (the exact `--device` /
+  (`brew install ffmpeg`), container-specific (the exact `--device` /
   `--gpus` flag), and generic-Linux branches. Inline tests pin the
   encoder names and the platform branch taken.
 - **Bug-report template** asks how hvac is being run (native / Docker /
   NAS) up front and no longer assumes nvidia-smi is available for the
   GPU question.
+- **`deny.toml` allows CDLA-Permissive-2.0.** `webpki-roots` 0.26.11+
+  and 1.0.7 ship the Mozilla CA bundle under this SPDX-listed
+  permissive license; the deny check fails without it.
 
 ## [5.2.0] — 2026-05-11
 
