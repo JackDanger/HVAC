@@ -74,7 +74,7 @@ jobs:
           sha256sum "$NEW_NAME" > "$NEW_NAME.sha256"
 
       - name: Upload tarball artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
           path: |
@@ -83,7 +83,7 @@ jobs:
 
       - name: Upload .deb artifact
         if: matrix.deb
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}-deb
           path: |
@@ -97,7 +97,7 @@ jobs:
       version: ${{ steps.meta.outputs.version }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
 
@@ -138,7 +138,7 @@ jobs:
     needs: publish
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
 
