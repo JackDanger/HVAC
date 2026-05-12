@@ -14,10 +14,11 @@ name: Docker
 # Reddit visitor needs to resolve on the day this PR merges (well before
 # the next semver tag lands).
 #
-# linux/amd64 + linux/arm64. The arm64 build matters: most modern Synology /
-# QNAP boxes are aarch64, and so is Apple Silicon for the docker-on-Mac
-# crowd. QEMU emulation is enough for Rust + apt and avoids juggling a
-# self-hosted aarch64 runner.
+# The publish path builds linux/amd64 + linux/arm64. The arm64 build
+# matters: most modern Synology / QNAP boxes are aarch64, and so is
+# Apple Silicon for the docker-on-Mac crowd. QEMU emulation is enough
+# for Rust + apt and avoids juggling a self-hosted aarch64 runner. PR
+# verify is amd64-only — see the comment on that job for the rationale.
 
 on:
   push:
@@ -44,9 +45,12 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # PR builds: verify the Dockerfile + .dockerignore still produce a
-  # buildable image on both target platforms, but never log into GHCR
-  # and never get packages:write. Fork PRs can't escalate.
+  # PR builds: confirm the Dockerfile still produces a buildable image.
+  # amd64 only — arm64 emulation via QEMU adds ~15min for a marginal
+  # signal (the apt branch is the only platform-conditional thing, and
+  # both branches are visible in the Dockerfile review). The publish
+  # job below catches any arm-specific breakage post-merge before the
+  # image hits GHCR. Never logs into GHCR, never gets packages:write.
   verify:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
@@ -54,15 +58,13 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
       - name: Build (no push)
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           push: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
