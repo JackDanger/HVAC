@@ -61,7 +61,6 @@ recommends = "vainfo, intel-media-va-driver, mesa-va-drivers"
 section = "video"
 priority = "optional"
 assets = [
-    ["target/release/hvac", "usr/bin/hvac", "755"],
     ["config.yaml", "etc/hvac/config.yaml", "644"],
     ["README.md", "usr/share/doc/hvac/README.md", "644"],
     ["LICENSE", "usr/share/doc/hvac/LICENSE", "644"],
