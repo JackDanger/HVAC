@@ -18,11 +18,35 @@ For everything else there's [Docker](#docker) or the
 
 ## Install
 
+**Debian / Ubuntu**
+
+```bash
+curl -fsSL https://jackdanger.github.io/HVAC/key.gpg \
+  | sudo gpg --dearmor -o /etc/apt/keyrings/hvac.gpg
+echo "deb [signed-by=/etc/apt/keyrings/hvac.gpg] https://jackdanger.github.io/HVAC stable main" \
+  | sudo tee /etc/apt/sources.list.d/hvac.list
+sudo apt update && sudo apt install hvac
+```
+
+Future releases arrive via `sudo apt upgrade`.
+
+**macOS**
+
+```bash
+brew install JackDanger/tap/hvac
+```
+
+Future releases arrive via `brew upgrade hvac`.
+
+**All platforms**
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/JackDanger/hvac/main/install.sh | sh
 ```
 
-Other ways: `brew install JackDanger/tap/hvac` &middot; `cargo install hvac-transcoder` &middot; [`.deb`, AUR, tarballs](https://github.com/JackDanger/hvac/releases) &middot; [Docker](#docker) &middot; [Synology / QNAP / Unraid](docs/NAS.md)
+The script uses Homebrew on macOS and the apt repository on Debian/Ubuntu; other Linux distros and NAS platforms get a pre-built tarball with platform-specific guidance.
+
+Other ways: `cargo install hvac-transcoder` &middot; [AUR](https://aur.archlinux.org/packages/hvac) &middot; [tarballs](https://github.com/JackDanger/hvac/releases) &middot; [Docker](#docker) &middot; [Synology / QNAP / Unraid](docs/NAS.md)
 
 ---
 

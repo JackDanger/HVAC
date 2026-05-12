@@ -1,18 +1,20 @@
 #!/usr/bin/env sh
-# hvac installer — downloads the latest pre-built binary for your platform
-# from https://github.com/JackDanger/hvac/releases and installs it, then
-# installs ffmpeg + the right hardware-accel packages for the host (macOS
-# via Homebrew, Debian/Ubuntu via apt).
+# hvac installer — on Debian/Ubuntu uses the apt repository; on macOS uses
+# Homebrew; everywhere else downloads a pre-built binary tarball from
+# https://github.com/JackDanger/hvac/releases and installs ffmpeg with the
+# right hardware-accel packages for the host.
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/JackDanger/hvac/main/install.sh | sh
 #
 # Environment overrides:
 #   HVAC_VERSION         pin to a specific tag (e.g. v5.1.1); default: latest
-#   HVAC_PREFIX          install dir; default: /usr/local/bin if writable, else $HOME/.local/bin
-#   HVAC_REPO            override owner/name; default: JackDanger/hvac
-#   HVAC_SKIP_FFMPEG     set to 1 to skip ffmpeg / hardware-accel package install
-#   HVAC_ASSUME_YES      set to 1 to skip the apt/brew confirmation prompt
+#   HVAC_PREFIX          install dir for tarball path; default: /usr/local/bin
+#   HVAC_REPO            override GitHub owner/name; default: JackDanger/hvac
+#   HVAC_SKIP_APT        set to 1 to skip the apt repo path on Debian/Ubuntu
+#   HVAC_SKIP_BREW       set to 1 to skip the Homebrew path on macOS
+#   HVAC_SKIP_FFMPEG     set to 1 to skip ffmpeg / hardware-accel install
+#   HVAC_ASSUME_YES      set to 1 to skip all confirmation prompts
 
 set -eu
 
@@ -76,6 +78,24 @@ case "$ARCH" in
     aarch64|arm64)       arch_slug="aarch64" ;;
     *)                   err "unsupported architecture: $ARCH" ;;
 esac
+
+# Prefer native package managers over the tarball where available:
+#   Debian/Ubuntu → apt (our gh-pages repo)
+#   macOS + Homebrew → brew tap
+# Both paths skip the tarball download and get upgrades via the package manager.
+_use_apt=0
+_use_brew=0
+if [ "$OS" = "Linux" ] && [ "${HVAC_SKIP_APT:-0}" != "1" ] && [ -r /etc/os-release ]; then
+    _apt_id=$(. /etc/os-release 2>/dev/null && printf '%s %s' "${ID:-}" "${ID_LIKE:-}")
+    case " $_apt_id " in
+        *" ubuntu "*|*" debian "*|*" openmediavault "*) _use_apt=1 ;;
+    esac
+fi
+if [ "$OS" = "Darwin" ] && [ "${HVAC_SKIP_BREW:-0}" != "1" ] && command -v brew >/dev/null 2>&1; then
+    _use_brew=1
+fi
+
+if [ "$_use_apt" = "0" ] && [ "$_use_brew" = "0" ]; then
 
 # ---- resolve version & target ----------------------------------------------
 
@@ -162,6 +182,8 @@ case ":$PATH:" in
               "$PREFIX" "$PREFIX" ;;
 esac
 
+fi # _use_apt=0 / _use_brew=0
+
 # ---- ffmpeg + hardware acceleration ----------------------------------------
 #
 # hvac requires ffmpeg built with at least one GPU encoder: hevc_nvenc (NVIDIA),
@@ -246,57 +268,65 @@ confirm() {
 }
 
 install_macos() {
-    have_ffmpeg=0
-    command -v ffmpeg >/dev/null 2>&1 && have_ffmpeg=1
-    if [ "$have_ffmpeg" = "1" ]; then
+    # Called from the brew-install block (below) when _use_brew=1, and from
+    # the HVAC_SKIP_FFMPEG block when _use_brew=0 (tarball path, ffmpeg hint).
+    if [ "$_use_brew" = "1" ]; then
+        if brew ls --versions hvac >/dev/null 2>&1; then
+            info "hvac already installed via Homebrew (run 'brew upgrade hvac' to update)"
+        else
+            info "will install via Homebrew: JackDanger/tap/hvac (ffmpeg included as dependency)"
+            if ! confirm "Proceed with 'brew install JackDanger/tap/hvac'?"; then
+                info "skipped; run 'brew install JackDanger/tap/hvac' when ready"
+                return 0
+            fi
+            brew install JackDanger/tap/hvac
+        fi
+        return 0
+    fi
+    # No Homebrew — binary was installed via tarball above; only ffmpeg is missing.
+    if command -v ffmpeg >/dev/null 2>&1; then
         info "ffmpeg already installed; macOS hevc_videotoolbox is built into the OS"
         return 0
     fi
-    if ! command -v brew >/dev/null 2>&1; then
-        info "Homebrew not found; install it from https://brew.sh and re-run, or:"
-        info "  brew install ffmpeg"
-        return 0
-    fi
-    if confirm "Install ffmpeg via 'brew install ffmpeg'?"; then
-        info "running: brew install ffmpeg"
-        brew install ffmpeg
-    else
-        info "skipped ffmpeg install; run 'brew install ffmpeg' when ready"
-    fi
+    info "Homebrew not found. Install it from https://brew.sh, then run:"
+    info "  brew install JackDanger/tap/hvac"
+    info "Or install ffmpeg manually: https://ffmpeg.org/download.html"
 }
 
 install_debian_ubuntu() {
     distro="$1"
+    _hvac_keyring="/etc/apt/keyrings/hvac.gpg"
+    _hvac_source="/etc/apt/sources.list.d/hvac.list"
+    _hvac_apt_url="https://jackdanger.github.io/HVAC"
 
-    # Install ffmpeg + the VAAPI driver stack unconditionally. The drivers
-    # are ~5 MB combined, harmless on hosts without a matching GPU, and
-    # dropping the lspci-based gating means this also works in minimal
-    # containers where pciutils isn't installed. NVIDIA's kernel driver is
-    # *not* auto-installed — reboots + Optimus/Tesla/container-host quirks
-    # make that too invasive to do silently; we hint instead if the device
-    # is present without a driver.
-    #
-    # intel-media-va-driver: Broadwell+ Intel iGPUs.
-    # mesa-va-drivers:       AMD + older Intel (i965, ironlake).
-    # vainfo:                diagnostics + hvac's startup VAAPI probe.
-    pkgs="ffmpeg vainfo intel-media-va-driver mesa-va-drivers"
+    if [ ! -f "$_hvac_keyring" ]; then
+        info "adding hvac apt signing key"
+        as_root mkdir -p /etc/apt/keyrings
+        download "$_hvac_apt_url/key.gpg" - \
+            | as_root gpg --batch --yes --dearmor -o "$_hvac_keyring"
+    fi
 
-    if debs_all_installed $pkgs; then
-        info "ffmpeg + VAAPI drivers already installed (skipping apt)"
+    if [ ! -f "$_hvac_source" ]; then
+        info "adding hvac apt source"
+        printf 'deb [signed-by=%s] %s stable main\n' \
+            "$_hvac_keyring" "$_hvac_apt_url" \
+            | as_root tee "$_hvac_source" > /dev/null
+    fi
+
+    if debs_all_installed hvac; then
+        info "hvac already installed (run 'sudo apt upgrade hvac' to update)"
     else
-        info "will install via apt: $pkgs"
-        if ! confirm "Proceed with 'apt-get install' for the packages above?"; then
-            info "skipped ffmpeg install; re-run with HVAC_ASSUME_YES=1 to auto-confirm"
+        info "will install via apt: hvac (ffmpeg + VAAPI drivers pulled in via dependencies)"
+        if ! confirm "Proceed with 'apt-get install hvac'?"; then
+            info "skipped; re-run with HVAC_ASSUME_YES=1 to auto-confirm"
             return 0
         fi
         as_root env DEBIAN_FRONTEND=noninteractive apt-get update -qq
-        # shellcheck disable=SC2086
-        as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $pkgs
+        as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y hvac
     fi
 
     # Use /dev/nvidia0 (not lspci) so this works in containers that pass the
-    # device through without pciutils. If the device is exposed but the
-    # userland driver isn't visible, point the user at the right package.
+    # device through without pciutils.
     if [ -e /dev/nvidia0 ] && ! command -v nvidia-smi >/dev/null 2>&1; then
         cat <<EOF
 
@@ -403,7 +433,25 @@ install_alpine() {
     as_root apk add --no-cache $pkgs
 }
 
-if [ "${HVAC_SKIP_FFMPEG:-0}" != "1" ]; then
+# ---- install via native package manager (brew / apt) ----------------------
+#
+# These paths install hvac itself and are not gated on HVAC_SKIP_FFMPEG
+# because the package manager handles ffmpeg as a dependency.
+if [ "$_use_brew" = "1" ]; then
+    install_macos
+elif [ "$_use_apt" = "1" ]; then
+    distro=$(detect_linux_distro)
+    case "$distro" in
+        openmediavault) install_omv_hint; install_debian_ubuntu debian ;;
+        *)              install_debian_ubuntu "$distro" ;;
+    esac
+fi
+
+# ---- ffmpeg + hardware acceleration (tarball-path platforms) ---------------
+#
+# For platforms that received hvac via tarball above (non-Debian Linux, macOS
+# without Homebrew), install ffmpeg and any needed GPU driver packages.
+if [ "${HVAC_SKIP_FFMPEG:-0}" != "1" ] && [ "$_use_brew" = "0" ] && [ "$_use_apt" = "0" ]; then
     info "checking ffmpeg + hardware acceleration"
     case "$OS" in
         Darwin)
@@ -412,8 +460,6 @@ if [ "${HVAC_SKIP_FFMPEG:-0}" != "1" ]; then
         Linux)
             distro=$(detect_linux_distro)
             case "$distro" in
-                ubuntu|debian)    install_debian_ubuntu "$distro" ;;
-                openmediavault)   install_omv_hint; install_debian_ubuntu debian ;;
                 alpine)           install_alpine ;;
                 synology)         install_synology_hint ;;
                 qnap)             install_qnap_hint ;;
@@ -444,12 +490,13 @@ probe_hevc_encoders() {
         | paste -sd ',' -
 }
 
-hvac_version=$("$PREFIX/hvac" --version 2>/dev/null || printf 'hvac')
+_hvac_bin=$(command -v hvac 2>/dev/null || printf '%s/hvac' "${PREFIX:-/usr/local/bin}")
+hvac_version=$("$_hvac_bin" --version 2>/dev/null || printf 'hvac')
 ffmpeg_version=$(ffmpeg -version 2>/dev/null | awk 'NR==1 {print $1" "$3}')
 encoders=$(probe_hevc_encoders)
 
 printf '\n'
-info "$hvac_version installed at $PREFIX/hvac"
+info "$hvac_version installed at $_hvac_bin"
 if [ -n "$ffmpeg_version" ]; then
     if [ -n "$encoders" ]; then
         info "$ffmpeg_version — HEVC encoders available: $encoders"

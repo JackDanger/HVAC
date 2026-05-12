@@ -56,6 +56,7 @@ HEVC/h265 using GPU acceleration (NVIDIA NVENC, Intel VAAPI, or Apple
 VideoToolbox). Smart-skip avoids re-encoding files that already meet the
 target codec/resolution/bitrate."""
 depends = "libc6, ffmpeg"
+recommends = "vainfo, intel-media-va-driver, mesa-va-drivers"
 section = "video"
 priority = "optional"
 assets = [

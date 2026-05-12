@@ -52,9 +52,12 @@ jobs:
 
       - name: Package tarball
         run: |
-          cd target/${{ matrix.target }}/release
-          tar czf ../../../${{ matrix.name }}.tar.gz hvac
-          cd ../../..
+          # Copy the binary alongside config.yaml so Homebrew's etc.install
+          # finds it; having config.yaml in the tarball is harmless for other
+          # install paths.
+          cp target/${{ matrix.target }}/release/hvac .
+          tar czf ${{ matrix.name }}.tar.gz hvac config.yaml
+          rm hvac
           sha256sum ${{ matrix.name }}.tar.gz > ${{ matrix.name }}.tar.gz.sha256
 
       - name: Install cargo-deb
@@ -157,30 +160,30 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           TAG="${GITHUB_REF_NAME}"
 
-          cat > hvac.rb << FORMULA
+          cat > hvac.rb << 'FORMULA'
           class Hvac < Formula
             desc "GPU-accelerated media transcoder (HEVC/h265 via NVENC, VAAPI, VideoToolbox)"
             homepage "https://github.com/JackDanger/hvac"
-            version "${VERSION}"
+            version "VERSION_PLACEHOLDER"
             license "MIT"
 
             on_macos do
               if Hardware::CPU.arm?
-                url "https://github.com/JackDanger/hvac/releases/download/${TAG}/hvac-macos-aarch64.tar.gz"
-                sha256 "${{ steps.sha.outputs.macos_aarch64 }}"
+                url "MACOS_AARCH64_URL"
+                sha256 "MACOS_AARCH64_SHA"
               else
-                url "https://github.com/JackDanger/hvac/releases/download/${TAG}/hvac-macos-x86_64.tar.gz"
-                sha256 "${{ steps.sha.outputs.macos_x86_64 }}"
+                url "MACOS_X86_64_URL"
+                sha256 "MACOS_X86_64_SHA"
               end
             end
 
             on_linux do
               if Hardware::CPU.arm?
-                url "https://github.com/JackDanger/hvac/releases/download/${TAG}/hvac-linux-aarch64.tar.gz"
-                sha256 "${{ steps.sha.outputs.linux_aarch64 }}"
+                url "LINUX_AARCH64_URL"
+                sha256 "LINUX_AARCH64_SHA"
               else
-                url "https://github.com/JackDanger/hvac/releases/download/${TAG}/hvac-linux-x86_64.tar.gz"
-                sha256 "${{ steps.sha.outputs.linux_x86_64 }}"
+                url "LINUX_X86_64_URL"
+                sha256 "LINUX_X86_64_SHA"
               end
             end
 
@@ -188,16 +191,39 @@ jobs:
 
             def install
               bin.install "hvac"
+              etc.install "config.yaml" => "hvac/config.yaml"
+            end
+
+            def caveats
+              <<~EOS
+                hvac requires a GPU with hardware HEVC encoding:
+                  macOS:  Apple VideoToolbox (built into all Apple Silicon and recent Intel Macs)
+                  Linux:  NVIDIA NVENC (hevc_nvenc) or Intel/AMD VAAPI (hevc_vaapi)
+
+                A starter config was installed to:
+                  #{etc}/hvac/config.yaml
+
+                Run `hvac --dry-run /path/to/videos` to preview what would be transcoded.
+              EOS
             end
 
             test do
-              assert_match "hvac", shell_output("#{bin}/hvac --help")
+              assert_match version.to_s, shell_output("#{bin}/hvac --version")
             end
           end
           FORMULA
 
-          # Remove leading whitespace from heredoc
+          # Remove leading whitespace from heredoc, then substitute real values.
           sed -i 's/^          //' hvac.rb
+          sed -i "s/VERSION_PLACEHOLDER/${VERSION}/" hvac.rb
+          sed -i "s|MACOS_AARCH64_URL|https://github.com/JackDanger/hvac/releases/download/${TAG}/hvac-macos-aarch64.tar.gz|" hvac.rb
+          sed -i "s/MACOS_AARCH64_SHA/${{ steps.sha.outputs.macos_aarch64 }}/" hvac.rb
+          sed -i "s|MACOS_X86_64_URL|https://github.com/JackDanger/hvac/releases/download/${TAG}/hvac-macos-x86_64.tar.gz|" hvac.rb
+          sed -i "s/MACOS_X86_64_SHA/${{ steps.sha.outputs.macos_x86_64 }}/" hvac.rb
+          sed -i "s|LINUX_AARCH64_URL|https://github.com/JackDanger/hvac/releases/download/${TAG}/hvac-linux-aarch64.tar.gz|" hvac.rb
+          sed -i "s/LINUX_AARCH64_SHA/${{ steps.sha.outputs.linux_aarch64 }}/" hvac.rb
+          sed -i "s|LINUX_X86_64_URL|https://github.com/JackDanger/hvac/releases/download/${TAG}/hvac-linux-x86_64.tar.gz|" hvac.rb
+          sed -i "s/LINUX_X86_64_SHA/${{ steps.sha.outputs.linux_x86_64 }}/" hvac.rb
 
           # Push to homebrew-tap repo
           git clone "https://x-access-token:${GH_TOKEN}@github.com/JackDanger/homebrew-tap.git"
@@ -232,3 +258,67 @@ jobs:
           commit_message: "Release v${{ needs.publish.outputs.version }}"
           ssh_keyscan_types: rsa,ecdsa,ed25519
           updpkgsums: true
+
+  # ── apt repository on GitHub Pages ───────────────────────────────────────
+  #
+  # One-time setup required before the first release:
+  #   1. Generate a signing key:
+  #        gpg --batch --gen-key <<EOF
+  #        Key-Type: RSA
+  #        Key-Length: 4096
+  #        Name-Real: hvac apt repository
+  #        Name-Email: jack@jackdanger.com
+  #        Expire-Date: 0
+  #        %no-protection
+  #        EOF
+  #   2. Export and add to repo secrets:
+  #        gpg --armor --export-secret-keys <KEY_ID> → secret APT_SIGNING_KEY
+  #   3. In repo Settings → Pages, set Source to "Deploy from a branch"
+  #      and select the gh-pages branch (created automatically on first run).
+  apt-repo:
+    needs: build
+    runs-on: ubuntu-latest
+    # Skip on forks that haven't configured the signing key.
+    if: ${{ secrets.APT_SIGNING_KEY != '' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: "*-deb"
+          merge-multiple: true
+          path: incoming/
+
+      - name: Install apt-utils
+        run: sudo apt-get install -y --no-install-recommends apt-utils
+
+      - name: Import GPG signing key
+        run: |
+          echo "${{ secrets.APT_SIGNING_KEY }}" | gpg --batch --import
+          KEY_ID=$(gpg --list-secret-keys --with-colons | awk -F: '/^sec:/ { print $5; exit }')
+          gpg --armor --export "$KEY_ID" > key.gpg
+
+      - name: Set up gh-pages worktree
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if git show-ref --verify --quiet refs/remotes/origin/gh-pages; then
+            git worktree add -B gh-pages apt-repo origin/gh-pages
+          else
+            git worktree add --orphan -b gh-pages apt-repo
+            touch apt-repo/.nojekyll
+          fi
+          cp key.gpg apt-repo/key.gpg
+
+      - name: Update apt repository
+        run: bash scripts/update-apt-repo.sh incoming/ apt-repo/
+
+      - name: Commit and push
+        run: |
+          cd apt-repo
+          git add -A
+          git diff --staged --quiet && exit 0
+          git commit -m "apt: add hvac ${{ github.ref_name }}"
+          git push origin gh-pages
