@@ -26,11 +26,31 @@ A Rust CLI tool that scans media directories and transcodes video files to highl
 - FFmpeg invocation with hevc_nvenc (nvidia) or hevc_vaapi (intel) encoder
 - ISO/IMG handling: isomage lists contents -> extracts media to temp dir -> probe/transcode as normal
 
+## Git Workflow
+
+All development — including Claude-assisted changes — must follow this workflow:
+
+1. **Never commit to main directly.** The main worktree is read-only for development.
+2. **Create a worktree + branch** for every task:
+   ```
+   git worktree add ../hvac-<slug> <branch-name>
+   ```
+3. **Make all changes inside the worktree**, not in the primary checkout.
+4. **Open a PR** when the work is ready. The worktree can be removed after the PR merges:
+   ```
+   git worktree remove ../hvac-<slug>
+   git branch -d <branch-name>
+   ```
+
+This applies to Claude too: when asked to implement anything, Claude must create a new worktree + branch first, work there, and open a PR.
+
 ## Development Workflow
-1. Edit code locally
-2. Run `./deploy.sh` to scp and build on remote host
-3. Run `./deploy.sh test` to run tests on remote host
-4. Run `./deploy.sh run -- [args]` to run the binary on remote host
+1. Create a worktree + branch (see Git Workflow above)
+2. Edit code inside the worktree
+3. Run `./deploy.sh` to scp and build on remote host
+4. Run `./deploy.sh test` to run tests on remote host
+5. Run `./deploy.sh run -- [args]` to run the binary on remote host
+6. Open a PR; remove the worktree after merge
 
 ## Remote Host Info
 - Debian 12 (bookworm), Linux 6.8
