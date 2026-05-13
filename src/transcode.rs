@@ -491,6 +491,10 @@ pub fn transcode(
 /// after a copy-incompatible codec is detected.
 /// `subtitle_codec_override`, when `Some(codec)`, replaces the configured
 /// subtitle codec — used as a retry tier between `copy` and dropping subs.
+/// `primary_audio_index`, when `Some(N)`, selects exactly one audio stream
+/// (`-map 0:a:N`) instead of mapping every track. Used for disc images,
+/// where leaving `-map 0:a?` can silently produce a commentary-only output
+/// when ffmpeg's stream detection only catches one audio PID off the pipe.
 #[allow(clippy::too_many_arguments)]
 pub fn transcode_iso(
     iso_path: &Path,
@@ -507,11 +511,22 @@ pub fn transcode_iso(
     skip_subs: bool,
     force_reencode_audio: bool,
     subtitle_codec_override: Option<&str>,
+    primary_audio_index: Option<u32>,
 ) -> Result<PathBuf> {
     let final_output = output.to_path_buf();
 
     let mut cmd = Command::new("ffmpeg");
     cmd.args(["-hide_banner", "-y"]);
+
+    // Piped MPEG-TS / m2ts hides audio PIDs from the default 5MB / 5s probe
+    // window; bump both so ffmpeg sees every audio stream and our
+    // `-map 0:a:N` selector points at the track we actually intended.
+    cmd.args([
+        "-probesize",
+        probe::PIPE_PROBESIZE,
+        "-analyzeduration",
+        probe::PIPE_ANALYZEDURATION,
+    ]);
 
     // Input from stdin
     cmd.args(["-i", "pipe:0"]);
@@ -578,9 +593,10 @@ pub fn transcode_iso(
     // Subtitles
     apply_subtitle_args(&mut cmd, target, skip_subs, subtitle_codec_override);
 
-    // Map streams
+    // Map streams. The audio map is explicit for disc-image inputs (see
+    // `apply_iso_audio_map`).
     cmd.args(["-map", "0:v:0"]);
-    cmd.args(["-map", "0:a?"]);
+    apply_iso_audio_map(&mut cmd, primary_audio_index);
     if !skip_subs {
         cmd.args(["-map", "0:s?"]);
     }
@@ -594,7 +610,10 @@ pub fn transcode_iso(
     cmd.arg(&final_output);
 
     log::debug!(
-        "Running (piped from ISO{}{}{}): {:?}",
+        "Running (piped from ISO, audio=0:a:{}{}{}{}): {:?}",
+        primary_audio_index
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "0?".to_string()),
         if skip_subs { ", no subs" } else { "" },
         if force_reencode_audio {
             ", audio re-encode"
@@ -816,6 +835,29 @@ pub fn subtitle_reencode_fallback(container: &str) -> &'static str {
         "mp4" | "m4v" | "mov" => "mov_text",
         // mkv, webm, and anything else: srt is the most broadly compatible text codec.
         _ => "srt",
+    }
+}
+
+/// Append the audio `-map` argument for an ISO transcode.
+///
+/// Disc-image inputs are read from a stdin pipe; ffmpeg's default
+/// probesize / analyzeduration miss audio PIDs on Blu-ray m2ts, so an
+/// implicit `-map 0:a?` can silently end up with the commentary as the
+/// sole output track. We always pick exactly one audio stream:
+///
+///   - `Some(n)` from `probe::pick_primary_audio` → `-map 0:a:N`
+///   - `None` (caller couldn't decide) → `-map 0:a:0?` (first audio,
+///     `?` so silent-video discs still encode rather than erroring on
+///     a missing stream).
+fn apply_iso_audio_map(cmd: &mut Command, primary_audio_index: Option<u32>) {
+    match primary_audio_index {
+        Some(n) => {
+            let map = format!("0:a:{}", n);
+            cmd.args(["-map", &map]);
+        }
+        None => {
+            cmd.args(["-map", "0:a:0?"]);
+        }
     }
 }
 
@@ -1282,6 +1324,58 @@ Conversion failed!
         assert!(!args.iter().any(|a| a == "-c:s"));
     }
 
+    // ── ISO audio mapping ────────────────────────────────────────────────────
+    //
+    // The whole point of the disc-image audio plumbing is that we never emit
+    // `-map 0:a?` for piped Blu-ray / DVD input. These tests pin the wire
+    // format so a future refactor can't quietly regress to mapping every PID.
+
+    #[test]
+    fn test_apply_iso_audio_map_with_primary_index() {
+        let mut cmd = Command::new("ffmpeg");
+        apply_iso_audio_map(&mut cmd, Some(2));
+        let args = cmd_args(&cmd);
+        let pos = args
+            .iter()
+            .position(|a| a == "-map")
+            .expect("must emit a -map");
+        assert_eq!(args[pos + 1], "0:a:2");
+        // Exactly one -map (we never want to also emit 0:a? as a "fallback").
+        assert_eq!(args.iter().filter(|a| *a == "-map").count(), 1);
+    }
+
+    #[test]
+    fn test_apply_iso_audio_map_without_primary_falls_back_to_first() {
+        // No probed audio stream → first audio with `?` so a silent-video
+        // disc still encodes instead of erroring on the missing stream.
+        let mut cmd = Command::new("ffmpeg");
+        apply_iso_audio_map(&mut cmd, None);
+        let args = cmd_args(&cmd);
+        let pos = args
+            .iter()
+            .position(|a| a == "-map")
+            .expect("must emit a -map");
+        assert_eq!(args[pos + 1], "0:a:0?");
+    }
+
+    #[test]
+    fn test_apply_iso_audio_map_never_emits_open_match() {
+        // The regression we're guarding against: `-map 0:a?` would pull in
+        // every audio PID, including commentary. Neither branch must emit it.
+        let mut cmd_some = Command::new("ffmpeg");
+        apply_iso_audio_map(&mut cmd_some, Some(0));
+        let mut cmd_none = Command::new("ffmpeg");
+        apply_iso_audio_map(&mut cmd_none, None);
+        for cmd in [&cmd_some, &cmd_none] {
+            let args = cmd_args(cmd);
+            assert!(
+                !args.iter().any(|a| a == "0:a?"),
+                "apply_iso_audio_map must never emit `0:a?`: {:?}",
+                args
+            );
+        }
+    }
+
     // ── Color metadata arg-building tests ────────────────────────────────────
     //
     // build_color_args is the single source of truth for which ffmpeg flags get
@@ -1382,6 +1476,7 @@ Conversion failed!
             pix_fmt: "yuv420p10le".to_string(),
             has_audio: false,
             has_subtitles: false,
+            audio_streams: vec![],
             color_primaries: Some("bt2020".to_string()),
             color_transfer: Some("smpte2084".to_string()),
             color_space: Some("bt2020nc".to_string()),

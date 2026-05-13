@@ -573,6 +573,7 @@ fn run_one_encode(
             state.skip_subs,
             state.force_reencode_audio,
             state.subtitle_reencode_attempt,
+            item.primary_audio_index,
         )
     } else {
         transcode::transcode(
