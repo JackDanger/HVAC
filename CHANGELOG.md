@@ -10,6 +10,18 @@ it becomes the new version section and a fresh `Unreleased` is opened.
 
 ## [Unreleased]
 
+## [5.2.4] — 2026-05-13
+
+### Fixed
+- **.deb package again contains the `hvac` binary.** When an explicit `assets`
+  list is present, cargo-deb disables auto-detection entirely (it only runs when
+  `assets` is omitted). Previous attempts either hardcoded `target/release/hvac`
+  (which breaks cross-compiled builds) or removed the entry expecting auto-
+  detection to kick in (which it doesn't). The fix is the explicit `["$auto"]`
+  sentinel entry, which restores cargo-deb's built-in binary detection — correct
+  target-triple path handling included — while preserving the custom asset
+  entries for config, README, and LICENSE.
+
 ## [5.2.1] — 2026-05-12
 
 ### Fixed
