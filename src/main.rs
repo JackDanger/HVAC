@@ -82,6 +82,10 @@ fn main() -> Result<()> {
     let stdout_is_pipe = unsafe { libc::isatty(libc::STDOUT_FILENO) == 0 };
     let max_name = max_name_for_cols(terminal_cols());
 
+    // Detect GPU before loading config so a broken ffmpeg / missing GPU
+    // bails immediately — no config banner for a non-starter failure.
+    let gpu = gpu::detect_gpu()?;
+
     let cfg = match &cli.config {
         Some(p) => config::Config::load(p)
             .with_context(|| format!("Failed to load config from {:?}", p))?,
@@ -93,7 +97,6 @@ fn main() -> Result<()> {
         }
     };
 
-    let gpu = gpu::detect_gpu()?;
     eprintln!("GPU: {} ({})", gpu.name, gpu.encoder);
     if !gpu.supports_10bit_hevc {
         eprintln!(
