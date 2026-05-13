@@ -10,7 +10,7 @@ it becomes the new version section and a fresh `Unreleased` is opened.
 
 ## [Unreleased]
 
-## [5.2.4] — 2026-05-13
+## [5.2.5] — 2026-05-13
 
 ### Fixed
 - **.deb package again contains the `hvac` binary.** When an explicit `assets`
