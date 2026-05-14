@@ -426,6 +426,13 @@ fn probe_first_frame_side_data(path: &Path, timeout: Duration) -> Result<Ffprobe
             .lines()
             .rfind(|l| !l.trim().is_empty())
             .map(|s| s.to_string())
+            .or_else(|| {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                stdout
+                    .lines()
+                    .rfind(|l| !l.trim().is_empty())
+                    .map(|s| s.to_string())
+            })
             .unwrap_or_else(|| format_exit_status(output.status));
         bail!("ffprobe (frames) failed for {:?}: {}", path, err_msg);
     }
@@ -880,6 +887,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_exit_status_message_on_signal() {
         // A process killed by a signal (SIGKILL = 9) must show the signal
