@@ -10,6 +10,61 @@ it becomes the new version section and a fresh `Unreleased` is opened.
 
 ## [Unreleased]
 
+## [5.4.0] — 2026-05-14
+
+### Added
+- **Primary-audio selection for disc images.** ISO/IMG transcodes used to
+  emit `-map 0:a?` (every detected audio stream), which on real-world
+  Blu-rays meant the commentary track sometimes won — ffmpeg's default
+  `probesize`/`analyzeduration` (5MB/5s) often missed the primary audio
+  PID on a piped m2ts. `pick_primary_audio` now reads every audio
+  stream's channels / bitrate / disposition / language, drops commentary
+  by disposition flag or title keyword, and picks the highest-channel
+  highest-bitrate non-commentary stream. Year-aware: for films released
+  pre-1955 (`Movie (1933).iso`) the heuristic flips to **fewer** channels
+  to prefer the original mono mix over a later remaster. ISO ffprobe +
+  ffmpeg now pass `-probesize 100M -analyzeduration 100M` so all audio
+  PIDs surface.
+- **`--skip-ambiguous-audio` / `skip_ambiguous_audio:` config key.** When
+  the top-two candidates tie on channels AND bitrate, or when commentary
+  filtering wipes the entire pool, the disc is flagged ambiguous. The
+  CLI flag (or config setting) skips it; absent both, hvac picks one and
+  emits a `WARN` so the audit trail exists.
+- **GPU / ffmpeg diagnostics with actionable error messages.** When
+  `hvac` exits because ffmpeg can't load (missing soname, custom build
+  vs. system package, broken driver, encoder not compiled in), the
+  message now identifies the failure mode and prints the exact next
+  command — `rm /usr/local/bin/ffmpeg`, `apt-get install -y libdav1d6`,
+  `brew reinstall ffmpeg`, etc. Cross-soname symlinks are never
+  suggested (soname bumps signal ABI changes; symlinking across them
+  silently corrupts decoding).
+
+## [5.3.0] — 2026-05-14
+
+### Fixed
+- **Spurious "NFS timeout" skips during ffprobe.** `wait_with_timeout`
+  polled `try_wait()` without draining the child's stdout/stderr pipes.
+  When ffprobe output exceeded the 64 KB kernel pipe buffer (e.g. an
+  87 KB JSON for a 4K HDR `.mkv` with 17 chapters), the child blocked
+  on write, the poll loop never saw it exit, and the 30s watchdog
+  reported "the source filesystem may be unresponsive" on healthy
+  files. Background reader threads now drain both pipes so the watchdog
+  fires only on real hangs.
+- **Frame side-data probe lacked a timeout.** `probe_first_frame_side_data`
+  used `.output()` with no watchdog, so a genuinely unresponsive NFS
+  mount would hang it forever.
+- **GPU startup probes lacked timeouts.** `detect_nvidia`,
+  `has_ffmpeg_encoder`, and `detect_apple_chip_name` used `.output()` —
+  a crashed driver or broken ffmpeg install would hang the process at
+  startup with no error. All three now go through a 10s-default
+  `run_output_with_timeout` watchdog that kills the child on expiry
+  (no leaked subprocesses).
+- **curl API calls had no network timeout.** `api_get` / `api_post` in
+  setup.rs could hang forever on an unresponsive endpoint. Added `-m 30`.
+- **Opaque "unknown error"** when a subprocess exits non-zero with no
+  output. Now reports `exit code N (no output)` or
+  `killed by signal N (SIGNAME) (no output)`.
+
 ## [5.2.5] — 2026-05-13
 
 ### Fixed

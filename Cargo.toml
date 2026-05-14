@@ -3,7 +3,7 @@
 # `hvac` crate (a 2018 thermostat controller) holds the short name. The
 # installed binary remains `hvac` — see the [[bin]] section below.
 name = "hvac-transcoder"
-version = "5.3.0"
+version = "5.4.0"
 edition = "2021"
 # Minimum Rust we compile against. The `msrv` CI job re-runs the binary
 # build + tests on exactly this toolchain so silently-newer-Rust feature
