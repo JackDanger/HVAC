@@ -140,7 +140,7 @@ fn owning_package(path: &str) -> Option<String> {
     if let Ok(out) = Command::new("dpkg").args(["-S", path]).output() {
         if out.status.success() {
             let s = String::from_utf8_lossy(&out.stdout);
-            if let Some(pkg) = s.splitn(2, ':').next() {
+            if let Some(pkg) = s.split(':').next() {
                 let pkg = pkg.trim();
                 if !pkg.is_empty() {
                     return Some(pkg.to_string());
@@ -302,8 +302,8 @@ fn ffmpeg_broken_message(
     // Strip the binary path prefix and the boilerplate "error while loading..." so
     // we show just the library name and reason: "libfoo.so.N: cannot open...".
     let short_error = error
-        .splitn(2, ": ")
-        .nth(1)
+        .split_once(": ")
+        .map(|x| x.1)
         .map(|s| {
             s.strip_prefix("error while loading shared libraries: ")
                 .unwrap_or(s)
