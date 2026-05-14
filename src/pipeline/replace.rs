@@ -107,6 +107,7 @@ mod tests {
             inner_path: None,
             inner_paths: None,
             title_suffix: None,
+            primary_audio_index: None,
         }
     }
 

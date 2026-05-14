@@ -73,6 +73,51 @@ encodes leave a `.hvac_tmp_*` file that the next run sweeps.
 
 ---
 
+## Disc images (.iso / .img)
+
+When the input is a Blu-ray or DVD image, hvac analyses the disc structure,
+picks the main feature (largest m2ts run for Blu-ray, largest VTS for DVD;
+multi-title DVDs become one output per title), and pipes the streams into
+ffmpeg without ever extracting to a temp directory.
+
+A disc usually carries several audio tracks — the primary mix, a commentary,
+sometimes a dub or audio description. hvac selects **exactly one** as the
+output audio. The picker (see `pick_primary_audio` in `src/probe.rs`):
+
+1. Drops tracks flagged as commentary (by `disposition.comment` or by title
+   keyword — "Commentary", "Director's", "Audio description", etc.).
+2. Among what's left, prefers the track with the most channels (a 5.1
+   surround mix beats a 2-channel commentary on any modern release).
+3. Tiebreaks on bitrate, then the muxer's `default` flag, then stream index.
+
+**Year-aware flip.** When the disc image filename carries a release year
+earlier than 1955 — pre-stereo cinema — the channel preference inverts: a
+1-channel mono original beats a 2-channel commentary. The year is parsed
+from the filename (`The Maltese Falcon (1941).iso`, `Movie.Title.1933.iso`),
+falling back to non-commentary track titles when the filename is opaque
+(e.g. a raw `BDMV_DISC.iso`).
+
+**Ambiguous selections.** Some discs have a genuine coin flip — two AC3
+2.0 192k tracks on a DVD with no disposition flag set, or every track
+flagged as commentary. By default hvac picks one anyway and logs a
+`WARN`. To skip those discs instead, opt in:
+
+```bash
+hvac --skip-ambiguous-audio /path/to/movies
+```
+
+or, persistently, in `config.yaml`:
+
+```yaml
+skip_ambiguous_audio: true
+```
+
+Either source enables it (CLI on **or** config on → skip). Skipped discs
+print one line each to stderr with the reason so you can review them by
+hand.
+
+---
+
 ## Does it actually save space?
 
 Real numbers from one library — public domain films, full bitrate range from pristine remuxes to lo-fi early transfers:

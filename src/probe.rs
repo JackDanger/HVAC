@@ -11,6 +11,15 @@ use crate::config::TargetConfig;
 /// stale NFS / unresponsive SMB mount fails fast instead of hanging the run.
 pub const DEFAULT_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Bytes ffprobe / ffmpeg may read from a piped stream before deciding the
+/// stream list is final. Defaults (5MB / 5s) miss audio PIDs on Blu-ray
+/// m2ts piped from stdin; 100MB sees every track on every disc we've fed it.
+/// Kept as `&str` because both tools take the value on the command line.
+pub const PIPE_PROBESIZE: &str = "100M";
+/// Microseconds of stream time ffprobe / ffmpeg may inspect before locking
+/// in the stream list — same reason as `PIPE_PROBESIZE`.
+pub const PIPE_ANALYZEDURATION: &str = "100M";
+
 /// Poll interval for the watchdog loop. 50ms keeps wakeups cheap while
 /// imposing < 100ms latency on top of the actual ffprobe runtime.
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -119,6 +128,13 @@ pub struct MediaInfo {
     pub pix_fmt: String,
     pub has_audio: bool,
     pub has_subtitles: bool,
+    /// Per-audio-stream metadata used by `pick_primary_audio` to choose which
+    /// track to map when the caller wants a single audio stream (disc-image
+    /// inputs, where leaving `-map 0:a?` can pick up the commentary track if
+    /// it happens to be the first PID seen in the probe window).
+    /// Sorted by audio-stream index ascending; `index` is the value passed to
+    /// ffmpeg's `-map 0:a:N` selector.
+    pub audio_streams: Vec<AudioStreamInfo>,
     /// HDR / color metadata. All optional — only emitted to ffmpeg when the
     /// source actually carries them. Without these flags, ffmpeg drops the
     /// tags and players show washed-out / wrong-gamma output for HDR sources.
@@ -133,6 +149,27 @@ pub struct MediaInfo {
     /// HDR10 max content + frame-average light level, formatted for
     /// ffmpeg's `-max_cll` as `max_cll,max_fall`.
     pub max_cll: Option<String>,
+}
+
+/// One audio stream's metadata, harvested from ffprobe `-show_streams`.
+/// `index` is the audio-stream index (0 = first audio stream) — the value
+/// you pass to ffmpeg's `-map 0:a:N`, NOT the absolute stream index.
+#[derive(Debug, Clone, Default)]
+#[allow(dead_code)]
+pub struct AudioStreamInfo {
+    pub index: u32,
+    pub codec: String,
+    pub channels: u32,
+    pub bitrate_kbps: u32,
+    pub language: Option<String>,
+    pub title: Option<String>,
+    /// True when the source flags this as the default playback track.
+    pub disposition_default: bool,
+    /// True when the source flags this as a commentary track.
+    /// Many Blu-rays don't set this even for obvious commentaries —
+    /// the title-keyword heuristic in `pick_primary_audio` is what
+    /// catches the rest.
+    pub disposition_comment: bool,
 }
 
 #[derive(Deserialize)]
@@ -154,15 +191,43 @@ struct FfprobeStream {
     color_space: Option<String>,
     color_range: Option<String>,
     #[serde(default)]
+    channels: Option<u32>,
+    /// ffprobe surfaces an audio stream's nominal bitrate here when the
+    /// container records it; for MPEG-TS / m2ts piped over stdin this is
+    /// usually present even though the format-level bitrate is `N/A`.
+    #[serde(default)]
+    bit_rate: Option<String>,
+    #[serde(default)]
     side_data_list: Option<Vec<FfprobeSideData>>,
     #[serde(default)]
     tags: Option<FfprobeTags>,
+    #[serde(default)]
+    disposition: Option<FfprobeDisposition>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 struct FfprobeTags {
     #[serde(rename = "BPS")]
     bps: Option<String>,
+    /// ISO 639-2 language code (`eng`, `fra`, `jpn`, …). Carried by most
+    /// disc-image audio streams.
+    #[serde(default)]
+    language: Option<String>,
+    /// Free-form track title set by the muxer (e.g. "Director's Commentary").
+    /// Bears no consistent capitalisation — match case-insensitively.
+    #[serde(default)]
+    title: Option<String>,
+}
+
+/// ffprobe's `disposition` object — a bag of 0/1 ints flagging the stream's
+/// role. We only consume `default` and `comment` here; the rest are not yet
+/// relevant to any audio-selection heuristic.
+#[derive(Deserialize, Default)]
+struct FfprobeDisposition {
+    #[serde(default)]
+    default: u8,
+    #[serde(default)]
+    comment: u8,
 }
 
 #[derive(Deserialize)]
@@ -344,10 +409,19 @@ pub fn probe_iso_file_with_timeout(
     inner_path: &str,
     timeout: Duration,
 ) -> Result<MediaInfo> {
+    // Bigger probesize/analyzeduration than the ffprobe defaults so that piped
+    // MPEG-TS / m2ts inputs surface every audio PID (commentary, dub, etc.).
+    // Without this, ffprobe-from-stdin frequently sees only the first audio
+    // PID whose packets land in the probe window — that's how a commentary
+    // track ends up looking like the only audio stream on the disc.
     let mut child = Command::new("ffprobe")
         .args([
             "-v",
             "error",
+            "-probesize",
+            PIPE_PROBESIZE,
+            "-analyzeduration",
+            PIPE_ANALYZEDURATION,
             "-print_format",
             "json",
             "-show_streams",
@@ -593,10 +667,38 @@ fn parse_ffprobe_json(json: &[u8]) -> Result<MediaInfo> {
         .and_then(|d| d.parse::<f64>().ok())
         .unwrap_or(0.0);
 
-    let has_audio = probe
+    // Build the per-audio-stream list. Enumerate gives us each stream's
+    // *audio-relative* index (the N in `-map 0:a:N`), independent of the
+    // absolute stream order which also counts video and subtitle streams.
+    let audio_streams: Vec<AudioStreamInfo> = probe
         .streams
         .iter()
-        .any(|s| s.codec_type.as_deref() == Some("audio"));
+        .filter(|s| s.codec_type.as_deref() == Some("audio"))
+        .enumerate()
+        .map(|(i, s)| AudioStreamInfo {
+            index: i as u32,
+            codec: s
+                .codec_name
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string()),
+            channels: s.channels.unwrap_or(0),
+            bitrate_kbps: stream_bitrate_kbps(s),
+            language: s.tags.as_ref().and_then(|t| t.language.clone()),
+            title: s.tags.as_ref().and_then(|t| t.title.clone()),
+            disposition_default: s
+                .disposition
+                .as_ref()
+                .map(|d| d.default != 0)
+                .unwrap_or(false),
+            disposition_comment: s
+                .disposition
+                .as_ref()
+                .map(|d| d.comment != 0)
+                .unwrap_or(false),
+        })
+        .collect();
+
+    let has_audio = !audio_streams.is_empty();
 
     let has_subtitles = probe
         .streams
@@ -644,7 +746,27 @@ fn parse_ffprobe_json(json: &[u8]) -> Result<MediaInfo> {
         color_range,
         master_display,
         max_cll,
+        audio_streams,
     })
+}
+
+/// Pick a per-stream bitrate (kbps) from either `stream.tags.BPS` (Matroska's
+/// `BPS` tag — present on most ripped mkv files) or `stream.bit_rate` (set by
+/// most other containers including MPEG-TS / m2ts). Returns 0 when neither
+/// is recorded.
+fn stream_bitrate_kbps(s: &FfprobeStream) -> u32 {
+    s.tags
+        .as_ref()
+        .and_then(|t| t.bps.as_ref())
+        .and_then(|b| b.parse::<u64>().ok())
+        .map(|b| (b / 1000) as u32)
+        .or_else(|| {
+            s.bit_rate
+                .as_ref()
+                .and_then(|b| b.parse::<u64>().ok())
+                .map(|b| (b / 1000) as u32)
+        })
+        .unwrap_or(0)
 }
 
 /// Filter ffprobe's color tags: drop `None`, `"unknown"`, and empty strings.
@@ -689,6 +811,219 @@ pub fn is_10bit(pix_fmt: &str) -> bool {
         || pix_fmt == "p010"
         || pix_fmt == "p010le"
         || pix_fmt == "p010be"
+}
+
+/// Find a 4-digit year in `text`, returning the first match in the range
+/// 1900..=2099 that's bordered by non-digit characters (so we don't read
+/// `1080p` as year 1080 or `4k25fps` as year 4k25 — neither would actually
+/// match the range, but the digit-boundary check is what keeps us from
+/// pulling "2003" out of "20031234").
+pub fn parse_year(text: &str) -> Option<u16> {
+    let bytes = text.as_bytes();
+    if bytes.len() < 4 {
+        return None;
+    }
+    for i in 0..=bytes.len() - 4 {
+        // Boundary: previous byte must be absent or non-digit.
+        if i > 0 && bytes[i - 1].is_ascii_digit() {
+            continue;
+        }
+        // Boundary: byte after the 4-digit run must be absent or non-digit.
+        if i + 4 < bytes.len() && bytes[i + 4].is_ascii_digit() {
+            continue;
+        }
+        if !bytes[i..i + 4].iter().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        // SAFETY: the slice is verified ASCII-digit, hence valid UTF-8.
+        let s = std::str::from_utf8(&bytes[i..i + 4]).unwrap();
+        if let Ok(y) = s.parse::<u16>() {
+            if (1900..=2099).contains(&y) {
+                return Some(y);
+            }
+        }
+    }
+    None
+}
+
+/// Best-effort year for a disc image. Filename is the primary signal; if
+/// that fails, scan audio-stream titles but skip ones that look like
+/// commentary (those years tend to be the commentary's recording date, not
+/// the film's release year).
+pub fn year_hint_for(filename: &str, audio_streams: &[AudioStreamInfo]) -> Option<u16> {
+    if let Some(y) = parse_year(filename) {
+        return Some(y);
+    }
+    audio_streams
+        .iter()
+        .filter(|s| !looks_like_commentary(s))
+        .filter_map(|s| s.title.as_deref().and_then(parse_year))
+        .min()
+}
+
+/// True when the stream's metadata identifies it as a commentary track.
+/// Pre-1992 era discs almost never set `disposition.comment` even on
+/// obvious commentaries, so a title-keyword sweep covers the gap.
+fn looks_like_commentary(stream: &AudioStreamInfo) -> bool {
+    if stream.disposition_comment {
+        return true;
+    }
+    let Some(title) = stream.title.as_deref() else {
+        return false;
+    };
+    let lower = title.to_lowercase();
+    // Word-ish boundaries (' ', tab, punctuation, line ends) flanking each
+    // keyword. `contains` alone would false-positive on names like
+    // "Documentary" — but in practice we only see this on commentary tracks
+    // and the alternatives ("doc", "narration") would also be supplementary
+    // tracks the user doesn't want as their singular audio. We err toward
+    // matching too broadly here since the fallback path still keeps these
+    // streams in the candidate pool if everything looks like commentary.
+    let keywords = [
+        "commentary",
+        "director's",
+        "directors comment",
+        "cast and crew",
+        "with director",
+        "audio description",
+        "descriptive audio",
+        "isolated score",
+    ];
+    keywords.iter().any(|k| lower.contains(k))
+}
+
+/// Outcome of `pick_primary_audio`. `index` is the N for `-map 0:a:N`.
+/// `ambiguous` flags the cases where we don't have a confident decision
+/// — the caller may want to skip the disc rather than gamble (see
+/// `--skip-ambiguous-audio` / `skip_ambiguous_audio` in the config).
+/// `reason`, when present, is a one-line human-readable note about why
+/// the selection was ambiguous (suitable for stderr / logs).
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct AudioSelection {
+    pub index: u32,
+    pub ambiguous: bool,
+    pub reason: Option<String>,
+}
+
+/// Pick the audio stream most likely to be the film's primary track.
+///
+/// Returns `Some(AudioSelection)`; `None` only for sources with no audio.
+///
+/// Ranking, in priority order:
+///
+/// 1. Drop streams that look like commentary (disposition flag or title
+///    keyword). If that empties the candidate pool, fall back to the full
+///    list — better to encode "best of the commentaries" than no audio.
+/// 2. Channel-count score — year-aware:
+///       - If a release year is known and earlier than 1955, prefer FEWER
+///         channels. Pre-stereo films are mono originals; the commentary
+///         on those discs is virtually always the stereo track.
+///       - Otherwise prefer MORE channels (the modern surround-mix-is-primary
+///         expectation that holds for everything 1955+).
+/// 3. Higher bitrate wins (DTS-HD MA / TrueHD vs ~192 kbps AC3 commentary).
+/// 4. `disposition.default == 1` wins.
+/// 5. Lowest audio-stream index wins (final deterministic tiebreaker).
+///
+/// Ambiguity (the `ambiguous` field) fires when:
+///   - the commentary filter wiped the candidate pool out (fallback path), or
+///   - the top two candidates tie on the meaningful signals (channels AND
+///     bitrate) — i.e. the winner was decided only by the `disposition`
+///     flag or stream index. That's the classic two-AC3-tracks-on-a-DVD
+///     case: primary English 2.0 192k and director's commentary 2.0 192k
+///     with no disposition flag set, and nothing in the title to give it
+///     away. We pick one, but the user may prefer to skip the disc.
+pub fn pick_primary_audio(
+    streams: &[AudioStreamInfo],
+    year_hint: Option<u16>,
+) -> Option<AudioSelection> {
+    if streams.is_empty() {
+        return None;
+    }
+    if streams.len() == 1 {
+        return Some(AudioSelection {
+            index: streams[0].index,
+            ambiguous: false,
+            reason: None,
+        });
+    }
+
+    // Pool: streams that don't look like commentary. Fall back to all
+    // streams if filtering would leave nothing — and remember that we did,
+    // because the fallback path is inherently ambiguous (we're choosing
+    // among tracks we just classified as commentary).
+    let non_comm: Vec<&AudioStreamInfo> = streams
+        .iter()
+        .filter(|s| !looks_like_commentary(s))
+        .collect();
+    let used_fallback = non_comm.is_empty();
+    let pool: Vec<&AudioStreamInfo> = if used_fallback {
+        streams.iter().collect()
+    } else {
+        non_comm
+    };
+
+    let prefer_fewer = year_hint.map(|y| y < 1955).unwrap_or(false);
+
+    // One comparator, used both to find the winner and to find the
+    // runner-up so we can detect a coin-flip top-2.
+    let cmp = |a: &&AudioStreamInfo, b: &&AudioStreamInfo| -> std::cmp::Ordering {
+        let chan_a = if prefer_fewer {
+            -(a.channels as i64)
+        } else {
+            a.channels as i64
+        };
+        let chan_b = if prefer_fewer {
+            -(b.channels as i64)
+        } else {
+            b.channels as i64
+        };
+        chan_a
+            .cmp(&chan_b)
+            .then_with(|| a.bitrate_kbps.cmp(&b.bitrate_kbps))
+            .then_with(|| a.disposition_default.cmp(&b.disposition_default))
+            // Lower index wins → invert the comparator.
+            .then_with(|| b.index.cmp(&a.index))
+    };
+
+    let winner = *pool.iter().max_by(|a, b| cmp(a, b)).unwrap();
+
+    // Runner-up: best of the pool minus the winner. We compare channels
+    // and bitrate explicitly — those are the "did we really decide?"
+    // signals. Equal on both means the only thing that distinguished the
+    // two was the disposition or the stream index, which is a coin flip.
+    let runner_up = pool
+        .iter()
+        .copied()
+        .filter(|s| s.index != winner.index)
+        .max_by(|a, b| cmp(a, b));
+
+    let runner_up_tied = runner_up
+        .map(|s| s.channels == winner.channels && s.bitrate_kbps == winner.bitrate_kbps)
+        .unwrap_or(false);
+
+    let (ambiguous, reason) = if used_fallback {
+        (
+            true,
+            Some(
+                "every audio track is flagged as commentary; picked the best of a poor pool"
+                    .to_string(),
+            ),
+        )
+    } else if runner_up_tied {
+        (
+            true,
+            Some("top two audio tracks tie on channel count and bitrate".to_string()),
+        )
+    } else {
+        (false, None)
+    };
+
+    Some(AudioSelection {
+        index: winner.index,
+        ambiguous,
+        reason,
+    })
 }
 
 #[cfg(test)]
@@ -1192,5 +1527,364 @@ mod tests {
         assert_eq!(rational_to_50000("1/0"), None);
         assert_eq!(rational_to_10000("40000000/10000"), Some(40000000));
         assert_eq!(rational_to_10000("1/10000"), Some(1));
+    }
+
+    // ── Year parsing ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_year_paren_form() {
+        assert_eq!(parse_year("The Maltese Falcon (1941).iso"), Some(1941));
+        assert_eq!(parse_year("Movie Title (2003) [1080p].mkv"), Some(2003));
+    }
+
+    #[test]
+    fn test_parse_year_dot_form() {
+        assert_eq!(parse_year("Movie.Title.1933.iso"), Some(1933));
+        assert_eq!(parse_year("Movie.Title.1933.BluRay.iso"), Some(1933));
+    }
+
+    #[test]
+    fn test_parse_year_returns_first_match() {
+        // First in-range hit wins; later matches (e.g. encode-year stamps)
+        // are ignored.
+        assert_eq!(parse_year("Movie 1965 - rerelease 2020.iso"), Some(1965));
+    }
+
+    #[test]
+    fn test_parse_year_ignores_non_year_numbers() {
+        // 1080 / 4096 are out of range; 1080p has a trailing 'p' so the
+        // 4-digit run starts at '1', and 1080 < 1900 → rejected.
+        assert_eq!(parse_year("Movie.1080p.HEVC.iso"), None);
+        assert_eq!(parse_year("Movie.4096.iso"), None);
+    }
+
+    #[test]
+    fn test_parse_year_requires_digit_boundary() {
+        // "20031234" must not be parsed as 2003 — the trailing digits
+        // mean this isn't a standalone year.
+        assert_eq!(parse_year("Movie20031234.iso"), None);
+        // Leading-adjacent-digit case (rare but possible).
+        assert_eq!(parse_year("foo120030.iso"), None);
+    }
+
+    #[test]
+    fn test_parse_year_out_of_range() {
+        // 1899 and earlier are pre-cinema; 2100+ is beyond what we trust.
+        assert_eq!(parse_year("Movie.1899.iso"), None);
+        assert_eq!(parse_year("Movie.2100.iso"), None);
+    }
+
+    #[test]
+    fn test_parse_year_no_match() {
+        assert_eq!(parse_year("MOVIE_DISC.iso"), None);
+        assert_eq!(parse_year(""), None);
+        assert_eq!(parse_year("abc"), None);
+    }
+
+    #[test]
+    fn test_year_hint_prefers_filename() {
+        let streams = vec![AudioStreamInfo {
+            index: 1,
+            title: Some("Commentary recorded 2005".to_string()),
+            ..AudioStreamInfo::default()
+        }];
+        // Filename year (1941) wins over the 2005 in a track title.
+        assert_eq!(year_hint_for("Movie (1941).iso", &streams), Some(1941));
+    }
+
+    #[test]
+    fn test_year_hint_falls_back_to_titles() {
+        let streams = vec![
+            AudioStreamInfo {
+                index: 0,
+                title: Some("Original 1933 mono".to_string()),
+                ..AudioStreamInfo::default()
+            },
+            AudioStreamInfo {
+                index: 1,
+                title: Some("Commentary 2005".to_string()),
+                disposition_comment: true,
+                ..AudioStreamInfo::default()
+            },
+        ];
+        // Filename has no year → titles. Commentary title is skipped, so
+        // we get 1933 (the original track's year) rather than 2005.
+        assert_eq!(year_hint_for("DISC_VOLUME.iso", &streams), Some(1933));
+    }
+
+    #[test]
+    fn test_year_hint_none_when_nothing_known() {
+        let streams = vec![AudioStreamInfo {
+            index: 0,
+            ..AudioStreamInfo::default()
+        }];
+        assert_eq!(year_hint_for("DISC.iso", &streams), None);
+    }
+
+    // ── Audio-stream parsing from ffprobe JSON ───────────────────────────────
+
+    #[test]
+    fn test_parse_audio_streams_basic() {
+        // Two audio streams (main 5.1 + stereo commentary) on top of a
+        // single video stream. `index` on each audio entry must be the
+        // audio-relative index, not the absolute stream index (so the
+        // first audio stream is index 0 even though it's stream #1).
+        let json = br#"{
+            "streams": [
+                {
+                    "codec_name": "hevc",
+                    "codec_type": "video",
+                    "width": 1920,
+                    "height": 1080,
+                    "pix_fmt": "yuv420p"
+                },
+                {
+                    "codec_name": "dts",
+                    "codec_type": "audio",
+                    "channels": 6,
+                    "bit_rate": "1509000",
+                    "tags": {"language": "eng", "title": "DTS-HD MA 5.1"},
+                    "disposition": {"default": 1, "comment": 0}
+                },
+                {
+                    "codec_name": "ac3",
+                    "codec_type": "audio",
+                    "channels": 2,
+                    "bit_rate": "192000",
+                    "tags": {"language": "eng", "title": "Director's Commentary"},
+                    "disposition": {"default": 0, "comment": 1}
+                }
+            ]
+        }"#;
+        let info = parse_ffprobe_json(json).unwrap();
+        assert!(info.has_audio);
+        assert_eq!(info.audio_streams.len(), 2);
+
+        let main = &info.audio_streams[0];
+        assert_eq!(main.index, 0);
+        assert_eq!(main.codec, "dts");
+        assert_eq!(main.channels, 6);
+        assert_eq!(main.bitrate_kbps, 1509);
+        assert_eq!(main.language.as_deref(), Some("eng"));
+        assert_eq!(main.title.as_deref(), Some("DTS-HD MA 5.1"));
+        assert!(main.disposition_default);
+        assert!(!main.disposition_comment);
+
+        let comm = &info.audio_streams[1];
+        assert_eq!(comm.index, 1);
+        assert_eq!(comm.channels, 2);
+        assert!(comm.disposition_comment);
+    }
+
+    #[test]
+    fn test_parse_audio_streams_no_audio() {
+        let json = br#"{
+            "streams": [
+                {"codec_name": "hevc", "codec_type": "video", "width": 1920, "height": 1080, "pix_fmt": "yuv420p"}
+            ]
+        }"#;
+        let info = parse_ffprobe_json(json).unwrap();
+        assert!(!info.has_audio);
+        assert!(info.audio_streams.is_empty());
+    }
+
+    // ── pick_primary_audio ───────────────────────────────────────────────────
+    //
+    // Each test builds a tiny set of streams and asserts the rule it pins.
+    // The constructor helper keeps each scenario readable.
+
+    fn audio(index: u32, channels: u32, bitrate_kbps: u32) -> AudioStreamInfo {
+        AudioStreamInfo {
+            index,
+            codec: "ac3".to_string(),
+            channels,
+            bitrate_kbps,
+            ..AudioStreamInfo::default()
+        }
+    }
+
+    /// Shorthand: only assert on the chosen index. Most of the older
+    /// tests don't care about ambiguity, so this keeps them concise.
+    fn pick_index(streams: &[AudioStreamInfo], year: Option<u16>) -> Option<u32> {
+        pick_primary_audio(streams, year).map(|s| s.index)
+    }
+
+    #[test]
+    fn test_pick_primary_none_for_empty() {
+        assert!(pick_primary_audio(&[], None).is_none());
+        assert!(pick_primary_audio(&[], Some(1995)).is_none());
+    }
+
+    #[test]
+    fn test_pick_primary_single_stream() {
+        let streams = vec![audio(0, 2, 192)];
+        let sel = pick_primary_audio(&streams, None).expect("must select");
+        assert_eq!(sel.index, 0);
+        assert!(!sel.ambiguous, "single-stream selection is never ambiguous");
+    }
+
+    #[test]
+    fn test_pick_primary_modern_prefers_more_channels() {
+        // Classic modern release: 5.1 main + 2ch commentary, no disposition flag.
+        let streams = vec![audio(0, 6, 1509), audio(1, 2, 192)];
+        assert_eq!(pick_index(&streams, Some(2010)), Some(0));
+        // No year hint → also "more channels".
+        assert_eq!(pick_index(&streams, None), Some(0));
+    }
+
+    #[test]
+    fn test_pick_primary_skips_disposition_commentary() {
+        // Even with more channels, a disposition.comment-flagged stream is
+        // demoted out of the candidate pool.
+        let mut streams = vec![audio(0, 6, 1509), audio(1, 2, 192)];
+        streams[0].disposition_comment = true; // claim the 5.1 is "commentary"
+        assert_eq!(pick_index(&streams, Some(2010)), Some(1));
+    }
+
+    #[test]
+    fn test_pick_primary_skips_title_keyword_commentary() {
+        let mut streams = vec![audio(0, 6, 1509), audio(1, 2, 192)];
+        streams[0].title = Some("Director's Commentary".to_string());
+        assert_eq!(pick_index(&streams, Some(2010)), Some(1));
+    }
+
+    #[test]
+    fn test_pick_primary_old_film_prefers_fewer_channels() {
+        // The 1933 case the user called out: mono original (1ch) + stereo
+        // commentary (2ch). Without the year flip we'd pick the commentary.
+        let streams = vec![audio(0, 1, 192), audio(1, 2, 192)];
+        assert_eq!(pick_index(&streams, Some(1933)), Some(0));
+        // Sanity: same input with a modern year → commentary wins on channels.
+        assert_eq!(pick_index(&streams, Some(2010)), Some(1));
+    }
+
+    #[test]
+    fn test_pick_primary_old_film_keyword_commentary_still_skipped() {
+        // 1933 disc whose commentary IS flagged via title. Even if both
+        // were stereo (channel-count-tied) the keyword filter still
+        // removes the commentary from the pool.
+        let mut streams = vec![audio(0, 2, 256), audio(1, 2, 192)];
+        streams[1].title = Some("Commentary by the director".to_string());
+        assert_eq!(pick_index(&streams, Some(1933)), Some(0));
+    }
+
+    #[test]
+    fn test_pick_primary_falls_back_when_everything_looks_like_commentary() {
+        // Pathological input — every track is flagged commentary. The pool
+        // would be empty; the fallback path picks across all streams
+        // instead of returning None.
+        let mut streams = vec![audio(0, 6, 1509), audio(1, 2, 192)];
+        streams[0].disposition_comment = true;
+        streams[1].disposition_comment = true;
+        // Modern era → more channels wins out of the full pool.
+        assert_eq!(pick_index(&streams, Some(2010)), Some(0));
+    }
+
+    #[test]
+    fn test_pick_primary_bitrate_breaks_channel_tie() {
+        // Two stereo English tracks; the dub is lower bitrate.
+        let streams = vec![audio(0, 2, 256), audio(1, 2, 192)];
+        assert_eq!(pick_index(&streams, Some(1970)), Some(0));
+    }
+
+    #[test]
+    fn test_pick_primary_default_flag_breaks_bitrate_tie() {
+        let mut streams = vec![audio(0, 2, 192), audio(1, 2, 192)];
+        streams[1].disposition_default = true;
+        assert_eq!(pick_index(&streams, None), Some(1));
+    }
+
+    #[test]
+    fn test_pick_primary_lower_index_breaks_all_other_ties() {
+        // All equal → first audio stream by index.
+        let streams = vec![audio(0, 2, 192), audio(1, 2, 192)];
+        assert_eq!(pick_index(&streams, None), Some(0));
+    }
+
+    // ── Ambiguity detection ──────────────────────────────────────────────────
+    //
+    // The whole point of the `ambiguous` flag is to give --skip-ambiguous-audio
+    // a deterministic signal for "this disc deserves a human eyeball". Two
+    // categories qualify: (1) commentary-filter fallback, where every track
+    // was flagged as commentary; (2) the top-2 candidates tie on the only
+    // signals that actually distinguish a primary track from a commentary
+    // track (channels and bitrate).
+
+    #[test]
+    fn test_pick_primary_unambiguous_when_channels_decide() {
+        let streams = vec![audio(0, 6, 1509), audio(1, 2, 192)];
+        let sel = pick_primary_audio(&streams, Some(2010)).unwrap();
+        assert_eq!(sel.index, 0);
+        assert!(
+            !sel.ambiguous,
+            "5.1 vs 2.0 is a decisive channel-count win; not ambiguous: {:?}",
+            sel.reason
+        );
+    }
+
+    #[test]
+    fn test_pick_primary_unambiguous_when_bitrate_decides() {
+        let streams = vec![audio(0, 2, 256), audio(1, 2, 192)];
+        let sel = pick_primary_audio(&streams, Some(1970)).unwrap();
+        assert_eq!(sel.index, 0);
+        assert!(!sel.ambiguous, "256 vs 192 kbps is decisive; not ambiguous");
+    }
+
+    #[test]
+    fn test_pick_primary_ambiguous_when_top_two_tie_on_channels_and_bitrate() {
+        // The classic two-AC3-tracks-on-a-DVD case: primary 2.0 192k +
+        // commentary 2.0 192k, neither flagged. We pick one (by index),
+        // but the user should be able to opt into skipping the disc.
+        let streams = vec![audio(0, 2, 192), audio(1, 2, 192)];
+        let sel = pick_primary_audio(&streams, None).unwrap();
+        assert_eq!(sel.index, 0);
+        assert!(
+            sel.ambiguous,
+            "channels-tied + bitrate-tied must be ambiguous"
+        );
+        assert!(sel.reason.is_some(), "ambiguous selections carry a reason");
+    }
+
+    #[test]
+    fn test_pick_primary_ambiguous_when_commentary_filter_wipes_pool() {
+        // Every track flagged commentary → we used the fallback pool.
+        // Even if one stream has decisively more channels, the situation
+        // is still "we are choosing among streams we just called commentary".
+        let mut streams = vec![audio(0, 6, 1509), audio(1, 2, 192)];
+        streams[0].disposition_comment = true;
+        streams[1].disposition_comment = true;
+        let sel = pick_primary_audio(&streams, Some(2010)).unwrap();
+        assert_eq!(sel.index, 0);
+        assert!(sel.ambiguous);
+        let reason = sel.reason.as_deref().unwrap_or("");
+        assert!(
+            reason.contains("commentary"),
+            "fallback reason should mention commentary: {}",
+            reason
+        );
+    }
+
+    #[test]
+    fn test_pick_primary_unambiguous_for_old_film_year_flip() {
+        // Year-flip case (1933 mono + 1933 stereo commentary): channels
+        // differ, so the year-aware rule decisively picks the mono.
+        // Not ambiguous — the year hint added confidence, didn't remove it.
+        let streams = vec![audio(0, 1, 192), audio(1, 2, 192)];
+        let sel = pick_primary_audio(&streams, Some(1933)).unwrap();
+        assert_eq!(sel.index, 0);
+        assert!(!sel.ambiguous);
+    }
+
+    #[test]
+    fn test_looks_like_commentary_title_keywords() {
+        let mut s = AudioStreamInfo::default();
+        s.title = Some("Audio description".to_string());
+        assert!(looks_like_commentary(&s));
+        s.title = Some("ISOLATED SCORE".to_string());
+        assert!(looks_like_commentary(&s));
+        s.title = Some("English 5.1".to_string());
+        assert!(!looks_like_commentary(&s));
+        s.title = None;
+        assert!(!looks_like_commentary(&s));
     }
 }

@@ -61,6 +61,16 @@ pub struct Cli {
     #[arg(long, default_value_t = 30)]
     pub probe_timeout: u64,
 
+    /// Skip disc images (.iso / .img) where the primary audio track can't be
+    /// chosen with confidence — e.g. two tracks tied on channel count and
+    /// bitrate, or every track flagged as commentary. Defaults off; safe to
+    /// enable on libraries where you'd rather hand-investigate the few
+    /// ambiguous discs than risk encoding a commentary track. Logically
+    /// ORs with the `skip_ambiguous_audio` config key (CLI on or config on
+    /// → skip).
+    #[arg(long, default_value_t = false)]
+    pub skip_ambiguous_audio: bool,
+
     /// LaunchDarkly SDK key for runtime feature-flag control (pause, kill-switch,
     /// parallel-job throttle). Omit to disable remote control entirely.
     ///
@@ -123,6 +133,18 @@ mod tests {
     fn probe_timeout_default_is_30() {
         let cli = Cli::try_parse_from(["hvac", "/some/path"]).unwrap();
         assert_eq!(cli.probe_timeout, 30);
+    }
+
+    #[test]
+    fn skip_ambiguous_audio_default_is_false() {
+        let cli = Cli::try_parse_from(["hvac", "/some/path"]).unwrap();
+        assert!(!cli.skip_ambiguous_audio);
+    }
+
+    #[test]
+    fn skip_ambiguous_audio_flag_sets_true() {
+        let cli = Cli::try_parse_from(["hvac", "--skip-ambiguous-audio", "/some/path"]).unwrap();
+        assert!(cli.skip_ambiguous_audio);
     }
 
     #[test]

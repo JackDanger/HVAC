@@ -179,6 +179,51 @@ fn classify_item(
     }
 
     let color = transcode::ColorMetadata::from_media_info(&info);
+    // For ISO/disc items, select the primary audio stream now so the worker
+    // can pass `-map 0:a:N` to ffmpeg. Regular files get None (ffmpeg maps all).
+    //
+    // Year hint comes from the bare filename, not the full path — a parent
+    // directory like `/movies/2003-collection/` would otherwise be picked
+    // up as the film's year and clobber a "(1941)" in the actual filename.
+    //
+    // When the selection is ambiguous AND the user opted into skipping
+    // (`--skip-ambiguous-audio` on the CLI or `skip_ambiguous_audio: true`
+    // in the config), bail on the disc with a clear reason. Otherwise we
+    // still encode but emit a warning so an audit log can catch the
+    // judgment calls after the fact.
+    let primary_audio_index = if item.iso_path.is_some() {
+        let filename = item
+            .file
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let year = probe::year_hint_for(&filename, &info.audio_streams);
+        let selection = probe::pick_primary_audio(&info.audio_streams, year);
+        let strict = cli.skip_ambiguous_audio || cfg.skip_ambiguous_audio;
+        match selection {
+            Some(sel) if sel.ambiguous && strict => {
+                return Outcome::Skip(format!(
+                    "skip: {}: ambiguous primary audio ({})",
+                    item.file.display(),
+                    sel.reason.as_deref().unwrap_or("no clear primary track"),
+                ));
+            }
+            Some(sel) => {
+                if sel.ambiguous {
+                    log::warn!(
+                        "{}: ambiguous primary audio selection (chose a:{}, {})",
+                        item.file.display(),
+                        sel.index,
+                        sel.reason.as_deref().unwrap_or("?"),
+                    );
+                }
+                Some(sel.index)
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
     Outcome::Transcode(Box::new(WorkItem {
         path: item.file.clone(),
         bitrate_kbps,
@@ -190,6 +235,7 @@ fn classify_item(
         inner_path: item.inner_path.clone(),
         inner_paths: item.inner_paths.clone(),
         title_suffix: item.title_suffix.clone(),
+        primary_audio_index,
     }))
 }
 

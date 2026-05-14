@@ -9,6 +9,11 @@ pub struct Config {
     pub target: TargetConfig,
     pub media_extensions: Vec<String>,
     pub output_dir: Option<PathBuf>,
+    /// When true, skip disc images whose primary audio stream can't be
+    /// chosen with confidence. The CLI `--skip-ambiguous-audio` flag
+    /// `OR`s with this — turning either on enables skipping. See
+    /// `probe::pick_primary_audio` for the ambiguity definition.
+    pub skip_ambiguous_audio: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -61,6 +66,7 @@ fn parse_config(yaml: &str) -> Result<Config> {
     let mut subtitle_codec = String::from("copy");
     let mut media_extensions: Vec<String> = Vec::new();
     let mut output_dir: Option<PathBuf> = None;
+    let mut skip_ambiguous_audio = false;
 
     for (i, line) in yaml.lines().enumerate() {
         let lineno = i + 1;
@@ -83,6 +89,11 @@ fn parse_config(yaml: &str) -> Result<Config> {
                 } else {
                     Some(PathBuf::from(val))
                 };
+                section = Section::None;
+            } else if let Some(val) = trimmed.strip_prefix("skip_ambiguous_audio:") {
+                skip_ambiguous_audio = parse_bool(val.trim()).with_context(|| {
+                    format!("line {lineno}: skip_ambiguous_audio must be true or false")
+                })?;
                 section = Section::None;
             } else {
                 section = Section::None;
@@ -160,7 +171,19 @@ fn parse_config(yaml: &str) -> Result<Config> {
         },
         media_extensions,
         output_dir,
+        skip_ambiguous_audio,
     })
+}
+
+/// Parse a YAML scalar bool. Accepts the usual lowercase forms; rejects
+/// everything else so a typo (`yes`, `on`, `1`) doesn't silently coerce
+/// to the wrong value. Lets us emit a helpful line-numbered error.
+fn parse_bool(s: &str) -> Result<bool> {
+    match s {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        other => anyhow::bail!("expected 'true' or 'false', got {:?}", other),
+    }
 }
 
 #[cfg(test)]
@@ -257,6 +280,65 @@ media_extensions:
         let result = parse_config(yaml);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("target.codec"));
+    }
+
+    #[test]
+    fn test_skip_ambiguous_audio_default_false() {
+        let yaml = r#"
+target:
+  codec: hevc
+media_extensions:
+  - mkv
+"#;
+        let config = parse_config(yaml).unwrap();
+        assert!(!config.skip_ambiguous_audio);
+    }
+
+    #[test]
+    fn test_skip_ambiguous_audio_true() {
+        let yaml = r#"
+target:
+  codec: hevc
+media_extensions:
+  - mkv
+skip_ambiguous_audio: true
+"#;
+        let config = parse_config(yaml).unwrap();
+        assert!(config.skip_ambiguous_audio);
+    }
+
+    #[test]
+    fn test_skip_ambiguous_audio_false_is_explicit() {
+        let yaml = r#"
+target:
+  codec: hevc
+media_extensions:
+  - mkv
+skip_ambiguous_audio: false
+"#;
+        let config = parse_config(yaml).unwrap();
+        assert!(!config.skip_ambiguous_audio);
+    }
+
+    #[test]
+    fn test_skip_ambiguous_audio_typo_is_an_error() {
+        // Reject ambiguous-bool spellings so a `yes` typo doesn't silently
+        // disable skipping.
+        let yaml = r#"
+target:
+  codec: hevc
+media_extensions:
+  - mkv
+skip_ambiguous_audio: yes
+"#;
+        let result = parse_config(yaml);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("skip_ambiguous_audio"),
+            "error should mention the field: {}",
+            err
+        );
     }
 
     #[test]

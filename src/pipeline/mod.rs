@@ -75,6 +75,9 @@ pub struct WorkItem {
     pub inner_path: Option<String>,
     pub inner_paths: Option<Vec<String>>,
     pub title_suffix: Option<String>,
+    /// For ISO/disc items: the audio-stream index selected by `pick_primary_audio`.
+    /// `None` for regular files (ffmpeg maps all streams by default).
+    pub primary_audio_index: Option<u32>,
 }
 
 /// Per-worker display slot. Worker threads update these atomics + `info`

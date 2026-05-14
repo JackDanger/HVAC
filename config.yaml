@@ -43,3 +43,9 @@ media_extensions:
 # Output directory for transcoded files (relative to source or absolute)
 # If not set, files are placed next to originals with .transcoded suffix
 # output_dir: /mnt/media/transcoded
+
+# Skip disc images (.iso / .img) whose primary audio stream can't be chosen
+# with confidence. Without this, hvac always picks something (usually correctly);
+# with it, ambiguous discs are skipped so you can hand-investigate them.
+# CLI override: --skip-ambiguous-audio (either source true → skip).
+# skip_ambiguous_audio: false
