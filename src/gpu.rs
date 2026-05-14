@@ -977,6 +977,10 @@ mod tests {
         assert!(!output.status.success());
     }
 
+    // Linux-only: the ABI-change message branch fires only when find_alt_lib
+    // returns Some, which requires ldconfig (Linux). On macOS the function
+    // returns None and the ABI explanation is correctly omitted.
+    #[cfg(target_os = "linux")]
     #[test]
     fn ffmpeg_broken_custom_with_working_alt_recommends_rm() {
         // When a working system ffmpeg has the encoder and the custom build is broken,
