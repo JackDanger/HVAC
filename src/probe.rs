@@ -677,7 +677,10 @@ fn parse_ffprobe_json(json: &[u8]) -> Result<MediaInfo> {
         .enumerate()
         .map(|(i, s)| AudioStreamInfo {
             index: i as u32,
-            codec: s.codec_name.clone().unwrap_or_else(|| "unknown".to_string()),
+            codec: s
+                .codec_name
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string()),
             channels: s.channels.unwrap_or(0),
             bitrate_kbps: stream_bitrate_kbps(s),
             language: s.tags.as_ref().and_then(|t| t.language.clone()),
@@ -949,8 +952,10 @@ pub fn pick_primary_audio(
     // streams if filtering would leave nothing — and remember that we did,
     // because the fallback path is inherently ambiguous (we're choosing
     // among tracks we just classified as commentary).
-    let non_comm: Vec<&AudioStreamInfo> =
-        streams.iter().filter(|s| !looks_like_commentary(s)).collect();
+    let non_comm: Vec<&AudioStreamInfo> = streams
+        .iter()
+        .filter(|s| !looks_like_commentary(s))
+        .collect();
     let used_fallback = non_comm.is_empty();
     let pool: Vec<&AudioStreamInfo> = if used_fallback {
         streams.iter().collect()
@@ -1833,7 +1838,10 @@ mod tests {
         let streams = vec![audio(0, 2, 192), audio(1, 2, 192)];
         let sel = pick_primary_audio(&streams, None).unwrap();
         assert_eq!(sel.index, 0);
-        assert!(sel.ambiguous, "channels-tied + bitrate-tied must be ambiguous");
+        assert!(
+            sel.ambiguous,
+            "channels-tied + bitrate-tied must be ambiguous"
+        );
         assert!(sel.reason.is_some(), "ambiguous selections carry a reason");
     }
 

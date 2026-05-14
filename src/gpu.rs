@@ -93,9 +93,9 @@ fn check_ffmpeg_binary(binary: &str, encoder: &str) -> FfmpegCheck {
         .stderr(Stdio::piped());
     match run_output_with_timeout(cmd, Duration::from_secs(10), binary) {
         Err(e) => {
-            // Distinguish "binary not on PATH" (NotFound) from
-            // "spawned but failed / timed out" (Broken). NotFound is
-            // anyhow-wrapped so we have to inspect the chain.
+            // Distinguish "binary not on PATH" (NotFound) from "spawned but
+            // failed / timed out" (Broken). NotFound is anyhow-wrapped so we
+            // walk the source chain.
             let is_not_found = e
                 .chain()
                 .filter_map(|c| c.downcast_ref::<std::io::Error>())
@@ -304,7 +304,10 @@ fn ffmpeg_broken_message(
     let short_error = error
         .splitn(2, ": ")
         .nth(1)
-        .map(|s| s.strip_prefix("error while loading shared libraries: ").unwrap_or(s))
+        .map(|s| {
+            s.strip_prefix("error while loading shared libraries: ")
+                .unwrap_or(s)
+        })
         .filter(|s| !s.is_empty())
         .unwrap_or(error);
 
@@ -419,10 +422,7 @@ fn ffmpeg_encoder_missing_message(
                  but it is shadowed by {ffmpeg_path}.\n"
             ));
             match broken_package {
-                Some(pkg) => msg.push_str(&format!(
-                    "\n  To fix:\n    {}\n",
-                    reinstall_cmd(pkg)
-                )),
+                Some(pkg) => msg.push_str(&format!("\n  To fix:\n    {}\n", reinstall_cmd(pkg))),
                 None => msg.push_str(&format!(
                     "\n  To fix, remove the custom build:\n    rm {ffmpeg_path}\n"
                 )),
@@ -994,13 +994,25 @@ mod tests {
         assert!(msg.contains("custom build"));
         assert!(msg.contains("/usr/bin/ffmpeg"));
         // Must recommend rm — the system package covers hvac's needs.
-        assert!(msg.contains("rm /usr/local/bin/ffmpeg"), "should recommend rm when system ffmpeg works");
+        assert!(
+            msg.contains("rm /usr/local/bin/ffmpeg"),
+            "should recommend rm when system ffmpeg works"
+        );
         // Must offer mv as a zero-risk backup option.
-        assert!(msg.contains("mv /usr/local/bin/ffmpeg"), "should offer mv as backup option");
+        assert!(
+            msg.contains("mv /usr/local/bin/ffmpeg"),
+            "should offer mv as backup option"
+        );
         // Must NOT suggest a cross-soname symlink.
-        assert!(!msg.contains("ln -s"), "must not suggest cross-soname symlink");
+        assert!(
+            !msg.contains("ln -s"),
+            "must not suggest cross-soname symlink"
+        );
         // Must explain why a symlink is wrong.
-        assert!(msg.contains("ABI"), "should explain that soname bump = ABI change");
+        assert!(
+            msg.contains("ABI"),
+            "should explain that soname bump = ABI change"
+        );
     }
 
     #[test]
@@ -1016,7 +1028,10 @@ mod tests {
         );
         assert!(msg.contains("Intel GPU"));
         assert!(msg.contains("reinstall"));
-        assert!(!msg.contains("rm /usr/bin/ffmpeg"), "should not suggest rm for a package binary");
+        assert!(
+            !msg.contains("rm /usr/bin/ffmpeg"),
+            "should not suggest rm for a package binary"
+        );
     }
 
     #[test]

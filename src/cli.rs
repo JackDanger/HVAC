@@ -143,8 +143,7 @@ mod tests {
 
     #[test]
     fn skip_ambiguous_audio_flag_sets_true() {
-        let cli =
-            Cli::try_parse_from(["hvac", "--skip-ambiguous-audio", "/some/path"]).unwrap();
+        let cli = Cli::try_parse_from(["hvac", "--skip-ambiguous-audio", "/some/path"]).unwrap();
         assert!(cli.skip_ambiguous_audio);
     }
 
