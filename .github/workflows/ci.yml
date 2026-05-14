@@ -42,6 +42,19 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install ffmpeg
 
+      # macOS-latest sometimes ships a brew-installed `cargo` on PATH that
+      # shadows rustup's proxy (or routes to rustup-init), producing
+      # "error: unexpected argument 'fmt' found / Usage: rustup-init[EXE]"
+      # at cargo fmt time. Re-asserting the toolchain after brew installs
+      # rebuilds the proxy and keeps the rest of the steps deterministic.
+      - name: Re-assert rustup proxies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          rustup default stable
+          rustup component add rustfmt clippy
+          which cargo
+          cargo --version
+
       - run: cargo fmt --check
       - run: cargo clippy -- -D warnings
       - run: cargo test
