@@ -1,5 +1,7 @@
-use anyhow::{bail, Result};
-use std::process::Command;
+use anyhow::{bail, Context, Result};
+use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::time::Duration;
 
 #[derive(Debug, Clone)]
 pub struct GpuInfo {
@@ -201,11 +203,35 @@ pub fn max_encode_sessions(gpu: &GpuInfo) -> usize {
     }
 }
 
+/// Run a command and collect its output, killing it if it hasn't finished
+/// within `timeout`. Used for startup GPU/encoder probes whose output is
+/// small enough that pipe-buffer overflow is not a concern, but which could
+/// hang forever if a GPU driver or tool is unresponsive.
+///
+/// The child is spawned in a background thread; if the timeout fires, the
+/// thread is detached (the OS cleans it up). This is acceptable for one-shot
+/// startup probes.
+fn run_output_with_timeout(
+    mut cmd: Command,
+    timeout: Duration,
+    label: &str,
+) -> Result<std::process::Output> {
+    let (tx, rx) = mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let _ = tx.send(cmd.output());
+    });
+    rx.recv_timeout(timeout)
+        .with_context(|| format!("{label} timed out after {}s", timeout.as_secs()))?
+        .with_context(|| format!("failed to run {label}"))
+}
+
 fn detect_nvidia() -> Result<String> {
-    let output = Command::new("nvidia-smi")
-        .arg("--query-gpu=name")
+    let mut cmd = Command::new("nvidia-smi");
+    cmd.arg("--query-gpu=name")
         .arg("--format=csv,noheader")
-        .output()?;
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = run_output_with_timeout(cmd, Duration::from_secs(10), "nvidia-smi")?;
 
     if !output.status.success() {
         bail!("nvidia-smi failed");
@@ -228,12 +254,13 @@ fn detect_apple_gpu() -> bool {
 }
 
 fn detect_apple_chip_name() -> String {
-    let output = Command::new("sysctl")
-        .arg("-n")
+    let mut cmd = Command::new("sysctl");
+    cmd.arg("-n")
         .arg("machdep.cpu.brand_string")
-        .output();
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 
-    match output {
+    match run_output_with_timeout(cmd, Duration::from_secs(5), "sysctl") {
         Ok(out) if out.status.success() => {
             let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
             if !name.is_empty() {
@@ -246,11 +273,12 @@ fn detect_apple_chip_name() -> String {
 }
 
 fn has_ffmpeg_encoder(encoder: &str) -> bool {
-    let output = Command::new("ffmpeg")
-        .args(["-hide_banner", "-encoders"])
-        .output();
+    let mut cmd = Command::new("ffmpeg");
+    cmd.args(["-hide_banner", "-encoders"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 
-    match output {
+    match run_output_with_timeout(cmd, Duration::from_secs(10), "ffmpeg") {
         Ok(out) => {
             let stdout = String::from_utf8_lossy(&out.stdout);
             stdout.contains(encoder)
@@ -407,5 +435,45 @@ mod tests {
                 println!("No GPU detected (expected in CI): {}", e);
             }
         }
+    }
+
+    // ── run_output_with_timeout tests ────────────────────────────────────────
+
+    #[test]
+    fn test_run_output_with_timeout_fast_command() {
+        let mut cmd = Command::new("echo");
+        cmd.arg("hello").stdout(Stdio::piped()).stderr(Stdio::piped());
+        let output =
+            run_output_with_timeout(cmd, Duration::from_secs(5), "echo").expect("echo should succeed");
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("hello"));
+    }
+
+    #[test]
+    fn test_run_output_with_timeout_fires_on_slow_command() {
+        let mut cmd = Command::new("sleep");
+        cmd.arg("60").stdout(Stdio::piped()).stderr(Stdio::piped());
+        let started = std::time::Instant::now();
+        let result = run_output_with_timeout(cmd, Duration::from_millis(200), "sleep");
+        let elapsed = started.elapsed();
+        assert!(result.is_err(), "expected timeout error, got: {:?}", result);
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("timed out"),
+            "error must mention timeout: {err}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "watchdog took {elapsed:?}, expected < 2s"
+        );
+    }
+
+    #[test]
+    fn test_run_output_with_timeout_nonzero_exit() {
+        let mut cmd = Command::new("false");
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+        let output =
+            run_output_with_timeout(cmd, Duration::from_secs(5), "false").expect("false should complete");
+        assert!(!output.status.success());
     }
 }

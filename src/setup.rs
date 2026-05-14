@@ -130,7 +130,7 @@ fn ensure_flags(api_key: &str) -> Result<(Vec<String>, Vec<String>)> {
 fn api_get(api_key: &str, path: &str) -> Result<Option<Value>> {
     let url = format!("{BASE}{path}");
     let output = std::process::Command::new("curl")
-        .args(["-s", "-w", "\n%{http_code}"])
+        .args(["-s", "-m", "30", "-w", "\n%{http_code}"])
         .arg("-H")
         .arg(format!("Authorization: {api_key}"))
         .arg(&url)
@@ -152,7 +152,7 @@ fn api_post(api_key: &str, path: &str, body: &Value) -> Result<Value> {
     let url = format!("{BASE}{path}");
     let body_str = serde_json::to_string(body)?;
     let output = std::process::Command::new("curl")
-        .args(["-s", "-w", "\n%{http_code}", "-X", "POST"])
+        .args(["-s", "-m", "30", "-w", "\n%{http_code}", "-X", "POST"])
         .arg("-H")
         .arg(format!("Authorization: {api_key}"))
         .arg("-H")
