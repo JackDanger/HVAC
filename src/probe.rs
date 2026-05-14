@@ -31,15 +31,28 @@ fn wait_with_timeout(
     timeout: Duration,
     descriptor: &str,
 ) -> Result<std::process::Output> {
+    // Drain stdout and stderr in background threads. Without this, a large
+    // JSON output (>64 KB pipe buffer) causes ffprobe to block on write, so
+    // try_wait() never sees it exit and the watchdog fires spuriously.
+    let stdout_thread = child.stdout.take().map(|mut r| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut r, &mut buf);
+            buf
+        })
+    });
+    let stderr_thread = child.stderr.take().map(|mut r| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut r, &mut buf);
+            buf
+        })
+    });
+
     let started = Instant::now();
-    loop {
+    let status = loop {
         match child.try_wait().context("Failed to poll ffprobe child")? {
-            Some(_status) => {
-                // Process exited — collect its captured stdout/stderr.
-                return child
-                    .wait_with_output()
-                    .context("Failed to collect ffprobe output");
-            }
+            Some(status) => break status,
             None => {
                 if started.elapsed() >= timeout {
                     let _ = child.kill();
@@ -52,6 +65,12 @@ fn wait_with_timeout(
                         }
                         std::thread::sleep(POLL_INTERVAL);
                     }
+                    // Join the reader threads before bailing. kill() closes
+                    // the pipes so they observe EOF and exit promptly. The
+                    // ignored Result is fine — we're about to error out, so
+                    // a panicked reader thread isn't actionable.
+                    let _ = stdout_thread.map(|h| h.join());
+                    let _ = stderr_thread.map(|h| h.join());
                     bail!(
                         "ffprobe timed out after {} reading {}; \
                          the source filesystem may be unresponsive",
@@ -62,7 +81,19 @@ fn wait_with_timeout(
                 std::thread::sleep(POLL_INTERVAL);
             }
         }
-    }
+    };
+
+    let stdout = stdout_thread
+        .map(|h| h.join().unwrap_or_default())
+        .unwrap_or_default();
+    let stderr = stderr_thread
+        .map(|h| h.join().unwrap_or_default())
+        .unwrap_or_default();
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 /// Format a Duration for the user-facing timeout message without truncating
@@ -185,6 +216,37 @@ pub fn probe_file(path: &Path) -> Result<MediaInfo> {
     probe_file_with_timeout(path, DEFAULT_PROBE_TIMEOUT)
 }
 
+/// Describe a process exit when it produced no stderr/stdout output.
+/// Returns something like "exit code 1 (no output)" or "killed by signal 11 (SIGSEGV)".
+fn format_exit_status(status: std::process::ExitStatus) -> String {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(sig) = status.signal() {
+            let name = match sig {
+                1 => " (SIGHUP)",
+                2 => " (SIGINT)",
+                3 => " (SIGQUIT)",
+                4 => " (SIGILL)",
+                6 => " (SIGABRT)",
+                8 => " (SIGFPE)",
+                9 => " (SIGKILL)",
+                11 => " (SIGSEGV)",
+                13 => " (SIGPIPE)",
+                14 => " (SIGALRM)",
+                15 => " (SIGTERM)",
+                _ => "",
+            };
+            return format!("killed by signal {sig}{name} (no output)");
+        }
+    }
+    if let Some(code) = status.code() {
+        format!("exit code {code} (no output)")
+    } else {
+        "terminated abnormally (no output)".to_string()
+    }
+}
+
 /// Probe a file, killing ffprobe and returning an error if it doesn't exit
 /// within `timeout`. The watchdog protects against hangs caused by stale NFS
 /// mounts or unresponsive network shares — without it, a single bad mount
@@ -215,7 +277,16 @@ pub fn probe_file_with_timeout(path: &Path, timeout: Duration) -> Result<MediaIn
         let err_msg = stderr
             .lines()
             .rfind(|l| !l.trim().is_empty())
-            .unwrap_or("unknown error");
+            .map(|s| s.to_string())
+            .or_else(|| {
+                // Some crashes produce output on stdout instead of stderr.
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                stdout
+                    .lines()
+                    .rfind(|l| !l.trim().is_empty())
+                    .map(|s| s.to_string())
+            })
+            .unwrap_or_else(|| format_exit_status(output.status));
         bail!("ffprobe failed for {:?}: {}", path, err_msg);
     }
 
@@ -231,7 +302,7 @@ pub fn probe_file_with_timeout(path: &Path, timeout: Duration) -> Result<MediaIn
     // HDR-relevant transfer function). On a typical SDR-only library this
     // saves one subprocess per file across the whole scan.
     if needs_frame_side_data_probe(&info) {
-        if let Ok(frame_out) = probe_first_frame_side_data(path) {
+        if let Ok(frame_out) = probe_first_frame_side_data(path, timeout) {
             apply_frame_side_data(&mut info, &frame_out);
         }
     }
@@ -341,8 +412,8 @@ fn run_with_timeout(
 /// Run ffprobe to read the first video frame's side-data list. Used to extract
 /// HDR10 mastering display and content-light-level metadata, which only appears
 /// on frames, not on the stream header.
-fn probe_first_frame_side_data(path: &Path) -> Result<FfprobeFramesOutput> {
-    let output = Command::new("ffprobe")
+fn probe_first_frame_side_data(path: &Path, timeout: Duration) -> Result<FfprobeFramesOutput> {
+    let child = Command::new("ffprobe")
         .args([
             "-v",
             "error",
@@ -355,15 +426,29 @@ fn probe_first_frame_side_data(path: &Path) -> Result<FfprobeFramesOutput> {
             "%+#1",
         ])
         .arg(path)
-        .output()
-        .context("Failed to run ffprobe (frames)")?;
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("Failed to spawn ffprobe (frames)")?;
+
+    let descriptor = path.display().to_string();
+    let output = wait_with_timeout(child, timeout, &descriptor)?;
 
     if !output.status.success() {
-        bail!(
-            "ffprobe (frames) failed for {:?}: {}",
-            path,
-            String::from_utf8_lossy(&output.stderr)
-        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let err_msg = stderr
+            .lines()
+            .rfind(|l| !l.trim().is_empty())
+            .map(|s| s.to_string())
+            .or_else(|| {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                stdout
+                    .lines()
+                    .rfind(|l| !l.trim().is_empty())
+                    .map(|s| s.to_string())
+            })
+            .unwrap_or_else(|| format_exit_status(output.status));
+        bail!("ffprobe (frames) failed for {:?}: {}", path, err_msg);
     }
 
     parse_frames_json(&output.stdout)
@@ -770,6 +855,81 @@ mod tests {
             err.contains("150ms"),
             "expected '150ms' in timeout error, got: {}",
             err
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_large_stdout_does_not_deadlock() {
+        // Linux/macOS pipe buffer is typically 64 KB. A child writing >64 KB
+        // to stdout stalls waiting for the reader, keeping try_wait() from
+        // ever seeing it exit — the pre-fix polling loop would hit the
+        // watchdog and report a spurious timeout. 96 KB is comfortably above
+        // the buffer without leaning on macOS's larger pipe-resize behavior.
+        //
+        // `run_with_timeout` bails on watchdog fire, so `.expect()` alone
+        // catches a regression — no separate elapsed assertion needed.
+        let result = run_with_timeout(
+            "dd",
+            &["if=/dev/zero", "bs=98304", "count=1"],
+            Duration::from_secs(5),
+            "pipe-buffer-test",
+        );
+        let output = result.expect("96 KB stdout must complete without a timeout");
+        assert_eq!(
+            output.stdout.len(),
+            98304,
+            "must receive all 96 KB of stdout"
+        );
+    }
+
+    #[test]
+    fn test_exit_status_message_when_no_output() {
+        // When a command exits non-zero with no stderr, the error message
+        // must describe the exit code rather than saying "unknown error".
+        let result = run_with_timeout("false", &[], Duration::from_secs(5), "exit-test");
+        let output = result.expect("false exits immediately");
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert!(output.stderr.is_empty());
+        let msg = format_exit_status(output.status);
+        assert!(
+            msg.contains("exit code 1"),
+            "expected 'exit code 1', got: {msg}"
+        );
+        assert!(
+            msg.contains("no output"),
+            "expected '(no output)' annotation, got: {msg}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_exit_status_message_on_signal() {
+        // A process killed by a signal (SIGKILL = 9) must show the signal
+        // number in the error message, not a bare exit code.
+        use std::os::unix::process::ExitStatusExt;
+        // Synthesise a fake ExitStatus that looks like SIGKILL (signal 9).
+        // We do this by spawning a real process and killing it ourselves so
+        // we get a genuine ExitStatus from the OS, not a mock.
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("sleep should spawn");
+        child.kill().expect("kill should succeed");
+        let status = child.wait().expect("wait should succeed");
+        assert!(
+            status.signal().is_some(),
+            "killed process should have a signal"
+        );
+        let msg = format_exit_status(status);
+        assert!(
+            msg.contains("signal"),
+            "expected 'signal' in message, got: {msg}"
+        );
+        assert!(
+            msg.contains("no output"),
+            "expected '(no output)' annotation, got: {msg}"
         );
     }
 
