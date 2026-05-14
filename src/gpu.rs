@@ -1,7 +1,6 @@
 use anyhow::{bail, Context, Result};
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]
 pub struct GpuInfo {
@@ -208,21 +207,68 @@ pub fn max_encode_sessions(gpu: &GpuInfo) -> usize {
 /// small enough that pipe-buffer overflow is not a concern, but which could
 /// hang forever if a GPU driver or tool is unresponsive.
 ///
-/// The child is spawned in a background thread; if the timeout fires, the
-/// thread is detached (the OS cleans it up). This is acceptable for one-shot
-/// startup probes.
+/// Spawns the child directly (not in a detached thread) so the timeout path
+/// can `child.kill()` it instead of leaking the subprocess. Output pipes are
+/// drained on background threads to defeat the same pipe-buffer-deadlock
+/// `wait_with_timeout` solves for ffprobe.
 fn run_output_with_timeout(
     mut cmd: Command,
     timeout: Duration,
     label: &str,
 ) -> Result<std::process::Output> {
-    let (tx, rx) = mpsc::sync_channel(1);
-    std::thread::spawn(move || {
-        let _ = tx.send(cmd.output());
+    let mut child = cmd
+        .spawn()
+        .with_context(|| format!("failed to spawn {label}"))?;
+
+    let stdout_thread = child.stdout.take().map(|mut r| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut r, &mut buf);
+            buf
+        })
     });
-    rx.recv_timeout(timeout)
-        .with_context(|| format!("{label} timed out after {}s", timeout.as_secs()))?
-        .with_context(|| format!("failed to run {label}"))
+    let stderr_thread = child.stderr.take().map(|mut r| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut r, &mut buf);
+            buf
+        })
+    });
+
+    let started = Instant::now();
+    let status = loop {
+        match child
+            .try_wait()
+            .with_context(|| format!("failed to poll {label}"))?
+        {
+            Some(status) => break status,
+            None => {
+                if started.elapsed() >= timeout {
+                    let _ = child.kill();
+                    // Joining now is safe: kill() closes stdin/stdout/stderr,
+                    // so the reader threads observe EOF and exit promptly.
+                    // Without these joins the threads are detached and may
+                    // outlive the bail.
+                    let _ = stdout_thread.map(|h| h.join());
+                    let _ = stderr_thread.map(|h| h.join());
+                    bail!("{label} timed out after {}s", timeout.as_secs());
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+    };
+
+    let stdout = stdout_thread
+        .map(|h| h.join().unwrap_or_default())
+        .unwrap_or_default();
+    let stderr = stderr_thread
+        .map(|h| h.join().unwrap_or_default())
+        .unwrap_or_default();
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 fn detect_nvidia() -> Result<String> {
@@ -442,9 +488,11 @@ mod tests {
     #[test]
     fn test_run_output_with_timeout_fast_command() {
         let mut cmd = Command::new("echo");
-        cmd.arg("hello").stdout(Stdio::piped()).stderr(Stdio::piped());
-        let output =
-            run_output_with_timeout(cmd, Duration::from_secs(5), "echo").expect("echo should succeed");
+        cmd.arg("hello")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let output = run_output_with_timeout(cmd, Duration::from_secs(5), "echo")
+            .expect("echo should succeed");
         assert!(output.status.success());
         assert!(String::from_utf8_lossy(&output.stdout).contains("hello"));
     }
@@ -472,8 +520,8 @@ mod tests {
     fn test_run_output_with_timeout_nonzero_exit() {
         let mut cmd = Command::new("false");
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-        let output =
-            run_output_with_timeout(cmd, Duration::from_secs(5), "false").expect("false should complete");
+        let output = run_output_with_timeout(cmd, Duration::from_secs(5), "false")
+            .expect("false should complete");
         assert!(!output.status.success());
     }
 }

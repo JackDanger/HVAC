@@ -65,6 +65,12 @@ fn wait_with_timeout(
                         }
                         std::thread::sleep(POLL_INTERVAL);
                     }
+                    // Join the reader threads before bailing. kill() closes
+                    // the pipes so they observe EOF and exit promptly. The
+                    // ignored Result is fine — we're about to error out, so
+                    // a panicked reader thread isn't actionable.
+                    let _ = stdout_thread.map(|h| h.join());
+                    let _ = stderr_thread.map(|h| h.join());
                     bail!(
                         "ffprobe timed out after {} reading {}; \
                          the source filesystem may be unresponsive",
@@ -77,9 +83,17 @@ fn wait_with_timeout(
         }
     };
 
-    let stdout = stdout_thread.map(|h| h.join().unwrap_or_default()).unwrap_or_default();
-    let stderr = stderr_thread.map(|h| h.join().unwrap_or_default()).unwrap_or_default();
-    Ok(std::process::Output { status, stdout, stderr })
+    let stdout = stdout_thread
+        .map(|h| h.join().unwrap_or_default())
+        .unwrap_or_default();
+    let stderr = stderr_thread
+        .map(|h| h.join().unwrap_or_default())
+        .unwrap_or_default();
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 /// Format a Duration for the user-facing timeout message without truncating
@@ -844,26 +858,28 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_large_stdout_does_not_deadlock() {
-        // Linux pipe buffer is 64 KB; macOS is also typically 64 KB.
-        // A child writing 128 KB+ to stdout would stall waiting for the
-        // reader, keeping try_wait() from ever seeing it exit — the old
-        // polling loop would hit the watchdog and report a spurious timeout.
-        // Background drain threads in wait_with_timeout fix this.
-        let started = Instant::now();
+        // Linux/macOS pipe buffer is typically 64 KB. A child writing >64 KB
+        // to stdout stalls waiting for the reader, keeping try_wait() from
+        // ever seeing it exit — the pre-fix polling loop would hit the
+        // watchdog and report a spurious timeout. 96 KB is comfortably above
+        // the buffer without leaning on macOS's larger pipe-resize behavior.
+        //
+        // `run_with_timeout` bails on watchdog fire, so `.expect()` alone
+        // catches a regression — no separate elapsed assertion needed.
         let result = run_with_timeout(
             "dd",
-            &["if=/dev/zero", "bs=131072", "count=1"],
+            &["if=/dev/zero", "bs=98304", "count=1"],
             Duration::from_secs(5),
             "pipe-buffer-test",
         );
-        let elapsed = started.elapsed();
-        let output = result.expect("128 KB stdout must complete without a timeout");
-        assert_eq!(output.stdout.len(), 131072, "must receive all 128 KB of stdout");
-        assert!(
-            elapsed < Duration::from_secs(5),
-            "completed in {elapsed:?} — likely deadlocked waiting for pipe to drain"
+        let output = result.expect("96 KB stdout must complete without a timeout");
+        assert_eq!(
+            output.stdout.len(),
+            98304,
+            "must receive all 96 KB of stdout"
         );
     }
 
@@ -902,7 +918,10 @@ mod tests {
             .expect("sleep should spawn");
         child.kill().expect("kill should succeed");
         let status = child.wait().expect("wait should succeed");
-        assert!(status.signal().is_some(), "killed process should have a signal");
+        assert!(
+            status.signal().is_some(),
+            "killed process should have a signal"
+        );
         let msg = format_exit_status(status);
         assert!(
             msg.contains("signal"),
