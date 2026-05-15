@@ -41,12 +41,12 @@ pub struct PartitionResult {
 /// Run Phase 2 against an already-expanded list of `ScanItem`s, deciding what
 /// becomes a `WorkItem` and what's skipped / resumed.
 ///
-/// Side-effects: emits a one-line skip note for each item we skip. Doesn't
-/// touch the filesystem beyond the writable probe (which honours `--dry-run`).
-/// Run Phase 2. `on_item(done, message)` is called after each file is
-/// classified: `done` is the count processed so far, `message` is a
-/// user-visible line (skip / resume / error) or `None` for silent skips and
-/// files queued for transcode.
+/// `on_item(done, message)` is called after each file is classified: `done`
+/// is the count of files processed so far, `message` carries a user-visible
+/// line (skip / resume / error) or `None` for silent skips and files queued
+/// for transcode. All output is delegated to the caller via this callback;
+/// `partition` itself doesn't touch stderr. Doesn't touch the filesystem
+/// beyond the writable probe (which honours `--dry-run`).
 pub fn partition(
     items: &[ScanItem],
     cli: &Cli,

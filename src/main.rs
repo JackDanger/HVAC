@@ -161,33 +161,24 @@ fn main() -> Result<()> {
     } else {
         eprintln!("Scanning {} files...", total);
     }
-    let part = pipeline::partition::partition(
-        &scan_result.items,
-        &cli,
-        &cfg,
-        &gpu,
-        |done, msg| {
-            use std::io::Write as _;
-            if stderr_is_tty {
-                if let Some(m) = msg {
-                    // Clear the progress line, print the message, then reprint progress.
-                    let _ = write!(
-                        std::io::stderr(),
-                        "\r{blank}\r{m}\n\rScanning {done}/{total} files...",
-                        blank = " ".repeat(60),
-                    );
-                } else {
-                    let _ = write!(
-                        std::io::stderr(),
-                        "\rScanning {done}/{total} files...",
-                    );
-                }
-                let _ = std::io::stderr().flush();
-            } else if let Some(m) = msg {
-                eprintln!("{}", m);
+    let part = pipeline::partition::partition(&scan_result.items, &cli, &cfg, &gpu, |done, msg| {
+        use std::io::Write as _;
+        if stderr_is_tty {
+            if let Some(m) = msg {
+                // Clear the progress line, print the message, then reprint progress.
+                let _ = write!(
+                    std::io::stderr(),
+                    "\r{blank}\r{m}\n\rScanning {done}/{total} files...",
+                    blank = " ".repeat(60),
+                );
+            } else {
+                let _ = write!(std::io::stderr(), "\rScanning {done}/{total} files...",);
             }
-        },
-    );
+            let _ = std::io::stderr().flush();
+        } else if let Some(m) = msg {
+            eprintln!("{}", m);
+        }
+    });
     if stderr_is_tty {
         eprintln!();
     }
