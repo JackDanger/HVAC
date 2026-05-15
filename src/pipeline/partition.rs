@@ -43,12 +43,23 @@ pub struct PartitionResult {
 ///
 /// Side-effects: emits a one-line skip note for each item we skip. Doesn't
 /// touch the filesystem beyond the writable probe (which honours `--dry-run`).
-pub fn partition(items: &[ScanItem], cli: &Cli, cfg: &Config, gpu: &GpuInfo) -> PartitionResult {
+/// Run Phase 2. `on_item(done, message)` is called after each file is
+/// classified: `done` is the count processed so far, `message` is a
+/// user-visible line (skip / resume / error) or `None` for silent skips and
+/// files queued for transcode.
+pub fn partition(
+    items: &[ScanItem],
+    cli: &Cli,
+    cfg: &Config,
+    gpu: &GpuInfo,
+    on_item: impl Fn(usize, Option<String>),
+) -> PartitionResult {
     let mut to_transcode = Vec::with_capacity(items.len());
     let mut skipped = 0u32;
     let mut resumed = 0u32;
     let mut errors = 0u32;
     let mut writable_cache: HashMap<PathBuf, bool> = HashMap::new();
+    let mut done = 0usize;
 
     let probe_timeout = Duration::from_secs(cli.probe_timeout);
     let overwrite = cli.overwrite();
@@ -63,24 +74,26 @@ pub fn partition(items: &[ScanItem], cli: &Cli, cfg: &Config, gpu: &GpuInfo) -> 
             probe_timeout,
             &mut writable_cache,
         );
+        done += 1;
         match outcome {
-            Outcome::Transcode(w) => to_transcode.push(*w),
+            Outcome::Transcode(w) => {
+                to_transcode.push(*w);
+                on_item(done, None);
+            }
             Outcome::Skip(reason) => {
-                eprintln!("  {}", reason);
+                on_item(done, Some(format!("  {}", reason)));
                 skipped += 1;
             }
             Outcome::SkippedSilently => {
-                // Already-meets-target case: no per-file message (count only).
+                on_item(done, None);
                 skipped += 1;
             }
             Outcome::Resumed(msg) => {
-                if let Some(m) = msg {
-                    eprintln!("  {}", m);
-                }
+                on_item(done, msg.map(|m| format!("  {}", m)));
                 resumed += 1;
             }
             Outcome::ProbeError(msg) => {
-                eprintln!("  {}", msg);
+                on_item(done, Some(format!("  {}", msg)));
                 errors += 1;
             }
         }

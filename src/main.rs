@@ -140,7 +140,6 @@ fn main() -> Result<()> {
 
     let scan_result = pipeline::scan::expand(&files);
     let mut errors = scan_result.errors;
-    eprintln!("Scanning {} files...", scan_result.items.len());
 
     let total_bytes: u64 = {
         let mut seen = std::collections::HashSet::new();
@@ -155,7 +154,43 @@ fn main() -> Result<()> {
     flags.track_scan_completed(scan_result.items.len(), total_bytes);
 
     // ── Phase 2: probe + filter ────────────────────────────────────────────
-    let part = pipeline::partition::partition(&scan_result.items, &cli, &cfg, &gpu);
+    let total = scan_result.items.len();
+    let stderr_is_tty = unsafe { libc::isatty(libc::STDERR_FILENO) != 0 };
+    if stderr_is_tty {
+        eprint!("Scanning 0/{} files...", total);
+    } else {
+        eprintln!("Scanning {} files...", total);
+    }
+    let part = pipeline::partition::partition(
+        &scan_result.items,
+        &cli,
+        &cfg,
+        &gpu,
+        |done, msg| {
+            use std::io::Write as _;
+            if stderr_is_tty {
+                if let Some(m) = msg {
+                    // Clear the progress line, print the message, then reprint progress.
+                    let _ = write!(
+                        std::io::stderr(),
+                        "\r{blank}\r{m}\n\rScanning {done}/{total} files...",
+                        blank = " ".repeat(60),
+                    );
+                } else {
+                    let _ = write!(
+                        std::io::stderr(),
+                        "\rScanning {done}/{total} files...",
+                    );
+                }
+                let _ = std::io::stderr().flush();
+            } else if let Some(m) = msg {
+                eprintln!("{}", m);
+            }
+        },
+    );
+    if stderr_is_tty {
+        eprintln!();
+    }
     let skipped = part.skipped;
     let resumed = part.resumed;
     errors += part.errors;
