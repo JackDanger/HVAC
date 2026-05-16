@@ -49,10 +49,12 @@ a new version:
 
 ## Tagging a release
 
+Use an annotated tag (matches the convention in CONTRIBUTING.md):
+
 ```sh
 # From main, after the version-bump PR has merged:
 VERSION=$(cat VERSION)
-git tag "v$VERSION"
+git tag -a "v$VERSION" -m "v$VERSION"
 git push origin "v$VERSION"
 ```
 

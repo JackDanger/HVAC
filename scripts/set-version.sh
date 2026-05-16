@@ -7,7 +7,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-VERSION="$(tr -d '[:space:]' < "$ROOT/VERSION")"
+# Strip only trailing whitespace so "5.4. 1" or multi-line garbage fails the
+# regex below rather than being silently collapsed into a valid-looking version.
+VERSION="$(head -1 "$ROOT/VERSION" | sed 's/[[:space:]]*$//')"
 
 if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   echo "error: VERSION must be X.Y.Z, got: '$VERSION'" >&2
@@ -16,9 +18,22 @@ fi
 
 echo "Setting version to $VERSION"
 
-# Cargo.toml — first version = "..." line in [package]
-sed -i.bak 's/^version = "[^"]*"/version = "'"$VERSION"'"/' "$ROOT/Cargo.toml"
-rm -f "$ROOT/Cargo.toml.bak"
+# Cargo.toml — replace only the first bare `version = "..."` line (the
+# [package] entry); dependencies use `dep = { version = "..." }` and are
+# not affected, but an awk-based first-match is safer than a global sed.
+awk 'done == 0 && /^version = "[^"]*"/ {
+       sub(/"[^"]*"/, "\"'"$VERSION"'\""); done = 1
+     } 1' "$ROOT/Cargo.toml" > "$ROOT/Cargo.toml.tmp"
+mv "$ROOT/Cargo.toml.tmp" "$ROOT/Cargo.toml"
+
+# Cargo.lock — keep the hvac-transcoder entry in sync so the lockfile is
+# never stale relative to Cargo.toml.
+awk 'found == 1 && /^version = / {
+       sub(/"[^"]*"/, "\"'"$VERSION"'\""); found = 0
+     }
+     /^name = "hvac-transcoder"/ { found = 1 }
+     1' "$ROOT/Cargo.lock" > "$ROOT/Cargo.lock.tmp"
+mv "$ROOT/Cargo.lock.tmp" "$ROOT/Cargo.lock"
 
 # AUR PKGBUILD
 sed -i.bak "s/^pkgver=.*/pkgver=$VERSION/" "$ROOT/packaging/aur/PKGBUILD"
@@ -30,8 +45,22 @@ sed -i.bak "s|archive/v[0-9]*\.[0-9]*\.[0-9]*\.tar\.gz|archive/v$VERSION.tar.gz|
   "$ROOT/packaging/homebrew/hvac.rb"
 rm -f "$ROOT/packaging/homebrew/hvac.rb.bak"
 
+# Verify every substitution actually landed.
+check() {
+  local label="$1" pattern="$2" file="$3"
+  if ! grep -qE "$pattern" "$file"; then
+    echo "error: expected '$pattern' not found in $file after substitution" >&2
+    exit 1
+  fi
+}
+check "Cargo.toml"         "^version = \"$VERSION\"" "$ROOT/Cargo.toml"
+check "Cargo.lock"         "\"$VERSION\""            "$ROOT/Cargo.lock"
+check "PKGBUILD"           "^pkgver=$VERSION"        "$ROOT/packaging/aur/PKGBUILD"
+check "homebrew/hvac.rb"   "archive/v$VERSION"       "$ROOT/packaging/homebrew/hvac.rb"
+
 echo "Done. Files updated:"
 echo "  Cargo.toml"
+echo "  Cargo.lock"
 echo "  packaging/aur/PKGBUILD"
 echo "  packaging/homebrew/hvac.rb"
 echo ""

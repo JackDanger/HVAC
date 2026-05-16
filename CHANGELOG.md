@@ -233,7 +233,11 @@ it becomes the new version section and a fresh `Unreleased` is opened.
 Initial public releases. See `git log` for individual commits prior to
 the changelog being established.
 
-[Unreleased]: https://github.com/JackDanger/hvac/compare/v5.2.1...HEAD
+[Unreleased]: https://github.com/JackDanger/hvac/compare/v5.4.1...HEAD
+[5.4.1]: https://github.com/JackDanger/hvac/compare/v5.4.0...v5.4.1
+[5.4.0]: https://github.com/JackDanger/hvac/compare/v5.3.0...v5.4.0
+[5.3.0]: https://github.com/JackDanger/hvac/compare/v5.2.5...v5.3.0
+[5.2.5]: https://github.com/JackDanger/hvac/compare/v5.2.1...v5.2.5
 [5.2.1]: https://github.com/JackDanger/hvac/compare/v5.2.0...v5.2.1
 [5.2.0]: https://github.com/JackDanger/hvac/compare/v5.1.1...v5.2.0
 [5.1.1]: https://github.com/JackDanger/hvac/compare/v5.1.0...v5.1.1
