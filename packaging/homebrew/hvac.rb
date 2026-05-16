@@ -4,7 +4,7 @@
 class Hvac < Formula
   desc "GPU-accelerated media transcoder (HEVC/h265 via NVENC, VAAPI, VideoToolbox)"
   homepage "https://github.com/JackDanger/hvac"
-  url "https://github.com/JackDanger/hvac/archive/v5.2.0.tar.gz"
+  url "https://github.com/JackDanger/hvac/archive/v5.4.1.tar.gz"
   sha256 "PLACEHOLDER" # updated by release.yml
   license "MIT"
 
