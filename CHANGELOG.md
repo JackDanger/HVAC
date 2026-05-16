@@ -10,6 +10,13 @@ it becomes the new version section and a fresh `Unreleased` is opened.
 
 ## [Unreleased]
 
+## [5.4.1] — 2026-05-15
+
+### Changed
+- Version is now controlled by a single `VERSION` file at the repo root.
+  Run `./scripts/set-version.sh` after editing it to propagate the value
+  to `Cargo.toml`, `packaging/aur/PKGBUILD`, and `packaging/homebrew/hvac.rb`.
+
 ## [5.4.0] — 2026-05-14
 
 ### Added

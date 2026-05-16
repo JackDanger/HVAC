@@ -35,12 +35,25 @@ The AUR job is gated on `AUR_SSH_PRIVATE_KEY`. To enable it:
    and push a seed `PKGBUILD` + `.SRCINFO` — the action expects the AUR
    repo to already exist.
 
+## Bumping the version
+
+The single source of truth is the `VERSION` file at the repo root. To release
+a new version:
+
+1. Edit `VERSION` to the new `X.Y.Z`.
+2. Run `./scripts/set-version.sh` — it propagates the value to `Cargo.toml`,
+   `packaging/aur/PKGBUILD`, and `packaging/homebrew/hvac.rb`.
+3. Update `CHANGELOG.md` (move items from `Unreleased` into the new section).
+4. Commit everything in a worktree branch and open a PR.
+5. After the PR merges, tag from `main` (see below).
+
 ## Tagging a release
 
 ```sh
-# From main, after the changes you want to ship have landed:
-git tag v5.3.0
-git push origin v5.3.0
+# From main, after the version-bump PR has merged:
+VERSION=$(cat VERSION)
+git tag "v$VERSION"
+git push origin "v$VERSION"
 ```
 
 `workflow_dispatch` is also wired up — Actions → Release → "Run workflow"

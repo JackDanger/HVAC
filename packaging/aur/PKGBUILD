@@ -1,6 +1,6 @@
 # Maintainer: Jack Danger <jack@jackdanger.com>
 pkgname=hvac
-pkgver=5.2.0
+pkgver=5.4.1
 pkgrel=1
 pkgdesc="GPU-accelerated media transcoder (HEVC/h265 via NVENC, VAAPI, VideoToolbox)"
 arch=('x86_64' 'aarch64')
