@@ -1039,12 +1039,9 @@ checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
 
 [[package]]
 name = "isomage"
-version = "0.1.0"
+version = "2.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ff248facaccb6456b1e25bdb5e86ab82e500c8f8756ccf7b7a92d0cd44719b5"
-dependencies = [
- "clap",
-]
+checksum = "78e76f0ebdb7f589dafb6f6deb9dd4c341b108272af52a97185ba80510527fce"
 
 [[package]]
 name = "itertools"
