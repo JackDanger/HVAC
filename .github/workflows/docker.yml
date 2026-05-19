@@ -94,7 +94,7 @@ jobs:
 
       - name: Compute tags + labels
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           # GHCR lowercases the org/owner segment regardless of how it's
           # written in the repo URL; using github.repository_owner directly
