@@ -1,4 +1,4 @@
-# HVAC — Get your TBs back
+# HVAC — Get your terabytes back
 
 [![CI](https://github.com/JackDanger/hvac/actions/workflows/ci.yml/badge.svg)](https://github.com/JackDanger/hvac/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/hvac-transcoder.svg)](https://crates.io/crates/hvac-transcoder)
@@ -7,12 +7,9 @@
 
 Point `hvac` at a directory that contains videos — even ones hidden inside `.img` and `.iso` files — and it'll compress them to `h.265` (`HEVC`) using reasonable defaults. You can overwrite these defaults with a small config file.
 
-You need a GPU with an HEVC encoder (NVIDIA NVENC, Intel VAAPI, or
-Apple VideoToolbox) and an ffmpeg built against it. The installer below
-auto-installs ffmpeg on macOS, Debian/Ubuntu, Alpine, and OpenMediaVault,
-and prints platform-specific guidance on Synology, QNAP, and Unraid.
-For everything else there's [Docker](#docker) or the
-[NAS-specific notes](docs/NAS.md).
+You need a GPU/iGPU with an HEVC encoder (NVIDIA NVENC, Intel VAAPI, or Apple VideoToolbox) and an ffmpeg built against it.
+
+The installer below auto-installs ffmpeg on macOS, Debian/Ubuntu, Alpine, and OpenMediaVault, and prints platform-specific guidance on Synology, QNAP, and Unraid. For everything else there's [Docker](#docker) or the [NAS-specific notes](docs/NAS.md).
 
 ---
 
@@ -75,14 +72,16 @@ encodes leave a `.hvac_tmp_*` file that the next run sweeps.
 
 ## Disc images (.iso / .img)
 
-When the input is a Blu-ray or DVD image, hvac analyses the disc structure,
+When the input is a Blu-ray or DVD image, `hvac` analyses the disc structure,
 picks the main feature (largest m2ts run for Blu-ray, largest VTS for DVD;
 multi-title DVDs become one output per title), and pipes the streams into
-ffmpeg without ever extracting to a temp directory.
+ffmpeg without extracting to a temp directory.
 
 A disc usually carries several audio tracks — the primary mix, a commentary,
 sometimes a dub or audio description. hvac selects **exactly one** as the
-output audio. The picker (see `pick_primary_audio` in `src/probe.rs`):
+output audio. Picking the right one is... imperfect.
+
+The picker (see `pick_primary_audio` in `src/probe.rs`):
 
 1. Drops tracks flagged as commentary (by `disposition.comment` or by title
    keyword — "Commentary", "Director's", "Audio description", etc.).
@@ -90,7 +89,8 @@ output audio. The picker (see `pick_primary_audio` in `src/probe.rs`):
    surround mix beats a 2-channel commentary on any modern release).
 3. Tiebreaks on bitrate, then the muxer's `default` flag, then stream index.
 
-**Year-aware flip.** When the disc image filename carries a release year
+**Year-aware flip.** Old stuff often has a high-def audio commentary that
+we don't want to pick. So When the disc image filename carries a release year
 earlier than 1955 — pre-stereo cinema — the channel preference inverts: a
 1-channel mono original beats a 2-channel commentary. The year is parsed
 from the filename (`The Maltese Falcon (1941).iso`, `Movie.Title.1933.iso`),
@@ -120,7 +120,7 @@ hand.
 
 ## Does it actually save space?
 
-Real numbers from one library — public domain films, full bitrate range from pristine remuxes to lo-fi early transfers:
+Real numbers from the public domain parts of my own library. The sources ranged from full bitrate pristine remuxes to lo-fi early transfers:
 
 | File | Before | After | Savings |
 |------|-------:|------:|--------:|
@@ -156,7 +156,7 @@ Real numbers from one library — public domain films, full bitrate range from p
 | Intel (Broadwell+) | `hevc_vaapi` | Linux |
 | Apple Silicon / Intel Mac | `hevc_videotoolbox` | macOS |
 
-No GPU, no go — `hvac` exits with a clear message. CPU h265 is too slow to be worth shipping.
+No GPU, no go — `hvac` exits with a clear message. CPU h265 is too slow to be worth using this tool.
 
 ---
 
