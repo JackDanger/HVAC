@@ -67,7 +67,7 @@ jobs:
       # things the README promises a user. load: true requires a single
       # platform, which is why this stays amd64-only (see job comment above).
       - name: Build (amd64, load into daemon)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64
@@ -129,7 +129,7 @@ jobs:
 
       - name: Build + push
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64,linux/arm64
