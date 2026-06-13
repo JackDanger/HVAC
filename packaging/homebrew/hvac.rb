@@ -13,7 +13,7 @@ class Hvac < Formula
 
   def install
     system "cargo", "install", *std_cargo_args
-    etc.install "config.yaml" => "hvac/config.yaml"
+    (etc/"hvac").install "config.yaml"
   end
 
   def caveats

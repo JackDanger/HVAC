@@ -10,6 +10,13 @@ it becomes the new version section and a fresh `Unreleased` is opened.
 
 ## [Unreleased]
 
+### Fixed
+- **Homebrew install failure (`Errno::ENOENT … config.yaml`).** The generated
+  formula used `etc.install "config.yaml" => "hvac/config.yaml"`, but Homebrew's
+  rename-install does not create the nested `etc/hvac` directory, so the install
+  aborted. Switched to `(etc/"hvac").install "config.yaml"` in the release
+  workflow generator and the in-tree reference formula.
+
 ## [5.4.1] — 2026-05-15
 
 ### Changed
