@@ -203,8 +203,11 @@ NAS and your admin account already matches 1026:100.
 For compose, copy [`compose.example.yml`](compose.example.yml) and edit
 the volume path. The image is built and published to GHCR by the
 [`docker.yml`](.github/workflows/docker.yml) workflow on every push to
-`main`; until the first push lands you can build it locally from this
-repo's [`Dockerfile`](Dockerfile):
+`main` (amd64 + arm64), and each build is smoke-tested — the binary runs,
+ffmpeg's HEVC encoders are present, and it runs as UID 1026/GID 100 — so
+the examples above are guaranteed to work before the tag is published. If
+you'd rather build it yourself, you can do so from this repo's
+[`Dockerfile`](Dockerfile):
 
 ```bash
 docker build -t hvac .

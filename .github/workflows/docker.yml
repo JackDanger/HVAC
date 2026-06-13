@@ -60,14 +60,26 @@ jobs:
       - uses: actions/checkout@v4
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
-      - name: Build (no push)
+      # Load the amd64 image into the local daemon (rather than discarding
+      # it with push: false) so the smoke test below can actually run it. A
+      # plain build only proves the Dockerfile compiles; it can't catch a
+      # binary that crashes on start, a missing ffmpeg, or a wrong UID — all
+      # things the README promises a user. load: true requires a single
+      # platform, which is why this stays amd64-only (see job comment above).
+      - name: Build (amd64, load into daemon)
         uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64
           push: false
+          load: true
+          tags: hvac:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      # Assert the README/Dockerfile contract against the just-built image
+      # so a regression fails the PR instead of silently shipping to GHCR.
+      - name: Smoke test the image
+        run: ./scripts/docker-smoke.sh hvac:ci
 
   # Push builds: main + tag pushes. Distinct job so packages:write only
   # lives on the path that actually needs it.
@@ -116,6 +128,7 @@ jobs:
             type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || startsWith(github.ref, 'refs/tags/v') }}
 
       - name: Build + push
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -130,3 +143,26 @@ jobs:
           # that follows the merge.
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # Prove the artifact that just landed on GHCR is multi-arch. The
+      # README points NAS (aarch64) and Apple Silicon users at this image,
+      # so a publish that silently dropped arm64 would break them. Pin to
+      # the immutable index digest from the build step rather than a moving
+      # tag so this checks exactly what we pushed.
+      - name: Verify pushed image is multi-arch (amd64 + arm64)
+        run: |
+          ref="ghcr.io/jackdanger/hvac@${{ steps.build.outputs.digest }}"
+          echo "inspecting $ref"
+          platforms="$(docker buildx imagetools inspect "$ref" \
+            --format '{{range .Manifest.Manifests}}{{println .Platform.OS "/" .Platform.Architecture}}{{end}}')"
+          echo "$platforms"
+          echo "$platforms" | grep -q "linux / amd64" || { echo "missing linux/amd64"; exit 1; }
+          echo "$platforms" | grep -q "linux / arm64" || { echo "missing linux/arm64"; exit 1; }
+
+      # Pull the just-pushed image back from GHCR (by digest) and run the
+      # same contract checks the PR ran. This is the end-to-end guarantee
+      # that what users `docker pull` actually works — registry round-trip
+      # included, not just the local build. The runner is amd64, so this
+      # exercises the amd64 variant of the multi-arch index.
+      - name: Smoke test the pushed image
+        run: ./scripts/docker-smoke.sh "ghcr.io/jackdanger/hvac@${{ steps.build.outputs.digest }}"
