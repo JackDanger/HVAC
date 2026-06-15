@@ -166,7 +166,7 @@ jobs:
         # tests; otherwise tests/cli_smoke.rs coverage is invisible.
         run: cargo llvm-cov --all-targets --lcov --output-path lcov.info
       - name: Upload to codecov.io
-        uses: codecov/codecov-action@v6
+        uses: codecov/codecov-action@v7
         with:
           files: lcov.info
           fail_ci_if_error: false
