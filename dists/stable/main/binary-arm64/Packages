@@ -113,3 +113,26 @@ Description: GPU-accelerated media transcoder (HEVC/h265 via NVENC, VAAPI, Video
  VideoToolbox). Smart-skip avoids re-encoding files that already meet the
  target codec/resolution/bitrate.
 
+Package: hvac
+Architecture: arm64
+Version: 5.4.2-1
+Priority: optional
+Section: video
+Maintainer: Jack Danger <jack@jackdanger.com>
+Installed-Size: 8679
+Depends: ffmpeg, libc6
+Recommends: vainfo, intel-media-va-driver, mesa-va-drivers
+Filename: pool/main/hvac_5.4.2_arm64.deb
+Size: 2544508
+MD5sum: 7137e178005fd7a8709fb3549f9e3ac7
+SHA1: e02deb892d13248e3bde5e0773554d67112633c5
+SHA256: 68e7e6e36198833a97f86e92b1ecbf507d9a5fa12e60dcf1d86fe2894179b656
+SHA512: ac350121ef4863cd1e97d9328936aec514e37076030d4ee1c48c7a9b6a612f01f043071188634936c9f5dd2cfcf50f66c73ceea9e60a2c7e45a3d743bfb1899b
+Homepage: https://github.com/JackDanger/hvac
+Description: GPU-accelerated media transcoder (HEVC/h265 via NVENC, VAAPI, VideoToolbox).
+ Single-binary Tdarr alternative.
+ hvac scans media directories and transcodes video files to highly-compressed
+ HEVC/h265 using GPU acceleration (NVIDIA NVENC, Intel VAAPI, or Apple
+ VideoToolbox). Smart-skip avoids re-encoding files that already meet the
+ target codec/resolution/bitrate.
+
