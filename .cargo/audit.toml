@@ -1,0 +1,3 @@
+[advisories]
+# RUSTSEC-2026-0253: lru 0.16 via launchdarkly-server-sdk, whose LruCache keys are Strings (Drop cannot panic). Remove once the SDK requires lru >= 0.18.2.
+ignore = ["RUSTSEC-2026-0253"]
