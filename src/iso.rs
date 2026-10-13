@@ -151,14 +151,10 @@ fn find_dir<'a>(root: &'a isomage::TreeNode, path: &str) -> Option<&'a isomage::
 
     for part in &parts {
         let lower = part.to_lowercase();
-        let found = current
+        current = current
             .children
             .iter()
-            .find(|c| c.is_directory && c.name.to_lowercase() == lower);
-        match found {
-            Some(child) => current = child,
-            None => return None,
-        }
+            .find(|c| c.is_directory && c.name.to_lowercase() == lower)?;
     }
 
     Some(current)
