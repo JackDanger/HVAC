@@ -10,7 +10,17 @@ it becomes the new version section and a fresh `Unreleased` is opened.
 
 ## [Unreleased]
 
+## [5.4.2] — 2026-10-13
+
 ### Fixed
+- **Encodes of BT.470BG / BT.470M sources failed to start (exit 234).**
+  ffprobe names transfer characteristics 4 and 5 `bt470m` / `bt470bg`, but
+  ffmpeg's `-color_trc` option only accepts `gamma22` / `gamma28`, so hvac
+  forwarded a value every encoder refused ("Error setting option color_trc
+  to value bt470bg"). Color tags are now translated to the names ffmpeg's
+  options accept (`gbr` → `rgb` for `-colorspace` too), and reserved or
+  unrecognised values are left unset. If an encoder still rejects a color
+  tag, the file is retried once without color tags instead of failing.
 - **Homebrew install failure (`Errno::ENOENT … config.yaml`).** The generated
   formula used `etc.install "config.yaml" => "hvac/config.yaml"`, but Homebrew's
   rename-install does not create the nested `etc/hvac` directory, so the install
@@ -240,7 +250,8 @@ it becomes the new version section and a fresh `Unreleased` is opened.
 Initial public releases. See `git log` for individual commits prior to
 the changelog being established.
 
-[Unreleased]: https://github.com/JackDanger/hvac/compare/v5.4.1...HEAD
+[Unreleased]: https://github.com/JackDanger/hvac/compare/v5.4.2...HEAD
+[5.4.2]: https://github.com/JackDanger/hvac/compare/v5.4.0...v5.4.2
 [5.4.1]: https://github.com/JackDanger/hvac/compare/v5.4.0...v5.4.1
 [5.4.0]: https://github.com/JackDanger/hvac/compare/v5.3.0...v5.4.0
 [5.3.0]: https://github.com/JackDanger/hvac/compare/v5.2.5...v5.3.0

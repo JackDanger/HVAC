@@ -66,6 +66,9 @@ pub enum RetryDecision {
     SessionLimit,
     /// Disk-space exhaustion. Wait for other encodes to free space.
     DiskSpace,
+    /// The encoder rejected a forwarded color tag. Retry with no color
+    /// tags at all — an untagged encode beats no encode.
+    DropColorTags,
     /// Nothing we know how to recover from; surface the error to the user.
     Bail,
 }
@@ -80,6 +83,7 @@ pub struct RetryState {
     pub force_reencode_audio: bool,
     pub subtitle_reencode_attempt: Option<&'static str>,
     pub skip_subs: bool,
+    pub drop_color_tags: bool,
 }
 
 /// Classify an ffmpeg failure into a [`RetryDecision`].
@@ -90,6 +94,9 @@ pub struct RetryState {
 pub fn classify_failure(err_str: &str, state: &RetryState) -> RetryDecision {
     if transcode::is_disk_space_error(err_str) && state.disk_space_retries < MAX_SESSION_RETRIES {
         return RetryDecision::DiskSpace;
+    }
+    if transcode::is_color_option_error(err_str) && !state.drop_color_tags {
+        return RetryDecision::DropColorTags;
     }
     if transcode::is_audio_copy_error(err_str) && !state.force_reencode_audio {
         return RetryDecision::ReencodeAudio;
@@ -477,6 +484,8 @@ fn encode_with_retry(
                 let err_str = e.to_string();
                 let error_category = if transcode::is_session_limit_error(&err_str) {
                     "session-limit"
+                } else if transcode::is_color_option_error(&err_str) {
+                    "color-tags"
                 } else if transcode::is_audio_copy_error(&err_str) {
                     "audio-copy"
                 } else if transcode::is_subtitle_error(&err_str) {
@@ -551,6 +560,12 @@ fn run_one_encode(
     ctx: &WorkerCtx,
     my_slot: &Arc<WorkerSlot>,
 ) -> anyhow::Result<PathBuf> {
+    let untagged = transcode::ColorMetadata::default();
+    let color = if state.drop_color_tags {
+        &untagged
+    } else {
+        &item.color
+    };
     if let Some(ref iso) = item.iso_path {
         let out = output_path.expect("ISO entries always need an output path");
         let paths = item
@@ -567,7 +582,7 @@ fn run_one_encode(
             item.bitrate_kbps,
             item.duration_secs,
             &item.pix_fmt,
-            &item.color,
+            color,
             Some(&my_slot.progress),
             Some(&my_slot.speed),
             state.skip_subs,
@@ -584,7 +599,7 @@ fn run_one_encode(
             item.bitrate_kbps,
             item.duration_secs,
             &item.pix_fmt,
-            &item.color,
+            color,
             Some(&my_slot.progress),
             Some(&my_slot.speed),
             state.skip_subs,
@@ -614,6 +629,18 @@ fn apply_retry(
             my_slot.speed.store(0, Ordering::Relaxed);
             std::thread::sleep(Duration::from_secs(5));
             my_slot.disk_wait.store(false, Ordering::Relaxed);
+            true
+        }
+        RetryDecision::DropColorTags => {
+            state.drop_color_tags = true;
+            log::info!(
+                "{}: retrying without color tags (encoder rejected one)",
+                short_name
+            );
+            ctx.flags
+                .track_transcode_retry(short_name, 1, "drop-color-tags");
+            my_slot.progress.store(0, Ordering::Relaxed);
+            my_slot.speed.store(0, Ordering::Relaxed);
             true
         }
         RetryDecision::ReencodeAudio => {
@@ -748,6 +775,15 @@ mod tests {
         let s = RetryState::default();
         let d = classify_failure("Disk quota exceeded", &s);
         assert_eq!(d, RetryDecision::DiskSpace);
+    }
+
+    #[test]
+    fn classify_color_option_error_drops_tags_once() {
+        let mut s = RetryState::default();
+        let err = "[hevc_vaapi @ 0x1] Error setting option color_trc to value bt470bg.";
+        assert_eq!(classify_failure(err, &s), RetryDecision::DropColorTags);
+        s.drop_color_tags = true;
+        assert_eq!(classify_failure(err, &s), RetryDecision::Bail);
     }
 
     #[test]
