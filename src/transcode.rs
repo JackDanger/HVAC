@@ -147,28 +147,125 @@ impl ColorMetadata {
     }
 }
 
+/// Translate an ffprobe `color_primaries` name into the value ffmpeg's
+/// `-color_primaries` option accepts, or `None` when there is no valid
+/// equivalent (reserved / unrecognised values are left unset).
+fn ffmpeg_color_primaries(probed: &str) -> Option<&'static str> {
+    Some(match probed {
+        "bt709" => "bt709",
+        "bt470m" => "bt470m",
+        "bt470bg" => "bt470bg",
+        "smpte170m" => "smpte170m",
+        "smpte240m" => "smpte240m",
+        "film" => "film",
+        "bt2020" => "bt2020",
+        "smpte428" => "smpte428",
+        "smpte431" => "smpte431",
+        "smpte432" => "smpte432",
+        "ebu3213" | "jedec-p22" => "ebu3213",
+        _ => return None,
+    })
+}
+
+/// Translate an ffprobe `color_transfer` name into the value ffmpeg's
+/// `-color_trc` option accepts. ffprobe reports transfer 4 and 5 as
+/// `bt470m` / `bt470bg`, but the option only knows them as `gamma22` /
+/// `gamma28`; passing the probed name makes every encoder refuse to open
+/// ("Error setting option color_trc to value bt470bg").
+fn ffmpeg_color_trc(probed: &str) -> Option<&'static str> {
+    Some(match probed {
+        "bt709" => "bt709",
+        "bt470m" | "gamma22" => "gamma22",
+        "bt470bg" | "gamma28" => "gamma28",
+        "smpte170m" => "smpte170m",
+        "smpte240m" => "smpte240m",
+        "linear" => "linear",
+        "log100" | "log" => "log100",
+        "log316" | "log_sqrt" => "log316",
+        "iec61966-2-4" | "iec61966_2_4" => "iec61966-2-4",
+        "bt1361e" | "bt1361" => "bt1361e",
+        "iec61966-2-1" | "iec61966_2_1" => "iec61966-2-1",
+        "bt2020-10" | "bt2020_10bit" => "bt2020-10",
+        "bt2020-12" | "bt2020_12bit" => "bt2020-12",
+        "smpte2084" => "smpte2084",
+        "smpte428" | "smpte428_1" => "smpte428",
+        "arib-std-b67" => "arib-std-b67",
+        _ => return None,
+    })
+}
+
+/// Translate an ffprobe `color_space` name into the value ffmpeg's
+/// `-colorspace` option accepts. ffprobe calls matrix 0 `gbr`; the option
+/// calls it `rgb`.
+fn ffmpeg_colorspace(probed: &str) -> Option<&'static str> {
+    Some(match probed {
+        "gbr" | "rgb" => "rgb",
+        "bt709" => "bt709",
+        "fcc" => "fcc",
+        "bt470bg" => "bt470bg",
+        "smpte170m" => "smpte170m",
+        "smpte240m" => "smpte240m",
+        "ycgco" | "ycocg" => "ycgco",
+        "bt2020nc" | "bt2020_ncl" => "bt2020nc",
+        "bt2020c" | "bt2020_cl" => "bt2020c",
+        "smpte2085" => "smpte2085",
+        "chroma-derived-nc" => "chroma-derived-nc",
+        "chroma-derived-c" => "chroma-derived-c",
+        "ictcp" => "ictcp",
+        _ => return None,
+    })
+}
+
+/// Translate an ffprobe `color_range` name into the value ffmpeg's
+/// `-color_range` option accepts.
+fn ffmpeg_color_range(probed: &str) -> Option<&'static str> {
+    Some(match probed {
+        "tv" | "mpeg" | "limited" => "tv",
+        "pc" | "jpeg" | "full" => "pc",
+        _ => return None,
+    })
+}
+
+/// Maps a probed color-tag name to the spelling ffmpeg's option accepts.
+type ColorTagTranslator = fn(&str) -> Option<&'static str>;
+
 /// Build the list of color/HDR ffmpeg args to forward.
 /// `-color_primaries`, `-color_trc`, `-colorspace`, `-color_range` work with
 /// every encoder we use (NVENC, VAAPI, VideoToolbox); `-master_display` and
 /// `-max_cll` are NVENC-specific HDR10 passthrough flags so we emit them
-/// only when targeting an Nvidia GPU. Pure function — easy to unit-test.
+/// only when targeting an Nvidia GPU. Probed names are translated to the
+/// spelling ffmpeg's options accept; a value with no valid equivalent is
+/// left unset rather than failing the encode. Pure function — easy to
+/// unit-test.
 fn build_color_args(color: &ColorMetadata, gpu_kind: &GpuKind) -> Vec<String> {
+    let tags: [(&str, Option<&String>, ColorTagTranslator); 4] = [
+        (
+            "-color_primaries",
+            color.color_primaries.as_ref(),
+            ffmpeg_color_primaries,
+        ),
+        (
+            "-color_trc",
+            color.color_transfer.as_ref(),
+            ffmpeg_color_trc,
+        ),
+        ("-colorspace", color.color_space.as_ref(), ffmpeg_colorspace),
+        (
+            "-color_range",
+            color.color_range.as_ref(),
+            ffmpeg_color_range,
+        ),
+    ];
     let mut args = Vec::new();
-    if let Some(v) = color.color_primaries.as_deref() {
-        args.push("-color_primaries".to_string());
-        args.push(v.to_string());
-    }
-    if let Some(v) = color.color_transfer.as_deref() {
-        args.push("-color_trc".to_string());
-        args.push(v.to_string());
-    }
-    if let Some(v) = color.color_space.as_deref() {
-        args.push("-colorspace".to_string());
-        args.push(v.to_string());
-    }
-    if let Some(v) = color.color_range.as_deref() {
-        args.push("-color_range".to_string());
-        args.push(v.to_string());
+    for (flag, probed, translate) in tags {
+        let Some(probed) = probed else { continue };
+        match translate(probed.trim()) {
+            Some(v) => {
+                args.push(flag.to_string());
+                args.push(v.to_string());
+            }
+            None => log::debug!("dropping unsupported {flag} value {probed:?}"),
+        }
     }
     if matches!(gpu_kind, GpuKind::Nvidia) {
         if let Some(v) = color.master_display.as_deref() {
@@ -886,6 +983,16 @@ fn apply_subtitle_args(
     }
 }
 
+/// Check if an ffmpeg error is the encoder refusing one of the forwarded
+/// color tags (`-color_primaries`, `-color_trc`, `-colorspace`,
+/// `-color_range`), e.g. "Error setting option color_trc to value bt470bg".
+pub fn is_color_option_error(error_msg: &str) -> bool {
+    let lower = error_msg.to_lowercase();
+    ["color_primaries", "color_trc", "colorspace", "color_range"]
+        .iter()
+        .any(|opt| lower.contains(&format!("error setting option {opt} to value")))
+}
+
 /// Check if an ffmpeg error looks like an NVENC session limit issue.
 /// Matches NVENC-specific init errors and the "Nothing was written" pattern
 /// which is the most common manifestation of session exhaustion.
@@ -1490,5 +1597,69 @@ Conversion failed!
         assert_eq!(cm.color_space.as_deref(), Some("bt2020nc"));
         assert_eq!(cm.color_range.as_deref(), Some("tv"));
         assert_eq!(cm.max_cll.as_deref(), Some("1000,400"));
+    }
+
+    #[test]
+    fn test_build_color_args_translates_probe_names_to_option_names() {
+        // ffprobe's names for these differ from the AVOption constants; the
+        // probed spelling made hevc_vaapi refuse to open (exit 234).
+        let color = ColorMetadata {
+            color_primaries: Some("bt470bg".to_string()),
+            color_transfer: Some("bt470bg".to_string()),
+            color_space: Some("gbr".to_string()),
+            color_range: Some("tv".to_string()),
+            ..ColorMetadata::default()
+        };
+        let args = build_color_args(&color, &GpuKind::Intel);
+        assert_eq!(
+            args,
+            vec![
+                "-color_primaries",
+                "bt470bg",
+                "-color_trc",
+                "gamma28",
+                "-colorspace",
+                "rgb",
+                "-color_range",
+                "tv",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_ffmpeg_color_trc_mapping() {
+        assert_eq!(ffmpeg_color_trc("bt470m"), Some("gamma22"));
+        assert_eq!(ffmpeg_color_trc("bt470bg"), Some("gamma28"));
+        assert_eq!(ffmpeg_color_trc("smpte2084"), Some("smpte2084"));
+        assert_eq!(ffmpeg_color_trc("arib-std-b67"), Some("arib-std-b67"));
+        assert_eq!(ffmpeg_color_trc("reserved"), None);
+        assert_eq!(ffmpeg_color_trc("unknown"), None);
+        assert_eq!(ffmpeg_color_trc("something-new"), None);
+    }
+
+    #[test]
+    fn test_build_color_args_drops_reserved_and_unknown_values() {
+        let color = ColorMetadata {
+            color_primaries: Some("reserved".to_string()),
+            color_transfer: Some("bt709".to_string()),
+            color_space: Some("reserved".to_string()),
+            color_range: Some("unknown".to_string()),
+            ..ColorMetadata::default()
+        };
+        let args = build_color_args(&color, &GpuKind::Intel);
+        assert_eq!(args, vec!["-color_trc", "bt709"]);
+    }
+
+    #[test]
+    fn test_is_color_option_error() {
+        let err = "ffmpeg failed (exit status: 234): [hevc_vaapi @ 0x56e9fad7e3c0] \
+                   Error setting option color_trc to value bt470bg. | \
+                   Error applying encoder options: Invalid argument";
+        assert!(is_color_option_error(err));
+        assert!(is_color_option_error(
+            "Error setting option colorspace to value ipt-c2."
+        ));
+        assert!(!is_color_option_error("Error setting option b to value 0"));
+        assert!(!is_color_option_error("No wav codec tag found"));
     }
 }
