@@ -16,10 +16,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::flags::Flags;
-use crate::ui::{progress_bar_str, Symbols};
+use crate::ui::{Symbols, progress_bar_str};
 
 use super::worker::lower_max;
-use super::{WorkerSlot, CANCELLED, LD_KILL};
+use super::{CANCELLED, LD_KILL, WorkerSlot};
 
 /// Render-thread state. Held by the spawn callback so each Arc is cloned once.
 pub struct RenderCtx {

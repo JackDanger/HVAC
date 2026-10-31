@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -137,38 +137,38 @@ fn check_ffmpeg_binary(binary: &str, encoder: &str) -> FfmpegCheck {
 /// Returns the package name (e.g. `"ffmpeg"`) or `None` for custom builds.
 fn owning_package(path: &str) -> Option<String> {
     // Debian/Ubuntu: "package: /path"
-    if let Ok(out) = Command::new("dpkg").args(["-S", path]).output() {
-        if out.status.success() {
-            let s = String::from_utf8_lossy(&out.stdout);
-            if let Some(pkg) = s.split(':').next() {
-                let pkg = pkg.trim();
-                if !pkg.is_empty() {
-                    return Some(pkg.to_string());
-                }
+    if let Ok(out) = Command::new("dpkg").args(["-S", path]).output()
+        && out.status.success()
+    {
+        let s = String::from_utf8_lossy(&out.stdout);
+        if let Some(pkg) = s.split(':').next() {
+            let pkg = pkg.trim();
+            if !pkg.is_empty() {
+                return Some(pkg.to_string());
             }
         }
     }
     // RPM-based (Fedora, RHEL, CentOS)
-    if let Ok(out) = Command::new("rpm").args(["-qf", path]).output() {
-        if out.status.success() {
-            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !s.is_empty() && !s.contains("not owned") {
-                return Some(s);
-            }
+    if let Ok(out) = Command::new("rpm").args(["-qf", path]).output()
+        && out.status.success()
+    {
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !s.is_empty() && !s.contains("not owned") {
+            return Some(s);
         }
     }
     // Arch Linux
-    if let Ok(out) = Command::new("pacman").args(["-Qo", path]).output() {
-        if out.status.success() {
-            // "path is owned by package version"
-            if let Some(pkg) = String::from_utf8_lossy(&out.stdout)
-                .split("owned by ")
-                .nth(1)
-                .and_then(|s| s.split_whitespace().next())
-                .map(String::from)
-            {
-                return Some(pkg);
-            }
+    if let Ok(out) = Command::new("pacman").args(["-Qo", path]).output()
+        && out.status.success()
+    {
+        // "path is owned by package version"
+        if let Some(pkg) = String::from_utf8_lossy(&out.stdout)
+            .split("owned by ")
+            .nth(1)
+            .and_then(|s| s.split_whitespace().next())
+            .map(String::from)
+        {
+            return Some(pkg);
         }
     }
     None
@@ -199,10 +199,11 @@ fn find_alt_lib(missing: &str) -> Option<String> {
     for line in stdout.lines() {
         let t = line.trim();
         // Line format: "libfoo.so.N (libc6,...) => /path/to/libfoo.so.N"
-        if t.starts_with(base) && !t.starts_with(missing) {
-            if let Some(path) = t.split("=>").nth(1).map(str::trim) {
-                return Some(path.to_string());
-            }
+        if t.starts_with(base)
+            && !t.starts_with(missing)
+            && let Some(path) = t.split("=>").nth(1).map(str::trim)
+        {
+            return Some(path.to_string());
         }
     }
     None

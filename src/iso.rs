@@ -961,7 +961,7 @@ mod tests {
                 let paths: Vec<String> = a.main_feature.iter().map(|f| f.path.clone()).collect();
                 let mut buf = Vec::new();
                 cat_files(&p, &paths, &mut buf).expect("cat_files failed");
-                assert!(buf.len() > 0, "Concatenated output should be non-empty");
+                assert!(!buf.is_empty(), "Concatenated output should be non-empty");
                 // Total should be approximately the sum of individual sizes
                 let total_size: u64 = a.main_feature.iter().map(|f| f.size).sum();
                 assert!(

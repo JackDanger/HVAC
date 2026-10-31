@@ -10,6 +10,14 @@ it becomes the new version section and a fresh `Unreleased` is opened.
 
 ## [Unreleased]
 
+### Changed
+- **Rust 2024 edition, minimum Rust 1.99.** `rust-version` rises from 1.93
+  to 1.99; builds pinned to an older toolchain now fail to compile.
+- **OpenTelemetry 0.33** (from 0.32), and every other dependency on its
+  latest compatible release.
+- **Container image on Debian 13 (trixie),** built with `rust:1.99-trixie`;
+  the runtime ships trixie's ffmpeg.
+
 ### Fixed
 - **An encode could replace an original without shrinking it.** The only guard
   was capping ffmpeg's peak bitrate at the source's, which does not stop a

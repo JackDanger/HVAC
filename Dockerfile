@@ -32,7 +32,7 @@
 
 # ---- builder ----------------------------------------------------------------
 
-FROM rust:1.93-bookworm AS builder
+FROM rust:1.99-trixie AS builder
 
 WORKDIR /src
 # Copy the manifests first so `cargo fetch` is cached when only sources change.
@@ -47,7 +47,7 @@ RUN cargo build --release --locked && \
 
 # ---- runtime ----------------------------------------------------------------
 
-FROM debian:bookworm-slim AS runtime
+FROM debian:trixie-slim AS runtime
 
 # ffmpeg                  — the encoders hvac drives.
 # vainfo + libva-drm2     — VAAPI diagnostics + the run-time userland.

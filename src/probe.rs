@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
@@ -366,10 +366,10 @@ pub fn probe_file_with_timeout(path: &Path, timeout: Duration) -> Result<MediaIn
     // already gave us both fields, and when basic color tags say SDR (no
     // HDR-relevant transfer function). On a typical SDR-only library this
     // saves one subprocess per file across the whole scan.
-    if needs_frame_side_data_probe(&info) {
-        if let Ok(frame_out) = probe_first_frame_side_data(path, timeout) {
-            apply_frame_side_data(&mut info, &frame_out);
-        }
+    if needs_frame_side_data_probe(&info)
+        && let Ok(frame_out) = probe_first_frame_side_data(path, timeout)
+    {
+        apply_frame_side_data(&mut info, &frame_out);
     }
 
     Ok(info)
@@ -837,10 +837,10 @@ pub fn parse_year(text: &str) -> Option<u16> {
         }
         // SAFETY: the slice is verified ASCII-digit, hence valid UTF-8.
         let s = std::str::from_utf8(&bytes[i..i + 4]).unwrap();
-        if let Ok(y) = s.parse::<u16>() {
-            if (1900..=2099).contains(&y) {
-                return Some(y);
-            }
+        if let Ok(y) = s.parse::<u16>()
+            && (1900..=2099).contains(&y)
+        {
+            return Some(y);
         }
     }
     None

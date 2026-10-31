@@ -26,8 +26,8 @@ pub mod scan;
 pub mod worker;
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 
 use crate::transcode;
 
@@ -158,10 +158,10 @@ pub fn cleanup_tmp_dirs() {
 fn cleanup_tmp_in_dir(dir: &std::path::Path) {
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str() {
-                if name.starts_with(".hvac_tmp_") {
-                    let _ = std::fs::remove_file(entry.path());
-                }
+            if let Some(name) = entry.file_name().to_str()
+                && name.starts_with(".hvac_tmp_")
+            {
+                let _ = std::fs::remove_file(entry.path());
             }
         }
     }

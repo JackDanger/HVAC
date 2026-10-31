@@ -1,4 +1,4 @@
-use opentelemetry::{global, trace::Span, trace::Tracer, KeyValue};
+use opentelemetry::{KeyValue, global, trace::Span, trace::Tracer};
 use opentelemetry_otlp::{WithExportConfig, WithHttpConfig};
 // `SdkTracerProvider` is the SDK-side concrete type (renamed from
 // `TracerProvider` in 0.28). It implements the trait
@@ -6,8 +6,8 @@ use opentelemetry_otlp::{WithExportConfig, WithHttpConfig};
 // requires. `SimpleSpanProcessor::new` now takes the exporter by value
 // (no `Box`). `Resource` switched to a builder API.
 use opentelemetry_sdk::{
-    trace::{SdkTracerProvider, SimpleSpanProcessor},
     Resource,
+    trace::{SdkTracerProvider, SimpleSpanProcessor},
 };
 use std::collections::HashMap;
 

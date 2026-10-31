@@ -1,5 +1,5 @@
-use anyhow::{bail, Context, Result};
-use serde_json::{json, Value};
+use anyhow::{Context, Result, bail};
+use serde_json::{Value, json};
 
 const BASE: &str = "https://app.launchdarkly.com/api/v2";
 const PROJECT_KEY: &str = "hvac";
