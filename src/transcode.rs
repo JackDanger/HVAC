@@ -539,35 +539,18 @@ pub fn transcode(
         bail!("Output validation failed: {}", e);
     }
 
-    // Copy permissions (user, group, mode) from source to output
+    let output_size = ensure_shrinks(&final_output, source_size)?;
+    log::debug!(
+        "Size: {} -> {} (-{:.1}%)",
+        format_size(source_size),
+        format_size(output_size),
+        (source_size - output_size) as f64 / source_size as f64 * 100.0,
+    );
+
     copy_permissions(source, &final_output)?;
 
-    // Report size savings at debug level
-    let output_size = std::fs::metadata(&final_output)
-        .map(|m| m.len())
-        .unwrap_or(0);
-    if source_size > 0 && output_size > 0 {
-        let saved = source_size as i64 - output_size as i64;
-        let pct = (saved as f64 / source_size as f64) * 100.0;
-        log::debug!(
-            "Size: {} -> {} ({:+.1}%)",
-            format_size(source_size),
-            format_size(output_size),
-            -pct,
-        );
-    }
-
-    // If in-place mode, replace original only after validation passes
     if output.is_none() {
-        std::fs::rename(&final_output, source)
-            .context("Failed to replace original file with transcoded version")?;
-        // Write the completion marker only AFTER the rename succeeds so a
-        // failed rename doesn't orphan a markerless `.hvac_tmp_*` file.
-        let final_size = std::fs::metadata(source).map(|m| m.len()).unwrap_or(0);
-        if let Err(e) = write_marker(source, final_size, source_duration_secs) {
-            log::warn!("Failed to write completion marker for {:?}: {}", source, e);
-        }
-        return Ok(source.to_path_buf());
+        return install_over_original(&final_output, source, &target.container);
     }
 
     // --no-overwrite path: marker sits next to the new output file.
@@ -843,6 +826,7 @@ pub fn transcode_iso(
     // consistent so a future resume adopts the output iff the disc is byte-
     // identical to the one we encoded from.
     let iso_size = std::fs::metadata(iso_path).map(|m| m.len()).unwrap_or(0);
+    ensure_shrinks(&final_output, iso_size)?;
     if let Err(e) = write_marker(&final_output, iso_size, source_duration_secs) {
         log::warn!(
             "Failed to write completion marker for {:?}: {}",
@@ -1024,6 +1008,74 @@ pub fn is_subtitle_error(error_msg: &str) -> bool {
         || lower.contains("codec not currently supported in container")
 }
 
+/// Prefix of the error an encode returns when its output is no smaller than
+/// its source. The output has already been deleted; the source is untouched.
+pub const NOT_SMALLER: &str = "encode would not shrink the file";
+
+/// True when an encode was discarded because it would not have saved space.
+pub fn is_not_smaller_error(error_msg: &str) -> bool {
+    error_msg.starts_with(NOT_SMALLER)
+}
+
+/// Refuse an output that is not strictly smaller than its source, deleting
+/// the output (and any marker beside it) so nothing is left behind.
+fn ensure_shrinks(output: &Path, source_size: u64) -> Result<u64> {
+    let output_size = std::fs::metadata(output).map(|m| m.len()).unwrap_or(0);
+    if source_size == 0 || output_size == 0 || output_size >= source_size {
+        let _ = std::fs::remove_file(output);
+        remove_marker(output);
+        bail!(
+            "{}: {} -> {}; the original is kept as it was",
+            NOT_SMALLER,
+            format_size(source_size),
+            format_size(output_size)
+        );
+    }
+    Ok(output_size)
+}
+
+/// Where an in-place result lands: the source's own path when the container
+/// already matches its extension, else the same stem with the container's
+/// extension, so an `.avi` never ends up holding Matroska data.
+pub fn in_place_destination(source: &Path, container: &str) -> PathBuf {
+    let matches = source
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case(container));
+    if matches {
+        source.to_path_buf()
+    } else {
+        source.with_extension(container)
+    }
+}
+
+/// Move a validated, smaller encode into the original's place. When the
+/// container changes the extension, the result takes the new name (never
+/// clobbering an existing file) and the original is removed after the
+/// rename succeeds. Returns the path the result now lives at.
+fn install_over_original(encoded: &Path, original: &Path, container: &str) -> Result<PathBuf> {
+    let destination = in_place_destination(original, container);
+    if destination != original && destination.exists() {
+        let _ = std::fs::remove_file(encoded);
+        bail!(
+            "{:?} already exists; the original {:?} is kept as it was",
+            destination,
+            original
+        );
+    }
+    std::fs::rename(encoded, &destination)
+        .with_context(|| format!("Failed to move the encode into place at {:?}", destination))?;
+    if destination != original {
+        std::fs::remove_file(original).with_context(|| {
+            format!(
+                "Encoded to {:?} but could not remove the original {:?}",
+                destination, original
+            )
+        })?;
+    }
+    Ok(destination)
+}
+
 /// Check if an ffmpeg error is a disk space issue.
 pub fn is_disk_space_error(error_msg: &str) -> bool {
     error_msg.contains("Disk quota exceeded")
@@ -1148,32 +1200,96 @@ pub fn replace_original(
     validate_output(transcoded, original, source_duration_secs)?;
 
     let original_size = std::fs::metadata(original).map(|m| m.len()).unwrap_or(0);
-    let transcoded_size = std::fs::metadata(transcoded).map(|m| m.len()).unwrap_or(0);
+    let transcoded_size = ensure_shrinks(transcoded, original_size)?;
 
     copy_permissions(original, transcoded)?;
 
-    // Delete the transcoded sibling's marker AFTER the rename succeeds. A
-    // failed rename leaves the marker intact alongside the still-valid file
-    // so the next run can adopt it; a pre-rename delete would orphan it.
-    std::fs::rename(transcoded, original)
-        .with_context(|| format!("Failed to replace {:?} with transcoded version", original))?;
+    let container = transcoded
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_string();
+    // The marker stays until the move succeeds, so a failed move leaves the
+    // copy adoptable on the next run; once moved, nothing reads it.
+    install_over_original(transcoded, original, &container)?;
     remove_marker(transcoded);
 
-    let final_size = std::fs::metadata(original).map(|m| m.len()).unwrap_or(0);
-    if let Err(e) = write_marker(original, final_size, source_duration_secs) {
-        log::warn!(
-            "Failed to write completion marker for {:?}: {}",
-            original,
-            e
-        );
-    }
-
-    Ok(original_size.saturating_sub(transcoded_size))
+    Ok(original_size - transcoded_size)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_encode_that_does_not_shrink_is_deleted_and_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("film.transcoded.mkv");
+        std::fs::write(&out, vec![0u8; 100]).unwrap();
+        std::fs::write(marker_path(&out), "{}").unwrap();
+        let err = ensure_shrinks(&out, 100).unwrap_err().to_string();
+        assert!(is_not_smaller_error(&err), "{err}");
+        assert!(!out.exists(), "a refused encode must leave nothing behind");
+        assert!(!marker_path(&out).exists());
+
+        std::fs::write(&out, vec![0u8; 99]).unwrap();
+        assert_eq!(ensure_shrinks(&out, 100).unwrap(), 99);
+        assert!(out.exists());
+    }
+
+    #[test]
+    fn in_place_keeps_the_name_only_when_the_container_matches() {
+        assert_eq!(
+            in_place_destination(Path::new("/m/Film.mkv"), "mkv"),
+            Path::new("/m/Film.mkv")
+        );
+        assert_eq!(
+            in_place_destination(Path::new("/m/Film.MKV"), "mkv"),
+            Path::new("/m/Film.MKV")
+        );
+        assert_eq!(
+            in_place_destination(Path::new("/m/Film DVD.avi"), "mkv"),
+            Path::new("/m/Film DVD.mkv")
+        );
+        assert_eq!(
+            in_place_destination(Path::new("/m/Valmont.VOB"), "mkv"),
+            Path::new("/m/Valmont.mkv")
+        );
+    }
+
+    #[test]
+    fn installing_over_an_avi_renames_and_removes_the_original_without_detritus() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("Film DVD.avi");
+        let encoded = dir.path().join(".hvac_tmp_Film DVD.mkv");
+        std::fs::write(&original, "old").unwrap();
+        std::fs::write(&encoded, "new").unwrap();
+        let landed = install_over_original(&encoded, &original, "mkv").unwrap();
+        assert_eq!(landed, dir.path().join("Film DVD.mkv"));
+        assert_eq!(std::fs::read_to_string(&landed).unwrap(), "new");
+        assert!(!original.exists());
+        let mut names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        names.sort();
+        assert_eq!(names, vec![std::ffi::OsString::from("Film DVD.mkv")]);
+    }
+
+    #[test]
+    fn installing_never_clobbers_an_existing_file_of_the_new_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("Film.avi");
+        let taken = dir.path().join("Film.mkv");
+        let encoded = dir.path().join(".hvac_tmp_Film.mkv");
+        std::fs::write(&original, "old").unwrap();
+        std::fs::write(&taken, "someone else's").unwrap();
+        std::fs::write(&encoded, "new").unwrap();
+        assert!(install_over_original(&encoded, &original, "mkv").is_err());
+        assert_eq!(std::fs::read_to_string(&original).unwrap(), "old");
+        assert_eq!(std::fs::read_to_string(&taken).unwrap(), "someone else's");
+        assert!(!encoded.exists());
+    }
 
     #[test]
     fn test_output_path_next_to_source() {

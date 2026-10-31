@@ -63,9 +63,11 @@ hvac --no-overwrite /path/to/movies   # write .transcoded.mkv copies, keep origi
 ```
 
 It scans the directory, skips files that already meet the target, and re-encodes
-the rest. Re-running picks up where you left off — there's a sidecar
-`.hvac.complete` next to each output that records source size + duration so the
-next run knows whether to adopt it or re-encode. Ctrl-C is safe; in-progress
+the rest. An encode that comes out no smaller than its source is thrown away and
+the original kept. Re-running picks up where you left off — each `--no-overwrite`
+copy has a sidecar `.hvac.complete` recording source size + duration so the
+next run knows whether to adopt it or re-encode; in-place encodes leave nothing
+beside the file. Ctrl-C is safe; in-progress
 encodes leave a `.hvac_tmp_*` file that the next run sweeps.
 
 ---
@@ -246,8 +248,11 @@ the off-box pattern.
 
 **"Will it touch my files?"** It overwrites by default — only after
 the new encode has passed an ffprobe duration + codec + min-size
-check, and only via an atomic rename of a `.hvac_tmp_…` sidecar over
-the original. The first run on a library you care about should be
+check and come out smaller than the original, and only via an atomic
+rename of a `.hvac_tmp_…` sidecar over the original. When the container
+changes the extension (`Film.avi` → `Film.mkv`) the original is removed
+once the new file is in place. Disc images and the streams inside
+`BDMV/` / `VIDEO_TS/` folders are left alone in this mode. The first run on a library you care about should be
 `hvac --dry-run`, then `hvac --no-overwrite`; the latter writes
 `.transcoded.<ext>` copies you can compare before committing with
 `--replace`.

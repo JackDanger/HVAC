@@ -131,6 +131,12 @@ fn classify_item(
     probe_timeout: Duration,
     writable_cache: &mut HashMap<PathBuf, bool>,
 ) -> Outcome {
+    if overwrite && item.iso_path.is_some() {
+        return Outcome::Skip(format!(
+            "keep: {:?}: a disc image can't be shrunk in place; --no-overwrite extracts its feature",
+            item.file.file_name().unwrap_or_default()
+        ));
+    }
     let probe_result = match (&item.iso_path, &item.inner_path) {
         (Some(ip), Some(inner)) => probe::probe_iso_file_with_timeout(ip, inner, probe_timeout),
         _ => probe::probe_file_with_timeout(&item.file, probe_timeout),

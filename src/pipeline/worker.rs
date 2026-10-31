@@ -482,6 +482,10 @@ fn encode_with_retry(
                 ctx.disk_reserved.fetch_sub(disk_estimate, Ordering::SeqCst);
 
                 let err_str = e.to_string();
+                if transcode::is_not_smaller_error(&err_str) {
+                    record_kept(&err_str, ctx, my_slot, short_name);
+                    return None;
+                }
                 let error_category = if transcode::is_session_limit_error(&err_str) {
                     "session-limit"
                 } else if transcode::is_color_option_error(&err_str) {
@@ -709,6 +713,19 @@ fn apply_retry(
         }
         RetryDecision::Bail => false,
     }
+}
+
+/// Record an encode that was discarded because it would not have saved space:
+/// the original is untouched and nothing was written, so this is neither a
+/// success nor a failure.
+fn record_kept(reason: &str, ctx: &WorkerCtx, my_slot: &Arc<WorkerSlot>, short_name: &str) {
+    *my_slot.info.lock().unwrap() = None;
+    my_slot.progress.store(0, Ordering::Relaxed);
+    my_slot.speed.store(0, Ordering::Relaxed);
+    ctx.completed_lines
+        .lock()
+        .unwrap()
+        .push(format!("  = {} ({})", short_name, reason));
 }
 
 /// Record a successful encode: bump byte counters, push a completed line,

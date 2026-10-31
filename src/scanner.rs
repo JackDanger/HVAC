@@ -123,6 +123,20 @@ fn walk_files(dir: &Path, out: &mut Vec<PathBuf>, visited_dirs: &mut HashSet<Pat
     }
 }
 
+/// Directories that hold a disc's own structure. Their streams are pieces of
+/// the disc (menus, angles, extras), and re-encoding one in place breaks it.
+const DISC_STRUCTURE_DIRS: [&str; 2] = ["BDMV", "VIDEO_TS"];
+
+fn inside_disc_structure(path: &Path) -> bool {
+    path.parent().is_some_and(|dir| {
+        dir.components().any(|c| {
+            DISC_STRUCTURE_DIRS
+                .iter()
+                .any(|d| c.as_os_str().to_string_lossy().eq_ignore_ascii_case(d))
+        })
+    })
+}
+
 /// Scan a directory tree for media files matching the given extensions.
 /// Also picks up .iso and .img disc images.
 /// Deduplicates by canonical path to avoid encoding the same file twice
@@ -161,6 +175,9 @@ pub fn scan(root: &Path, extensions: &[String]) -> Result<Vec<PathBuf>> {
                     return false;
                 }
             }
+            if inside_disc_structure(path) {
+                return false;
+            }
             if iso::is_disc_image(path) {
                 return true;
             }
@@ -186,6 +203,23 @@ pub fn scan(root: &Path, extensions: &[String]) -> Result<Vec<PathBuf>> {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn disc_structure_streams_are_never_scanned() {
+        let dir = tempfile::tempdir().unwrap();
+        let stream = dir.path().join("Film (2003)").join("BDMV").join("STREAM");
+        fs::create_dir_all(&stream).unwrap();
+        fs::write(stream.join("00001.m2ts"), "fake").unwrap();
+        let vts = dir.path().join("Other (1999)").join("video_ts");
+        fs::create_dir_all(&vts).unwrap();
+        fs::write(vts.join("VTS_01_1.VOB"), "fake").unwrap();
+        fs::write(dir.path().join("Film (2003)").join("Film.mkv"), "fake").unwrap();
+
+        let exts = vec!["mkv".to_string(), "m2ts".to_string(), "vob".to_string()];
+        let files = scan(dir.path(), &exts).unwrap();
+        assert_eq!(files.len(), 1, "{files:?}");
+        assert!(files[0].ends_with("Film.mkv"));
+    }
 
     #[test]
     fn test_scan_finds_files() {
