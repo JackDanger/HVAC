@@ -191,10 +191,10 @@ fn classify_item(
     }
 
     // Pre-flight: confirm destination dir is actually writable.
-    if !cli.dry_run {
-        if let Some(skip) = preflight_writable(item, cli, cfg, overwrite, writable_cache) {
-            return Outcome::Skip(skip);
-        }
+    if !cli.dry_run
+        && let Some(skip) = preflight_writable(item, cli, cfg, overwrite, writable_cache)
+    {
+        return Outcome::Skip(skip);
     }
 
     let color = transcode::ColorMetadata::from_media_info(&info);
@@ -436,14 +436,14 @@ fn preflight_writable(
     } else if let Some(d) = out_dir {
         // Worker will create_dir_all this path before writing; do the same
         // here so the probe doesn't ENOENT on a dir that's about to exist.
-        if !d.exists() {
-            if let Err(e) = std::fs::create_dir_all(d) {
-                let name = item.file.file_name().unwrap_or_default().to_string_lossy();
-                return Some(format!(
-                    "skip: {}: cannot create output directory {:?}: {}",
-                    name, d, e
-                ));
-            }
+        if !d.exists()
+            && let Err(e) = std::fs::create_dir_all(d)
+        {
+            let name = item.file.file_name().unwrap_or_default().to_string_lossy();
+            return Some(format!(
+                "skip: {}: cannot create output directory {:?}: {}",
+                name, d, e
+            ));
         }
         d.to_path_buf()
     } else {

@@ -401,19 +401,19 @@ fn build_client(sdk_key: &str) -> Option<Arc<Client>> {
 }
 
 fn get_hostname() -> String {
-    if let Ok(h) = std::env::var("HOSTNAME") {
-        if !h.is_empty() {
-            return h;
-        }
+    if let Ok(h) = std::env::var("HOSTNAME")
+        && !h.is_empty()
+    {
+        return h;
     }
     unsafe {
         let mut buf = vec![0u8; 256];
         if libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) == 0 {
             let cstr = std::ffi::CStr::from_ptr(buf.as_ptr() as *const libc::c_char);
-            if let Ok(s) = cstr.to_str() {
-                if !s.is_empty() {
-                    return s.to_string();
-                }
+            if let Ok(s) = cstr.to_str()
+                && !s.is_empty()
+            {
+                return s.to_string();
             }
         }
     }

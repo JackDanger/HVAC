@@ -18,10 +18,10 @@ use crate::config::Config;
 use crate::flags::Flags;
 use crate::gpu::GpuInfo;
 use crate::transcode;
-use crate::ui::{truncate_name, Symbols};
+use crate::ui::{Symbols, truncate_name};
 use crate::util::{self, format_size};
 
-use super::{WorkItem, WorkerSlot, CANCELLED, LD_KILL, TMP_DIRS};
+use super::{CANCELLED, LD_KILL, TMP_DIRS, WorkItem, WorkerSlot};
 
 /// Maximum times a single file may retry on session-limit / disk-space
 /// errors. Each retry waits for the offending pressure to clear.
@@ -392,12 +392,12 @@ fn register_tmp_dir(item: &WorkItem, output_path: Option<&Path>) {
     let parent = output_path
         .and_then(|p| p.parent())
         .or_else(|| item.path.parent());
-    if let Some(dir) = parent {
-        if let Ok(mut dirs) = TMP_DIRS.lock() {
-            let dir_buf = dir.to_path_buf();
-            if !dirs.contains(&dir_buf) {
-                dirs.push(dir_buf);
-            }
+    if let Some(dir) = parent
+        && let Ok(mut dirs) = TMP_DIRS.lock()
+    {
+        let dir_buf = dir.to_path_buf();
+        if !dirs.contains(&dir_buf) {
+            dirs.push(dir_buf);
         }
     }
 }
@@ -702,7 +702,8 @@ fn apply_retry(
                 ctx.ramping.store(false, Ordering::SeqCst);
                 log::info!(
                     "NVENC session limit hit {} times; freezing max parallel encoders at {} for the rest of this run.",
-                    hits, pin,
+                    hits,
+                    pin,
                 );
             }
 
@@ -829,8 +830,7 @@ mod tests {
     fn classify_nothing_written_routes_to_subtitle_tier() {
         // "Nothing was written" is the cascade for an incompatible subtitle codec.
         let s = RetryState::default();
-        let err =
-            "[out#0/matroska @ 0x1] Nothing was written into output file, because at least one of its streams received no packets.";
+        let err = "[out#0/matroska @ 0x1] Nothing was written into output file, because at least one of its streams received no packets.";
         assert_eq!(classify_failure(err, &s), RetryDecision::ReencodeSubtitles);
     }
 

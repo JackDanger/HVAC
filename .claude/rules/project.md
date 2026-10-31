@@ -53,7 +53,7 @@ This applies to Claude too: when asked to implement anything, Claude must create
 6. Open a PR; remove the worktree after merge
 
 ## Remote Host Info
-- Debian 12 (bookworm), Linux 6.8
-- NVIDIA GeForce RTX 2060 with NVENC, CUDA 12.2
-- ffmpeg n7.1 with hevc_nvenc, hevc_vaapi encoders
-- Rust 1.91.1, Cargo 1.91.1
+- CT 199 (`trainer`) on the Proxmox host neurotic, Debian 13 (trixie)
+- NVIDIA GeForce RTX 2060 with NVENC, shared with Plex and Frigate
+- Debian's ffmpeg, with the hevc_nvenc and hevc_vaapi encoders
+- Rust from rustup `stable`; it must stay at or above `rust-version` in Cargo.toml

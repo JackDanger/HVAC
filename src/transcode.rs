@@ -1,6 +1,6 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use std::io::BufRead;
-use std::os::unix::fs::{chown, MetadataExt};
+use std::os::unix::fs::{MetadataExt, chown};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -502,20 +502,20 @@ pub fn transcode(
 
         for line in reader.lines().map_while(Result::ok) {
             if let Some(time_str) = line.strip_prefix("out_time_us=") {
-                if let Ok(us) = time_str.parse::<i64>() {
-                    if duration_us > 0 && us > 0 {
-                        let pos =
-                            ((us as f64 / duration_us as f64) * 1000.0).clamp(0.0, 1000.0) as u64;
-                        prog.store(pos, Ordering::Relaxed);
-                    }
+                if let Ok(us) = time_str.parse::<i64>()
+                    && duration_us > 0
+                    && us > 0
+                {
+                    let pos = ((us as f64 / duration_us as f64) * 1000.0).clamp(0.0, 1000.0) as u64;
+                    prog.store(pos, Ordering::Relaxed);
                 }
-            } else if let Some(speed_str) = line.strip_prefix("speed=") {
-                if let Some(spd) = speed {
-                    // speed looks like "1.23x" or "N/A"
-                    let trimmed = speed_str.trim_end_matches('x');
-                    if let Ok(v) = trimmed.parse::<f64>() {
-                        spd.store((v * 100.0) as u64, Ordering::Relaxed);
-                    }
+            } else if let Some(speed_str) = line.strip_prefix("speed=")
+                && let Some(spd) = speed
+            {
+                // speed looks like "1.23x" or "N/A"
+                let trimmed = speed_str.trim_end_matches('x');
+                if let Ok(v) = trimmed.parse::<f64>() {
+                    spd.store((v * 100.0) as u64, Ordering::Relaxed);
                 }
             }
         }
@@ -753,19 +753,19 @@ pub fn transcode_iso(
 
         for line in reader.lines().map_while(Result::ok) {
             if let Some(time_str) = line.strip_prefix("out_time_us=") {
-                if let Ok(us) = time_str.parse::<i64>() {
-                    if duration_us > 0 && us > 0 {
-                        let pos =
-                            ((us as f64 / duration_us as f64) * 1000.0).clamp(0.0, 1000.0) as u64;
-                        prog.store(pos, Ordering::Relaxed);
-                    }
+                if let Ok(us) = time_str.parse::<i64>()
+                    && duration_us > 0
+                    && us > 0
+                {
+                    let pos = ((us as f64 / duration_us as f64) * 1000.0).clamp(0.0, 1000.0) as u64;
+                    prog.store(pos, Ordering::Relaxed);
                 }
-            } else if let Some(speed_str) = line.strip_prefix("speed=") {
-                if let Some(spd) = speed {
-                    let trimmed = speed_str.trim_end_matches('x');
-                    if let Ok(v) = trimmed.parse::<f64>() {
-                        spd.store((v * 100.0) as u64, Ordering::Relaxed);
-                    }
+            } else if let Some(speed_str) = line.strip_prefix("speed=")
+                && let Some(spd) = speed
+            {
+                let trimmed = speed_str.trim_end_matches('x');
+                if let Ok(v) = trimmed.parse::<f64>() {
+                    spd.store((v * 100.0) as u64, Ordering::Relaxed);
                 }
             }
         }
@@ -1149,10 +1149,10 @@ fn summarize_ffmpeg_error(stderr: &str) -> String {
     // Strip the "[module @ 0xADDR]" prefix that varies per run, so identical
     // messages cascading through different modules dedupe cleanly.
     fn body(line: &str) -> &str {
-        if let Some(rest) = line.strip_prefix('[') {
-            if let Some(end) = rest.find("] ") {
-                return rest[end + 2..].trim_start();
-            }
+        if let Some(rest) = line.strip_prefix('[')
+            && let Some(end) = rest.find("] ")
+        {
+            return rest[end + 2..].trim_start();
         }
         line
     }
