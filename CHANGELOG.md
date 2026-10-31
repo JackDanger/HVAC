@@ -10,6 +10,25 @@ it becomes the new version section and a fresh `Unreleased` is opened.
 
 ## [Unreleased]
 
+### Fixed
+- **An encode could replace an original without shrinking it.** The only guard
+  was capping ffmpeg's peak bitrate at the source's, which does not stop a
+  low-bitrate source from coming out larger. Every mode now refuses an output
+  that is not strictly smaller than its source: the output is deleted, the
+  original is untouched, and the file is reported as kept, not failed or retried.
+- **In-place encodes left a `.hvac.complete` file beside every original.**
+  Nothing reads a marker there (resume reads the one beside a `.transcoded.*`
+  copy), so in-place and `--replace` no longer write it.
+- **In-place encodes of `.avi`, `.mp4`, `.vob` and `.m2ts` kept the old name
+  over Matroska data.** The result now takes the container's extension
+  (`Film.avi` → `Film.mkv`), never clobbering an existing file of that name,
+  and the original is removed only after the new file is in place.
+- **Streams inside `BDMV/` and `VIDEO_TS/` folders were re-encoded in place,**
+  breaking the disc structure they belong to. They are no longer scanned.
+- **In-place mode encoded disc images while keeping them,** growing the
+  library by the extracted feature. A disc image can't be shrunk in place, so
+  in-place mode now leaves it alone; `--no-overwrite` still extracts its feature.
+
 ## [5.4.2] — 2026-10-13
 
 ### Fixed
